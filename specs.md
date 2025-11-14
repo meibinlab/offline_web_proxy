@@ -1158,6 +1158,12 @@ class WarmupResult {
   final List<WarmupEntry> entries; // 各パスの詳細結果
 }
 
+/// Warmup進捗コールバック関数の型定義
+typedef WarmupProgressCallback = void Function(int completed, int total);
+
+/// Warmupエラーコールバック関数の型定義
+typedef WarmupErrorCallback = void Function(String path, String error);
+
 class WarmupEntry {
   final String path; // 更新対象のパス
   final bool success; // 更新成功の可否
@@ -1184,6 +1190,7 @@ class ProxyConfig {
   final List<int> retryBackoffSeconds; // 再試行バックオフ間隔
   final bool enableAdminApi; // 管理API有効化（開発時のみ）
   final String logLevel; // ログレベル（"debug", "info", "warn", "error"）
+  final List<String> startupPaths; // 起動時キャッシュ更新パス
 }
 ```
 
@@ -1262,6 +1269,12 @@ class QueueOperationException implements Exception {
 
 // 統計情報取得失敗
 class StatsOperationException implements Exception {
+  final String message;
+  final Exception? cause;
+}
+
+// ネットワークエラー
+class NetworkException implements Exception {
   final String message;
   final Exception? cause;
 }
