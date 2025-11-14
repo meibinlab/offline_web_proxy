@@ -129,11 +129,15 @@ void main() {
       int cacheListCount = 0;
 
       for (final result in results) {
-        if (result is ProxyStats)
+        if (result is ProxyStats) {
           statsCount++;
-        else if (result is CacheStats)
+        }
+        else if (result is CacheStats) {
           cacheStatsCount++;
-        else if (result is List<CacheEntry>) cacheListCount++;
+        }
+        else if (result is List<CacheEntry>) {
+          cacheListCount++;
+        }
       }
 
       expect(statsCount, equals(50));

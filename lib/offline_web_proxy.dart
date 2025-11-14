@@ -46,7 +46,7 @@
 ///
 /// See [ProxyConfig] for configuration options and [specs.md](https://github.com/meibinlab/offline_web_proxy/blob/main/specs.md)
 /// for detailed technical specifications.
-library offline_web_proxy;
+library;
 
 import 'dart:async';
 import 'dart:collection';

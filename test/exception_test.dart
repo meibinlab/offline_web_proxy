@@ -30,7 +30,7 @@ void main() {
 
     /// 非常に長いURLでのテスト
     test('should handle very long URLs', () async {
-      final longUrl = 'https://example.com/' + 'a' * 10000;
+      final longUrl = 'https://example.com/${'a' * 10000}';
       await proxy.clearCacheForUrl(longUrl);
     });
 
@@ -396,9 +396,9 @@ void main() {
     test('should handle extremely long URLs', () async {
       final baseUrl = 'https://example.com/';
       final veryLongPath = 'path/' * 1000; // 非常に長いパス
-      final longQuery = 'param=' + 'value' * 1000; // 非常に長いクエリ
+      final longQuery = 'param=${'value' * 1000}'; // 非常に長いクエリ
 
-      final extremelyLongUrl = baseUrl + veryLongPath + '?' + longQuery;
+      final extremelyLongUrl = '$baseUrl$veryLongPath?$longQuery';
 
       // 長いURLでもクラッシュしないことを確認
       await proxy.clearCacheForUrl(extremelyLongUrl);
