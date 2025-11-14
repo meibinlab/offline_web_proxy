@@ -12,8 +12,6 @@ topics:
   - webview
   - flutter
   - cache
-  - mobile-app
-  - http-server
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
