@@ -1,5 +1,10 @@
 # offline_web_proxy
 
+[![CI/CDパイプライン](https://github.com/meibinlab/offline_web_proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/meibinlab/offline_web_proxy/actions/workflows/ci.yml)
+[![Pubバージョン](https://img.shields.io/pub/v/offline_web_proxy.svg)](https://pub.dev/packages/offline_web_proxy)
+[![ライセンス](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![カバレッジ](https://codecov.io/gh/meibinlab/offline_web_proxy/branch/main/graph/badge.svg)](https://codecov.io/gh/meibinlab/offline_web_proxy)
+
 Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。既存のWebシステムをアプリ化する際に、オンライン／オフラインを意識せずに動作させることを目的とします。
 
 ## 特徴

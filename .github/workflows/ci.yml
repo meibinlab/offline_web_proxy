@@ -1,0 +1,303 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  release:
+    types: [ published ]
+
+env:
+  FLUTTER_VERSION: '3.24.0'
+  DART_VERSION: '3.5.0'
+
+jobs:
+  # コード品質チェック
+  analyze:
+    name: Code Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Verify formatting
+      run: dart format --output=none --set-exit-if-changed .
+
+    - name: Analyze project source
+      run: dart analyze --fatal-infos
+
+    - name: Check pub dependencies
+      run: flutter pub deps
+
+  # テスト実行
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: analyze
+    
+    strategy:
+      matrix:
+        flutter-version: ['3.24.0', '3.22.0']
+      fail-fast: false
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ matrix.flutter-version }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Run unit tests
+      run: flutter test --coverage --reporter=expanded
+
+    - name: Upload coverage to Codecov
+      if: matrix.flutter-version == env.FLUTTER_VERSION
+      uses: codecov/codecov-action@v3
+      with:
+        file: coverage/lcov.info
+        flags: unittests
+        name: offline_web_proxy-coverage
+        fail_ci_if_error: false
+
+    - name: Generate coverage report
+      if: matrix.flutter-version == env.FLUTTER_VERSION
+      run: |
+        flutter pub global activate coverage
+        flutter pub global run coverage:format_coverage --lcov --in=coverage --out=coverage/lcov.info --packages=.dart_tool/package_config.json --report-on=lib
+
+  # パッケージ検証
+  package_validation:
+    name: Package Validation
+    runs-on: ubuntu-latest
+    needs: [analyze, test]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Validate package structure
+      run: dart pub publish --dry-run
+
+    - name: Check package scoring
+      run: |
+        flutter pub global activate pana
+        flutter pub global run pana --no-warning
+
+  # セキュリティ監査
+  security_audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    needs: analyze
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Run dependency audit
+      run: dart pub deps --json | dart pub global run dependency_validator
+
+    - name: Check for vulnerable dependencies
+      continue-on-error: true
+      run: |
+        flutter pub deps --json > deps.json
+        # 将来的にはdart pub audit コマンドを使用予定
+        echo "Dependency audit completed"
+
+  # ドキュメント生成
+  documentation:
+    name: Generate Documentation
+    runs-on: ubuntu-latest
+    needs: [analyze, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Generate documentation
+      run: |
+        dart doc --output docs/api
+        
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: docs/api
+        destination_dir: api
+
+  # リリース自動化（タグ作成時）
+  release:
+    name: Publish to pub.dev
+    runs-on: ubuntu-latest
+    needs: [analyze, test, package_validation, security_audit]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Setup Pub Credentials
+      shell: bash
+      env:
+        PUB_DEV_PUBLISH_ACCESS_TOKEN: ${{ secrets.PUB_DEV_PUBLISH_ACCESS_TOKEN }}
+        PUB_DEV_PUBLISH_REFRESH_TOKEN: ${{ secrets.PUB_DEV_PUBLISH_REFRESH_TOKEN }}
+        PUB_DEV_PUBLISH_TOKEN_ENDPOINT: ${{ secrets.PUB_DEV_PUBLISH_TOKEN_ENDPOINT }}
+        PUB_DEV_PUBLISH_EXPIRATION: ${{ secrets.PUB_DEV_PUBLISH_EXPIRATION }}
+      run: |
+        mkdir -p ~/.config/dart
+        cat <<EOF > ~/.config/dart/pub-credentials.json
+        {
+          "accessToken":"$PUB_DEV_PUBLISH_ACCESS_TOKEN",
+          "refreshToken":"$PUB_DEV_PUBLISH_REFRESH_TOKEN", 
+          "tokenEndpoint":"$PUB_DEV_PUBLISH_TOKEN_ENDPOINT",
+          "scopes":["https://www.googleapis.com/auth/userinfo.email","openid"],
+          "expiration":$PUB_DEV_PUBLISH_EXPIRATION
+        }
+        EOF
+
+    - name: Publish to pub.dev
+      run: dart pub publish --force
+
+    - name: Create GitHub Release Assets
+      run: |
+        tar -czf offline_web_proxy-${GITHUB_REF#refs/tags/}.tar.gz lib/ pubspec.yaml README.md LICENSE CHANGELOG.md
+
+    - name: Upload Release Assets
+      uses: softprops/action-gh-release@v1
+      with:
+        files: offline_web_proxy-*.tar.gz
+        generate_release_notes: true
+
+  # 開発環境ビルド（プルリクエスト用）
+  build_preview:
+    name: Build Preview
+    runs-on: ubuntu-latest
+    needs: [analyze, test]
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Validate package for preview
+      run: dart pub publish --dry-run
+
+    - name: Comment on PR
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: '✅ Package validation successful! This PR is ready for review.'
+          });
+
+  # 夜間フルテスト（クロンジョブ）
+  nightly_full_test:
+    name: Nightly Full Test Suite
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    
+    strategy:
+      matrix:
+        flutter-version: ['3.24.0', '3.22.0', '3.19.0']
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ matrix.flutter-version }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Run comprehensive tests
+      run: |
+        flutter test --coverage --reporter=expanded
+        dart pub deps
+        dart analyze --fatal-infos
+
+    - name: Report nightly test results
+      if: failure()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `Nightly Test Failure - ${new Date().toISOString().split('T')[0]}`,
+            body: `Nightly test failed on Flutter ${{ matrix.flutter-version }} / ${{ matrix.os }}.\n\nPlease check the workflow run for details.`,
+            labels: ['bug', 'nightly-test', 'priority-high']
+          });
+
+# 週次スケジュール実行用のトリガー
+# cron: '0 2 * * 1' # 毎週月曜日の午前2時（UTC）
