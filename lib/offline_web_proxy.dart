@@ -260,8 +260,8 @@ class OfflineWebProxy {
   ///   * [ArgumentError] 無効なURLが指定された場合。
   ///   * [CacheOperationException] キャッシュ削除に失敗した場合。
   Future<void> clearCacheForUrl(String url) async {
-    if (url.isEmpty) {
-      throw ArgumentError('URL cannot be empty');
+    if (url.isEmpty || url.trim().isEmpty) {
+      throw ArgumentError('URL cannot be empty or whitespace-only');
     }
     
     try {
