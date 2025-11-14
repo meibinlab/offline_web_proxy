@@ -13,7 +13,7 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 - **ベース技術**: shelf（Dart の軽量 HTTP サーバフレームワーク）, shelf_router（ルーティング）, shelf_proxy（プロキシ機能）
 - **通信経路**: WebView → http://127.0.0.1:<port> → (proxy) → 上流サーバ
-- **データ永続化**: SQLite を使用したローカルストレージ
+- **データ永続化**: Hive を使用したローカルストレージ
 - **Cache-Control 対応**: RFC 準拠のキャッシュ制御とオフライン対応の両立
 
 ### データ処理戦略
@@ -131,7 +131,7 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 ### キュー管理
 
 - **FIFO 保証**: リクエストの順序を厳密に保持。データ整合性を維持
-- **永続化**: SQLite でキュー状態を保存。アプリ再起動後も再送を継続
+- **永続化**: Hive でキュー状態を保存。アプリ再起動後も再送を継続
 
 ### 再試行戦略
 
@@ -166,7 +166,7 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 ### 保持期間
 
 - **24 時間**: べき等性キーを 24 時間保持。期限切れ後は新規リクエストとして処理
-- **ストレージ**: SQLite で永続化。アプリ再起動後も有効
+- **ストレージ**: Hive で永続化。アプリ再起動後も有効
 
 ## 【7】レスポンス圧縮
 
@@ -292,7 +292,7 @@ X_ORIGINAL_URL: https://example.com/page
 
 #### キャッシュ インデックス
 
-- **SQLite インデックス**: URL、有効期限、ファイルサイズ等でインデックス化
+- **Hive インデックス**: URL、有効期限、ファイルサイズ等でインデックス化
 - **メタデータキャッシュ**: よくアクセスされるメタデータをメモリ上に保持
 - **遅延読み込み**: 必要な場合のみボディ部を読み込み
 
@@ -317,7 +317,7 @@ cache/
 │   │   └── ef9876543210abcd...cache       # 他のキャッシュ
 │   └── gh/
 │       └── ij5678901234cdef...cache
-└── index.sqlite                           # キャッシュインデックス
+└── index.hive                             # キャッシュインデックス
 ```
 
 #### URL ハッシュ化
@@ -1047,102 +1047,233 @@ proxy.events.listen((event) {
 
 #### `CacheEntry`
 
+キャッシュエントリの情報を表すクラス。
+
 ```dart
 class CacheEntry {
-  final String url;
-  final int statusCode;
-  final String contentType;
-  final DateTime createdAt;
-  final DateTime expiresAt;
-  final CacheStatus status; // fresh, stale, expired
-  final int sizeBytes;
+  final String url; // キャッシュされたリソースの元URL
+  final int statusCode; // HTTPステータスコード（200, 404等）
+  final String contentType; // Content-Typeヘッダの値
+  final DateTime createdAt; // キャッシュ作成日時
+  final DateTime expiresAt; // キャッシュ有効期限
+  final CacheStatus status; // キャッシュ状態（fresh, stale, expired）
+  final int sizeBytes; // キャッシュファイルのサイズ（バイト）
+}
+
+enum CacheStatus {
+  fresh, // TTL期限内で使用可能
+  stale, // TTL期限切れだがStale期間内
+  expired // Stale期間も超過、削除対象
 }
 ```
 
 #### `CookieInfo`
 
+保存されているCookieの情報を表すクラス（値はセキュリティ上マスクされる）。
+
 ```dart
 class CookieInfo {
-  final String name;
-  final String value; // マスクされた値
-  final String domain;
-  final String path;
-  final DateTime? expires;
-  final bool secure;
-  final String? sameSite;
+  final String name; // Cookie名
+  final String value; // Cookie値（セキュリティ上"***"でマスク）
+  final String domain; // 有効ドメイン
+  final String path; // 有効パス
+  final DateTime? expires; // 有効期限（null=セッションCookie）
+  final bool secure; // Secure属性の有無
+  final String? sameSite; // SameSite属性（"Strict", "Lax", "None"）
 }
 ```
 
 #### `QueuedRequest`
 
+オフライン時にキューイングされたリクエストの情報を表すクラス。
+
 ```dart
 class QueuedRequest {
-  final String url;
-  final String method;
-  final Map<String, String> headers;
-  final DateTime queuedAt;
-  final int retryCount;
-  final DateTime nextRetryAt;
+  final String url; // リクエストURL
+  final String method; // HTTPメソッド（POST, PUT, DELETE等）
+  final Map<String, String> headers; // リクエストヘッダ（機密情報はマスク済み）
+  final DateTime queuedAt; // キューイング日時
+  final int retryCount; // 現在の再試行回数
+  final DateTime nextRetryAt; // 次回再試行予定日時
 }
 ```
 
 #### `DroppedRequest`
 
+エラーによりキューからドロップされたリクエストの履歴を表すクラス。
+
 ```dart
 class DroppedRequest {
-  final String url;
-  final String method;
-  final DateTime droppedAt;
-  final String dropReason;
-  final int statusCode;
-  final String errorMessage;
+  final String url; // ドロップされたリクエストのURL
+  final String method; // HTTPメソッド
+  final DateTime droppedAt; // ドロップされた日時
+  final String dropReason; // ドロップ理由（"4xx_error", "5xx_error", "network_timeout"等）
+  final int statusCode; // エラー時のHTTPステータスコード
+  final String errorMessage; // 詳細なエラーメッセージ
 }
 ```
 
 #### `ProxyStats`
 
+プロキシサーバ全体の統計情報を表すクラス。
+
 ```dart
 class ProxyStats {
-  final int totalRequests;
-  final int cacheHits;
-  final int cacheMisses;
-  final double cacheHitRate;
-  final int queueLength;
-  final int droppedRequestsCount;
-  final DateTime startedAt;
-  final Duration uptime;
+  final int totalRequests; // 総リクエスト数（起動からの累計）
+  final int cacheHits; // キャッシュヒット数
+  final int cacheMisses; // キャッシュミス数
+  final double cacheHitRate; // キャッシュヒット率（0.0～1.0）
+  final int queueLength; // 現在のキュー長
+  final int droppedRequestsCount; // ドロップされたリクエスト数
+  final DateTime startedAt; // プロキシサーバ開始日時
+  final Duration uptime; // 稼働時間
 }
 ```
 
 #### `CacheStats`
 
+キャッシュシステム固有の統計情報を表すクラス。
+
 ```dart
 class CacheStats {
-  final int totalEntries;
-  final int freshEntries;
-  final int staleEntries;
-  final int expiredEntries;
-  final int totalSize;
-  final double hitRate;
-  final double staleUsageRate;
+  final int totalEntries; // 総キャッシュエントリ数
+  final int freshEntries; // Fresh状態のエントリ数
+  final int staleEntries; // Stale状態のエントリ数
+  final int expiredEntries; // Expired状態のエントリ数
+  final int totalSize; // 総キャッシュサイズ（バイト）
+  final double hitRate; // キャッシュヒット率（0.0～1.0）
+  final double staleUsageRate; // Staleキャッシュ使用率（オフライン対応の指標）
 }
 ```
 
 #### `WarmupResult`
 
+キャッシュ事前更新（Warmup）処理の結果を表すクラス。
+
 ```dart
 class WarmupResult {
-  final int successCount;
-  final int failureCount;
-  final Duration totalDuration;
-  final List<WarmupEntry> entries;
+  final int successCount; // 成功した更新数
+  final int failureCount; // 失敗した更新数
+  final Duration totalDuration; // 処理全体にかかった時間
+  final List<WarmupEntry> entries; // 各パスの詳細結果
 }
 
 class WarmupEntry {
-  final String path;
-  final bool success;
-  final int? statusCode;
-  final String? errorMessage;
-  final Duration duration;
+  final String path; // 更新対象のパス
+  final bool success; // 更新成功の可否
+  final int? statusCode; // HTTPステータスコード（成功時のみ）
+  final String? errorMessage; // エラーメッセージ（失敗時のみ）
+  final Duration duration; // この処理にかかった時間
+}
+```
+
+#### `ProxyConfig`
+
+プロキシサーバの設定を表すクラス。
+
+```dart
+class ProxyConfig {
+  final String origin; // 上流サーバのURL（必須）
+  final String host; // バインドするホスト（デフォルト: "127.0.0.1"）
+  final int port; // バインドするポート（0=自動割当）
+  final int cacheMaxSize; // キャッシュ最大容量（バイト）
+  final Map<String, int> cacheTtl; // Content-Type別TTL設定（秒）
+  final Map<String, int> cacheStale; // Content-Type別Stale期間設定（秒）
+  final Duration connectTimeout; // 接続タイムアウト
+  final Duration requestTimeout; // リクエストタイムアウト
+  final List<int> retryBackoffSeconds; // 再試行バックオフ間隔
+  final bool enableAdminApi; // 管理API有効化（開発時のみ）
+  final String logLevel; // ログレベル（"debug", "info", "warn", "error"）
+  
+  // ファクトリコンストラクタ
+  factory ProxyConfig.fromYaml(String yamlContent);
+  factory ProxyConfig.fromFile(String filePath);
+}
+```
+
+#### `ProxyEvent`
+
+プロキシサーバのイベント情報を表すクラス（リアルタイム監視用）。
+
+```dart
+class ProxyEvent {
+  final ProxyEventType type; // イベントタイプ
+  final String url; // 関連するURL
+  final DateTime timestamp; // イベント発生日時
+  final Map<String, dynamic> data; // 追加情報
+}
+
+enum ProxyEventType {
+  serverStarted, // サーバ開始
+  serverStopped, // サーバ停止
+  requestReceived, // リクエスト受信
+  cacheHit, // キャッシュヒット
+  cacheMiss, // キャッシュミス
+  cacheStaleUsed, // Staleキャッシュ使用
+  requestQueued, // リクエストキューイング
+  queueDrained, // キュー送信完了
+  requestDropped, // リクエストドロップ
+  networkOnline, // ネットワーク復旧
+  networkOffline, // ネットワーク切断
+  cacheCleared, // キャッシュクリア
+  errorOccurred // エラー発生
+}
+```
+
+#### 例外クラス
+
+プロキシ操作で発生する可能性のある例外クラス。
+
+```dart
+// プロキシサーバ起動失敗
+class ProxyStartException implements Exception {
+  final String message;
+  final Exception? cause;
+}
+
+// プロキシサーバ停止失敗
+class ProxyStopException implements Exception {
+  final String message;
+  final Exception? cause;
+}
+
+// ポートバインド失敗
+class PortBindException implements Exception {
+  final int port;
+  final String message;
+}
+
+// キャッシュ操作失敗
+class CacheOperationException implements Exception {
+  final String operation; // "clear", "get", "put"等
+  final String message;
+  final Exception? cause;
+}
+
+// Cookie操作失敗
+class CookieOperationException implements Exception {
+  final String operation; // "get", "clear", "save"等
+  final String message;
+  final Exception? cause;
+}
+
+// キュー操作失敗
+class QueueOperationException implements Exception {
+  final String operation; // "get", "clear", "add"等
+  final String message;
+  final Exception? cause;
+}
+
+// 統計情報取得失敗
+class StatsOperationException implements Exception {
+  final String message;
+  final Exception? cause;
+}
+
+// Warmup処理失敗
+class WarmupException implements Exception {
+  final String message;
+  final List<WarmupEntry> partialResults; // 部分的に成功した結果
+  final Exception? cause;
 }
 ```
