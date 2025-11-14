@@ -1,7 +1,7 @@
 name: offline_web_proxy
-description: "Local offline-first proxy server for Flutter WebView."
-version: 0.0.1
-publish_to: "none"
+description: "Flutter WebView用オフライン対応ローカルプロキシサーバ。既存Webシステムのアプリ化時にオフライン/オンラインを意識せずに動作させるための軽量プロキシサーバを提供します。"
+version: 0.1.0
+publish_to: "none"  # pub.devへの公開を無効化
 homepage:
 
 environment:
@@ -10,6 +10,7 @@ environment:
 
 dependencies:
   connectivity_plus: ^7.0.0
+  crypto: ^3.0.3
   flutter:
     sdk: flutter
   hive: ^2.2.3

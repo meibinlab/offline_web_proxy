@@ -1184,10 +1184,6 @@ class ProxyConfig {
   final List<int> retryBackoffSeconds; // 再試行バックオフ間隔
   final bool enableAdminApi; // 管理API有効化（開発時のみ）
   final String logLevel; // ログレベル（"debug", "info", "warn", "error"）
-  
-  // ファクトリコンストラクタ
-  factory ProxyConfig.fromYaml(String yamlContent);
-  factory ProxyConfig.fromFile(String filePath);
 }
 ```
 
