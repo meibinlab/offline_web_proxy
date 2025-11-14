@@ -8,7 +8,7 @@
 ///
 /// All exceptions follow a consistent pattern:
 /// * Descriptive error messages
-/// * Optional root cause exceptions for debugging  
+/// * Optional root cause exceptions for debugging
 /// * Context-specific information (operation type, port numbers, etc.)
 /// * Meaningful `toString()` implementations
 ///
@@ -28,7 +28,9 @@
 /// ```
 library;
 
-import '../models/warmup_result.dart';/// Exception thrown when proxy server fails to start.
+import '../models/warmup_result.dart';
+
+/// Exception thrown when proxy server fails to start.
 ///
 /// This exception indicates that the proxy server could not be initialized
 /// or started properly. Common causes include port binding failures,

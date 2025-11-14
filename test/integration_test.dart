@@ -131,11 +131,9 @@ void main() {
       for (final result in results) {
         if (result is ProxyStats) {
           statsCount++;
-        }
-        else if (result is CacheStats) {
+        } else if (result is CacheStats) {
           cacheStatsCount++;
-        }
-        else if (result is List<CacheEntry>) {
+        } else if (result is List<CacheEntry>) {
           cacheListCount++;
         }
       }
