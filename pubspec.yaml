@@ -1,8 +1,19 @@
 name: offline_web_proxy
-description: "Flutter WebView用オフライン対応ローカルプロキシサーバ。既存Webシステムのアプリ化時にオフライン/オンラインを意識せずに動作させるための軽量プロキシサーバを提供します。"
+description: "Offline-capable local proxy server for Flutter WebView. Provides seamless online/offline operation when converting existing web systems to mobile apps."
 version: 0.1.0
-publish_to: "none"  # pub.devへの公開を無効化
-homepage:
+repository: https://github.com/meibinlab/offline_web_proxy
+homepage: https://github.com/meibinlab/offline_web_proxy
+issue_tracker: https://github.com/meibinlab/offline_web_proxy/issues
+documentation: https://github.com/meibinlab/offline_web_proxy/blob/main/README.md
+
+topics:
+  - proxy
+  - offline
+  - webview
+  - flutter
+  - cache
+  - mobile-app
+  - http-server
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
