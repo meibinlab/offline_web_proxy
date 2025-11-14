@@ -36,10 +36,10 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
   String _responseData = 'No data yet';
   bool _isProxyRunning = false;
   ProxyStats? _stats;
-  
+
   final List<String> _apiEndpoints = [
     '/posts/1',
-    '/posts/2', 
+    '/posts/2',
     '/users/1',
     '/comments?postId=1',
   ];
@@ -67,7 +67,7 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
       );
 
       final port = await _proxy.start(config: config);
-      
+
       setState(() {
         _proxyUrl = 'localhost:$port';
         _isProxyRunning = true;
@@ -75,7 +75,6 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
 
       // Update stats periodically
       _updateStatsLoop();
-      
     } catch (e) {
       setState(() {
         _responseData = 'Failed to start proxy: $e';
@@ -106,7 +105,8 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
       });
 
       // Make request through the proxy
-      final proxyBaseUrl = _proxyUrl.replaceAll('http://', '').replaceAll('https://', '');
+      final proxyBaseUrl =
+          _proxyUrl.replaceAll('http://', '').replaceAll('https://', '');
       final response = await http.get(
         Uri.parse('http://$proxyBaseUrl$endpoint'),
         headers: {'Accept': 'application/json'},
@@ -115,13 +115,15 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final prettyJson = const JsonEncoder.withIndent('  ').convert(data);
-        
+
         setState(() {
-          _responseData = 'Success! Status: ${response.statusCode}\n\n$prettyJson';
+          _responseData =
+              'Success! Status: ${response.statusCode}\n\n$prettyJson';
         });
       } else {
         setState(() {
-          _responseData = 'Error: HTTP ${response.statusCode}\n${response.body}';
+          _responseData =
+              'Error: HTTP ${response.statusCode}\n${response.body}';
         });
       }
     } catch (e) {
@@ -181,36 +183,39 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
                       const SizedBox(height: 8),
                       Text('Total Requests: ${_stats!.totalRequests}'),
                       Text('Cache Hits: ${_stats!.cacheHits}'),
-                      Text('Cache Hit Rate: ${(_stats!.cacheHitRate * 100).toStringAsFixed(1)}%'),
+                      Text(
+                          'Cache Hit Rate: ${(_stats!.cacheHitRate * 100).toStringAsFixed(1)}%'),
                       Text('Queue Length: ${_stats!.queueLength}'),
-                      Text('Uptime: ${_stats!.uptime.toString().split('.')[0]}'),
+                      Text(
+                          'Uptime: ${_stats!.uptime.toString().split('.')[0]}'),
                     ],
                   ],
                 ),
               ),
             ),
-            
+
             const SizedBox(height: 16),
-            
+
             // API Endpoints
             Text(
               'Test API Endpoints',
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            
+
             Wrap(
               spacing: 8,
               children: _apiEndpoints.map((endpoint) {
                 return ElevatedButton(
-                  onPressed: _isProxyRunning ? () => _makeRequest(endpoint) : null,
+                  onPressed:
+                      _isProxyRunning ? () => _makeRequest(endpoint) : null,
                   child: Text(endpoint),
                 );
               }).toList(),
             ),
-            
+
             const SizedBox(height: 16),
-            
+
             // Cache Controls
             Row(
               children: [
@@ -221,15 +226,16 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
                 ),
                 const SizedBox(width: 8),
                 ElevatedButton.icon(
-                  onPressed: _isProxyRunning ? () => _makeRequest('/posts') : null,
+                  onPressed:
+                      _isProxyRunning ? () => _makeRequest('/posts') : null,
                   icon: const Icon(Icons.refresh),
                   label: const Text('Fetch Posts'),
                 ),
               ],
             ),
-            
+
             const SizedBox(height: 16),
-            
+
             // Response Display
             Expanded(
               child: Card(

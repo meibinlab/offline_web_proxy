@@ -2,13 +2,13 @@
 class WarmupResult {
   /// 成功した更新数
   final int successCount;
-  
+
   /// 失敗した更新数
   final int failureCount;
-  
+
   /// 処理全体にかかった時間
   final Duration totalDuration;
-  
+
   /// 各パスの詳細結果
   final List<WarmupEntry> entries;
 
@@ -29,16 +29,16 @@ class WarmupResult {
 class WarmupEntry {
   /// 更新対象のパス
   final String path;
-  
+
   /// 更新成功の可否
   final bool success;
-  
+
   /// HTTPステータスコード（成功時のみ）
   final int? statusCode;
-  
+
   /// エラーメッセージ（失敗時のみ）
   final String? errorMessage;
-  
+
   /// この処理にかかった時間
   final Duration duration;
 

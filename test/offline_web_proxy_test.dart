@@ -121,7 +121,7 @@ void main() {
     /// デフォルト設定のテスト
     test('should create config with default values', () {
       const config = ProxyConfig(origin: 'https://example.com');
-      
+
       expect(config.origin, equals('https://example.com'));
       expect(config.host, equals('127.0.0.1'));
       expect(config.port, equals(0));
@@ -146,7 +146,7 @@ void main() {
         logLevel: 'debug',
         startupPaths: ['/config', '/health'],
       );
-      
+
       expect(config.origin, equals('https://api.test.com'));
       expect(config.host, equals('0.0.0.0'));
       expect(config.port, equals(8080));
@@ -162,7 +162,7 @@ void main() {
     /// TTL設定のテスト
     test('should have correct default TTL settings', () {
       const config = ProxyConfig(origin: 'https://example.com');
-      
+
       expect(config.cacheTtl['text/html'], equals(3600));
       expect(config.cacheTtl['text/css'], equals(86400));
       expect(config.cacheTtl['application/javascript'], equals(86400));
@@ -173,7 +173,7 @@ void main() {
     /// Stale期間設定のテスト
     test('should have correct default stale settings', () {
       const config = ProxyConfig(origin: 'https://example.com');
-      
+
       expect(config.cacheStale['text/html'], equals(86400));
       expect(config.cacheStale['text/css'], equals(604800));
       expect(config.cacheStale['image/*'], equals(2592000));
@@ -183,7 +183,7 @@ void main() {
     /// バックオフ設定のテスト
     test('should have correct default backoff settings', () {
       const config = ProxyConfig(origin: 'https://example.com');
-      
+
       expect(config.retryBackoffSeconds, equals([1, 2, 5, 10, 20, 30]));
     });
 
@@ -194,7 +194,7 @@ void main() {
         host: '127.0.0.1',
         port: 8080,
       );
-      
+
       expect(config.toString(), contains('https://example.com'));
       expect(config.toString(), contains('127.0.0.1'));
       expect(config.toString(), contains('8080'));
@@ -213,7 +213,7 @@ void main() {
         status: CacheStatus.fresh,
         sizeBytes: 1024,
       );
-      
+
       expect(entry.url, equals('https://example.com/test'));
       expect(entry.statusCode, equals(200));
       expect(entry.contentType, equals('text/html'));
@@ -232,7 +232,7 @@ void main() {
         secure: true,
         sameSite: 'Lax',
       );
-      
+
       expect(cookie.name, equals('session_id'));
       expect(cookie.value, equals('***'));
       expect(cookie.domain, equals('example.com'));
@@ -251,7 +251,7 @@ void main() {
         retryCount: 0,
         nextRetryAt: DateTime.now().add(Duration(seconds: 1)),
       );
-      
+
       expect(request.url, equals('https://api.example.com/data'));
       expect(request.method, equals('POST'));
       expect(request.headers['Content-Type'], equals('application/json'));
@@ -274,14 +274,14 @@ void main() {
           duration: Duration(milliseconds: 100),
         ),
       ];
-      
+
       final result = WarmupResult(
         successCount: 1,
         failureCount: 1,
         totalDuration: Duration(milliseconds: 600),
         entries: entries,
       );
-      
+
       expect(result.successCount, equals(1));
       expect(result.failureCount, equals(1));
       expect(result.totalDuration, equals(Duration(milliseconds: 600)));
@@ -298,7 +298,7 @@ void main() {
         timestamp: DateTime.now(),
         data: {'cached': true},
       );
-      
+
       expect(event.type, equals(ProxyEventType.cacheHit));
       expect(event.url, equals('https://example.com/page'));
       expect(event.data['cached'], isTrue);
@@ -316,7 +316,7 @@ void main() {
         startedAt: DateTime.now().subtract(Duration(hours: 1)),
         uptime: Duration(hours: 1),
       );
-      
+
       expect(stats.totalRequests, equals(100));
       expect(stats.cacheHits, equals(80));
       expect(stats.cacheMisses, equals(20));
@@ -337,7 +337,7 @@ void main() {
         hitRate: 0.85,
         staleUsageRate: 0.1,
       );
-      
+
       expect(stats.totalEntries, equals(50));
       expect(stats.freshEntries, equals(30));
       expect(stats.staleEntries, equals(15));
@@ -352,7 +352,7 @@ void main() {
     /// ProxyStartExceptionのテスト
     test('should create ProxyStartException correctly', () {
       const exception = ProxyStartException('Failed to start', null);
-      
+
       expect(exception.message, equals('Failed to start'));
       expect(exception.cause, isNull);
       expect(exception.toString(), contains('ProxyStartException'));
@@ -361,8 +361,9 @@ void main() {
 
     /// CacheOperationExceptionのテスト
     test('should create CacheOperationException correctly', () {
-      const exception = CacheOperationException('clear', 'Failed to clear cache', null);
-      
+      const exception =
+          CacheOperationException('clear', 'Failed to clear cache', null);
+
       expect(exception.operation, equals('clear'));
       expect(exception.message, equals('Failed to clear cache'));
       expect(exception.cause, isNull);
@@ -372,7 +373,7 @@ void main() {
     /// NetworkExceptionのテスト
     test('should create NetworkException correctly', () {
       const exception = NetworkException('Connection timeout', null);
-      
+
       expect(exception.message, equals('Connection timeout'));
       expect(exception.cause, isNull);
       expect(exception.toString(), contains('NetworkException'));
@@ -389,9 +390,9 @@ void main() {
           duration: Duration(milliseconds: 100),
         ),
       ];
-      
+
       final exception = WarmupException('Warmup failed', entries, null);
-      
+
       expect(exception.message, equals('Warmup failed'));
       expect(exception.partialResults, hasLength(1));
       expect(exception.cause, isNull);
@@ -416,7 +417,7 @@ void main() {
     /// 空のパスリストでのウォームアップテスト
     test('should handle warmup with empty paths', () async {
       final result = await proxy.warmupCache(paths: []);
-      
+
       expect(result.successCount, equals(0));
       expect(result.failureCount, equals(0));
       expect(result.entries, isEmpty);
@@ -426,7 +427,7 @@ void main() {
     test('should call progress callback during warmup', () async {
       var progressCalled = false;
       var errorCalled = false;
-      
+
       final result = await proxy.warmupCache(
         paths: ['/nonexistent'],
         onProgress: (completed, total) {
@@ -440,7 +441,7 @@ void main() {
           expect(error, isNotEmpty);
         },
       );
-      
+
       expect(progressCalled, isTrue);
       expect(errorCalled, isTrue);
       expect(result.failureCount, greaterThan(0));

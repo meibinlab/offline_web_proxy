@@ -11,7 +11,7 @@
 ///   origin: 'https://api.example.com',
 /// );
 ///
-/// // Advanced configuration  
+/// // Advanced configuration
 /// final advancedConfig = ProxyConfig(
 ///   origin: 'https://api.example.com',
 ///   port: 8080,                    // Fixed port instead of auto-assign
@@ -36,7 +36,7 @@ class ProxyConfig {
   ///
   /// Example: `'https://api.example.com'`
   final String origin;
-  
+
   /// The host address to bind the proxy server to.
   ///
   /// For security reasons, defaults to `'127.0.0.1'` (localhost only).
@@ -44,7 +44,7 @@ class ProxyConfig {
   ///
   /// **Default**: `'127.0.0.1'`
   final String host;
-  
+
   /// The port number for the proxy server to listen on.
   ///
   /// * `0` (default): Automatically assign an available port
@@ -52,7 +52,7 @@ class ProxyConfig {
   ///
   /// **Default**: `0` (auto-assign)
   final int port;
-  
+
   /// Maximum size of the cache storage in bytes.
   ///
   /// When cache exceeds this limit, oldest entries are removed (LRU eviction).
@@ -60,7 +60,7 @@ class ProxyConfig {
   ///
   /// **Default**: `200 * 1024 * 1024` (200 MB)
   final int cacheMaxSize;
-  
+
   /// Time-to-live (TTL) settings per content type in seconds.
   ///
   /// Controls how long different types of content remain "fresh" in cache.
@@ -72,19 +72,19 @@ class ProxyConfig {
   ///
   /// **Default TTL Values**:
   /// * `'text/html'`: 3600 (1 hour)
-  /// * `'text/css'`: 86400 (24 hours) 
+  /// * `'text/css'`: 86400 (24 hours)
   /// * `'application/javascript'`: 86400 (24 hours)
   /// * `'image/*'`: 604800 (7 days)
   /// * `'default'`: 86400 (24 hours)
   final Map<String, int> cacheTtl;
-  
+
   /// Stale period settings per content type in seconds.
   ///
   /// After TTL expires, content enters "stale" period where it can still
   /// be served offline or as fallback. Beyond stale period, content is
   /// considered expired and will be removed during cleanup.
   ///
-  /// **Key Format**: MIME type pattern (`'image/*'`) or `'default'`  
+  /// **Key Format**: MIME type pattern (`'image/*'`) or `'default'`
   /// **Value**: Additional seconds after TTL before content expires
   ///
   /// **Default Stale Periods**:
@@ -93,7 +93,7 @@ class ProxyConfig {
   /// * `'image/*'`: 2592000 (30 days)
   /// * `'default'`: 259200 (3 days)
   final Map<String, int> cacheStale;
-  
+
   /// Timeout for establishing TCP connections to upstream server.
   ///
   /// If connection cannot be established within this duration,
@@ -101,7 +101,7 @@ class ProxyConfig {
   ///
   /// **Default**: `Duration(seconds: 10)`
   final Duration connectTimeout;
-  
+
   /// Total timeout for completing HTTP requests to upstream server.
   ///
   /// Covers the entire request lifecycle from connection to response.
@@ -109,7 +109,7 @@ class ProxyConfig {
   ///
   /// **Default**: `Duration(seconds: 60)`
   final Duration requestTimeout;
-  
+
   /// Backoff intervals for retrying failed queued requests.
   ///
   /// When queued requests fail, they are retried with increasing delays
@@ -118,7 +118,7 @@ class ProxyConfig {
   ///
   /// **Default**: `[1, 2, 5, 10, 20, 30]` (seconds)
   final List<int> retryBackoffSeconds;
-  
+
   /// Enable administrative API endpoints for debugging.
   ///
   /// **Security Warning**: Only enable during development. Provides access
@@ -126,7 +126,7 @@ class ProxyConfig {
   ///
   /// **Default**: `false` (production safe)
   final bool enableAdminApi;
-  
+
   /// Logging verbosity level.
   ///
   /// Controls how much detail is logged during proxy operation:
@@ -137,7 +137,7 @@ class ProxyConfig {
   ///
   /// **Default**: `'info'`
   final String logLevel;
-  
+
   /// List of paths to warm up (pre-cache) during server startup.
   ///
   /// These paths will be requested from the upstream server when the proxy

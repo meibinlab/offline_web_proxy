@@ -2,19 +2,19 @@
 class DroppedRequest {
   /// ドロップされたリクエストのURL
   final String url;
-  
+
   /// HTTPメソッド
   final String method;
-  
+
   /// ドロップされた日時
   final DateTime droppedAt;
-  
+
   /// ドロップ理由（"4xx_error", "5xx_error", "network_timeout"等）
   final String dropReason;
-  
+
   /// エラー時のHTTPステータスコード
   final int statusCode;
-  
+
   /// 詳細なエラーメッセージ
   final String errorMessage;
 

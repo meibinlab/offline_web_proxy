@@ -8,7 +8,7 @@
 ///
 /// All exceptions follow a consistent pattern:
 /// * Descriptive error messages
-/// * Optional root cause exceptions for debugging  
+/// * Optional root cause exceptions for debugging
 /// * Context-specific information (operation type, port numbers, etc.)
 /// * Meaningful `toString()` implementations
 ///
@@ -32,13 +32,13 @@ import '../models/warmup_result.dart';
 /// Exception thrown when proxy server fails to start.
 ///
 /// This exception indicates that the proxy server could not be initialized
-/// or started properly. Common causes include port binding failures, 
+/// or started properly. Common causes include port binding failures,
 /// configuration errors, or system resource constraints.
 ///
 /// ## Common Scenarios
 ///
 /// * Invalid configuration parameters
-/// * Network interface binding failures  
+/// * Network interface binding failures
 /// * Insufficient system permissions
 /// * Resource allocation errors
 ///
@@ -57,20 +57,21 @@ import '../models/warmup_result.dart';
 class ProxyStartException implements Exception {
   /// Descriptive error message explaining the startup failure.
   final String message;
-  
+
   /// Optional underlying exception that caused this failure.
-  /// 
+  ///
   /// Useful for debugging the root cause of startup problems.
   final Exception? cause;
-  
+
   /// Creates a new proxy startup exception.
   ///
   /// [message] should describe what went wrong during startup.
   /// [cause] can provide the underlying system exception if available.
   const ProxyStartException(this.message, this.cause);
-  
+
   @override
-  String toString() => 'ProxyStartException: $message${cause != null ? ' (caused by: $cause)' : ''}';
+  String toString() =>
+      'ProxyStartException: $message${cause != null ? ' (caused by: $cause)' : ''}';
 }
 
 /// Exception thrown when proxy server fails to stop cleanly.
@@ -88,15 +89,16 @@ class ProxyStartException implements Exception {
 class ProxyStopException implements Exception {
   /// Error message describing the shutdown failure.
   final String message;
-  
+
   /// Optional underlying exception that prevented clean shutdown.
   final Exception? cause;
-  
+
   /// Creates a new proxy stop exception.
   const ProxyStopException(this.message, this.cause);
-  
+
   @override
-  String toString() => 'ProxyStopException: $message${cause != null ? ' (caused by: $cause)' : ''}';
+  String toString() =>
+      'ProxyStopException: $message${cause != null ? ' (caused by: $cause)' : ''}';
 }
 
 /// Exception thrown when unable to bind to the specified network port.
@@ -127,18 +129,19 @@ class ProxyStopException implements Exception {
 class PortBindException implements Exception {
   /// The port number that failed to bind.
   final int port;
-  
+
   /// Additional details about the binding failure.
   final String message;
-  
+
   /// Creates a new port binding exception.
   ///
   /// [port] is the port number that could not be bound.
   /// [message] provides additional context about the failure.
   const PortBindException(this.port, this.message);
-  
+
   @override
-  String toString() => 'PortBindException: Failed to bind port $port - $message';
+  String toString() =>
+      'PortBindException: Failed to bind port $port - $message';
 }
 
 /// Exception thrown when cache operations fail.
@@ -150,7 +153,7 @@ class PortBindException implements Exception {
 /// ## Common Operations
 ///
 /// * `'get'`: Reading cached content
-/// * `'put'`: Storing new content in cache  
+/// * `'put'`: Storing new content in cache
 /// * `'clear'`: Removing cached content
 /// * `'cleanup'`: Maintenance operations
 /// * `'stats'`: Statistics gathering
@@ -172,22 +175,23 @@ class CacheOperationException implements Exception {
   ///
   /// Common values: `'clear'`, `'get'`, `'put'`, `'cleanup'`, `'stats'`
   final String operation;
-  
+
   /// Detailed error message explaining the failure.
   final String message;
-  
+
   /// Optional underlying exception from the storage system.
   final Exception? cause;
-  
+
   /// Creates a new cache operation exception.
   ///
   /// [operation] should identify which cache operation failed.
   /// [message] should explain what went wrong.
   /// [cause] can provide the underlying storage exception if available.
   const CacheOperationException(this.operation, this.message, this.cause);
-  
+
   @override
-  String toString() => 'CacheOperationException[$operation]: $message${cause != null ? ' (caused by: $cause)' : ''}';
+  String toString() =>
+      'CacheOperationException[$operation]: $message${cause != null ? ' (caused by: $cause)' : ''}';
 }
 
 /// Exception thrown when cookie operations fail.
@@ -200,18 +204,19 @@ class CookieOperationException implements Exception {
   ///
   /// Common values: `'get'`, `'clear'`, `'save'`, `'parse'`
   final String operation;
-  
+
   /// Detailed error message explaining the cookie operation failure.
   final String message;
-  
+
   /// Optional underlying exception from the cookie storage system.
   final Exception? cause;
-  
+
   /// Creates a new cookie operation exception.
   const CookieOperationException(this.operation, this.message, this.cause);
-  
+
   @override
-  String toString() => 'CookieOperationException[$operation]: $message${cause != null ? ' (caused by: $cause)' : ''}';
+  String toString() =>
+      'CookieOperationException[$operation]: $message${cause != null ? ' (caused by: $cause)' : ''}';
 }
 
 /// Exception thrown when offline request queue operations fail.
@@ -236,18 +241,19 @@ class QueueOperationException implements Exception {
   ///
   /// Common values: `'get'`, `'clear'`, `'add'`, `'process'`, `'retry'`
   final String operation;
-  
+
   /// Detailed error message explaining the queue operation failure.
   final String message;
-  
+
   /// Optional underlying exception from the queue storage system.
   final Exception? cause;
-  
+
   /// Creates a new queue operation exception.
   const QueueOperationException(this.operation, this.message, this.cause);
-  
+
   @override
-  String toString() => 'QueueOperationException[$operation]: $message${cause != null ? ' (caused by: $cause)' : ''}';
+  String toString() =>
+      'QueueOperationException[$operation]: $message${cause != null ? ' (caused by: $cause)' : ''}';
 }
 
 /// Exception thrown when statistics collection or retrieval fails.
@@ -257,15 +263,16 @@ class QueueOperationException implements Exception {
 class StatsOperationException implements Exception {
   /// Error message describing the statistics operation failure.
   final String message;
-  
+
   /// Optional underlying exception from the statistics system.
   final Exception? cause;
-  
+
   /// Creates a new statistics operation exception.
   const StatsOperationException(this.message, this.cause);
-  
+
   @override
-  String toString() => 'StatsOperationException: $message${cause != null ? ' (caused by: $cause)' : ''}';
+  String toString() =>
+      'StatsOperationException: $message${cause != null ? ' (caused by: $cause)' : ''}';
 }
 
 /// Exception thrown when network operations fail.
@@ -276,7 +283,7 @@ class StatsOperationException implements Exception {
 /// ## Common Network Issues
 ///
 /// * Connection timeouts
-/// * DNS resolution failures  
+/// * DNS resolution failures
 /// * SSL/TLS certificate errors
 /// * HTTP protocol errors
 /// * Upstream server unavailability
@@ -294,15 +301,16 @@ class StatsOperationException implements Exception {
 class NetworkException implements Exception {
   /// Error message describing the network failure.
   final String message;
-  
+
   /// Optional underlying exception from the network layer.
   final Exception? cause;
-  
+
   /// Creates a new network exception.
   const NetworkException(this.message, this.cause);
-  
+
   @override
-  String toString() => 'NetworkException: $message${cause != null ? ' (caused by: $cause)' : ''}';
+  String toString() =>
+      'NetworkException: $message${cause != null ? ' (caused by: $cause)' : ''}';
 }
 
 /// Exception thrown when cache warmup operations fail.
@@ -319,7 +327,7 @@ class NetworkException implements Exception {
 /// } on WarmupException catch (e) {
 ///   print('Warmup failed: ${e.message}');
 ///   print('Successfully warmed ${e.partialResults.length} paths');
-///   
+///
 ///   // Continue with partial warmup results
 ///   for (final entry in e.partialResults) {
 ///     if (entry.success) {
@@ -331,23 +339,24 @@ class NetworkException implements Exception {
 class WarmupException implements Exception {
   /// Error message describing the warmup failure.
   final String message;
-  
+
   /// Results from paths that were successfully warmed up before the failure.
   ///
   /// This allows applications to benefit from partial warmup success
   /// even when the overall operation fails.
   final List<WarmupEntry> partialResults;
-  
+
   /// Optional underlying exception that caused the warmup failure.
   final Exception? cause;
-  
+
   /// Creates a new warmup exception.
   ///
   /// [message] should describe what went wrong during warmup.
   /// [partialResults] contains any successful warmup entries before failure.
   /// [cause] can provide the underlying network or cache exception if available.
   const WarmupException(this.message, this.partialResults, this.cause);
-  
+
   @override
-  String toString() => 'WarmupException: $message (${partialResults.length} partial results)${cause != null ? ' (caused by: $cause)' : ''}';
+  String toString() =>
+      'WarmupException: $message (${partialResults.length} partial results)${cause != null ? ' (caused by: $cause)' : ''}';
 }

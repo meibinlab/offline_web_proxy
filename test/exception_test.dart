@@ -17,13 +17,15 @@ void main() {
     });
 
     /// 無効なURL引数のテスト
-    test('should throw ArgumentError for empty URL in clearCacheForUrl', () async {
+    test('should throw ArgumentError for empty URL in clearCacheForUrl',
+        () async {
       await expectLater(() => proxy.clearCacheForUrl(''), throwsArgumentError);
     });
 
     /// 無効なURL引数のテスト（スペースのみ）
     test('should throw ArgumentError for whitespace-only URL', () async {
-      await expectLater(() => proxy.clearCacheForUrl('   '), throwsArgumentError);
+      await expectLater(
+          () => proxy.clearCacheForUrl('   '), throwsArgumentError);
     });
 
     /// 非常に長いURLでのテスト
@@ -41,7 +43,7 @@ void main() {
         'https://example.com/日本語',
         'https://user:pass@example.com/path',
       ];
-      
+
       for (final url in urls) {
         await proxy.clearCacheForUrl(url);
       }
@@ -50,7 +52,7 @@ void main() {
     /// 複数の同時操作のテスト
     test('should handle multiple concurrent operations', () async {
       final futures = <Future>[];
-      
+
       // 同時に複数のキャッシュクリア操作を実行
       for (int i = 0; i < 10; i++) {
         futures.add(proxy.clearCache());
@@ -58,7 +60,7 @@ void main() {
         futures.add(proxy.getStats());
         futures.add(proxy.getCacheStats());
       }
-      
+
       expect(() => Future.wait(futures), returnsNormally);
     });
 
@@ -79,7 +81,7 @@ void main() {
     test('should handle zero limit values', () async {
       final cacheList = await proxy.getCacheList(limit: 0);
       expect(cacheList, isEmpty);
-      
+
       final droppedRequests = await proxy.getDroppedRequests(limit: 0);
       expect(droppedRequests, isEmpty);
     });
@@ -96,7 +98,7 @@ void main() {
     test('ProxyStartException toString should include cause', () {
       final cause = Exception('Original error');
       final exception = ProxyStartException('Failed to start server', cause);
-      
+
       final str = exception.toString();
       expect(str, contains('ProxyStartException'));
       expect(str, contains('Failed to start server'));
@@ -110,7 +112,7 @@ void main() {
       const exception1 = ProxyStopException('Server already stopped', null);
       expect(exception1.toString(), contains('Server already stopped'));
       expect(exception1.toString(), isNot(contains('caused by')));
-      
+
       // 原因ありのケース
       final cause = SocketException('Connection lost');
       final exception2 = ProxyStopException('Failed to stop gracefully', cause);
@@ -121,7 +123,7 @@ void main() {
     /// PortBindExceptionのテスト
     test('PortBindException should include port number', () {
       const exception = PortBindException(8080, 'Port already in use');
-      
+
       expect(exception.port, equals(8080));
       expect(exception.message, equals('Port already in use'));
       expect(exception.toString(), contains('8080'));
@@ -131,16 +133,14 @@ void main() {
     /// CacheOperationExceptionの異なる操作タイプテスト
     test('CacheOperationException should handle different operations', () {
       const operations = ['clear', 'get', 'put', 'delete', 'purge'];
-      
+
       for (final operation in operations) {
-        final exception = CacheOperationException(
-          operation, 
-          'Operation failed', 
-          null
-        );
-        
+        final exception =
+            CacheOperationException(operation, 'Operation failed', null);
+
         expect(exception.operation, equals(operation));
-        expect(exception.toString(), contains('CacheOperationException[$operation]'));
+        expect(exception.toString(),
+            contains('CacheOperationException[$operation]'));
       }
     });
 
@@ -151,7 +151,7 @@ void main() {
         'Failed to encrypt cookie data',
         null,
       );
-      
+
       expect(exception.operation, equals('save'));
       expect(exception.message, contains('encrypt'));
       expect(exception.toString(), contains('CookieOperationException[save]'));
@@ -165,7 +165,7 @@ void main() {
         'Failed to save queue to disk',
         ioException,
       );
-      
+
       expect(exception.operation, equals('persist'));
       expect(exception.cause, equals(ioException));
       expect(exception.toString(), contains('persist'));
@@ -178,7 +178,7 @@ void main() {
         'Database connection failed',
         null,
       );
-      
+
       expect(exception.message, contains('Database connection'));
       expect(exception.toString(), contains('StatsOperationException'));
     });
@@ -190,7 +190,7 @@ void main() {
         'Failed to connect to upstream server',
         timeoutException,
       );
-      
+
       expect(exception.message, contains('upstream server'));
       expect(exception.cause, equals(timeoutException));
       expect(exception.toString(), contains('NetworkException'));
@@ -213,13 +213,13 @@ void main() {
           duration: Duration(milliseconds: 5000),
         ),
       ];
-      
+
       final exception = WarmupException(
         'Warmup completed with errors',
         partialResults,
         null,
       );
-      
+
       expect(exception.message, equals('Warmup completed with errors'));
       expect(exception.partialResults, hasLength(2));
       expect(exception.partialResults[0].success, isTrue);
@@ -236,7 +236,7 @@ void main() {
         'Failed to deserialize cache entry',
         intermediateCause,
       );
-      
+
       expect(topException.cause.toString(), contains('Parse error'));
       expect(topException.toString(), contains('caused by'));
     });
@@ -258,7 +258,7 @@ void main() {
     /// 同時キャッシュ操作のテスト
     test('should handle concurrent cache operations', () async {
       final futures = <Future>[];
-      
+
       // 同時に異なるキャッシュ操作を実行
       futures.add(proxy.clearCache());
       futures.add(proxy.clearExpiredCache());
@@ -266,7 +266,7 @@ void main() {
       futures.add(proxy.getCacheList());
       futures.add(proxy.clearCacheForUrl('https://example.com/1'));
       futures.add(proxy.clearCacheForUrl('https://example.com/2'));
-      
+
       // すべての操作が完了することを確認
       await expectLater(Future.wait(futures), completes);
     });
@@ -274,28 +274,28 @@ void main() {
     /// 同時Cookie操作のテスト
     test('should handle concurrent cookie operations', () async {
       final futures = <Future>[];
-      
+
       futures.add(proxy.getCookies());
       futures.add(proxy.getCookies(domain: 'example.com'));
       futures.add(proxy.clearCookies());
       futures.add(proxy.clearCookies(domain: 'test.com'));
-      
+
       await expectLater(Future.wait(futures), completes);
     });
 
     /// 同時統計取得のテスト
     test('should handle concurrent stats requests', () async {
       final futures = <Future>[];
-      
+
       // 複数の統計リクエストを同時実行
       for (int i = 0; i < 20; i++) {
         futures.add(proxy.getStats());
         futures.add(proxy.getCacheStats());
       }
-      
+
       final results = await Future.wait(futures);
       expect(results, hasLength(40));
-      
+
       // すべての結果が正しい型であることを確認
       for (int i = 0; i < results.length; i += 2) {
         expect(results[i], isA<ProxyStats>());
@@ -306,7 +306,7 @@ void main() {
     /// ストレステスト（大量の同時操作）
     test('should handle stress test with many concurrent operations', () async {
       final futures = <Future>[];
-      
+
       // 100個の同時操作を実行
       for (int i = 0; i < 100; i++) {
         switch (i % 5) {
@@ -327,7 +327,7 @@ void main() {
             break;
         }
       }
-      
+
       // すべての操作が合理的な時間内に完了することを確認
       await expectLater(
         Future.wait(futures).timeout(Duration(seconds: 10)),
@@ -360,18 +360,20 @@ void main() {
         'http://[invalid-ipv6',
         'http://example.com:99999', // 無効なポート
       ];
-      
+
       for (final url in malformedUrls) {
         // 例外が発生するかもしれないが、クラッシュしないことを確認
         try {
           await proxy.clearCacheForUrl(url);
         } catch (e) {
           // 例外は許可されるが、適切な型であることを確認
-          expect(e, anyOf(
-            isA<ArgumentError>(),
-            isA<FormatException>(),
-            isA<CacheOperationException>(),
-          ));
+          expect(
+              e,
+              anyOf(
+                isA<ArgumentError>(),
+                isA<FormatException>(),
+                isA<CacheOperationException>(),
+              ));
         }
       }
     });
@@ -384,7 +386,7 @@ void main() {
         'https://москва.рф/path',
         'https://中文.test/测试',
       ];
-      
+
       for (final url in internationalUrls) {
         await proxy.clearCacheForUrl(url);
       }
@@ -395,9 +397,9 @@ void main() {
       final baseUrl = 'https://example.com/';
       final veryLongPath = 'path/' * 1000; // 非常に長いパス
       final longQuery = 'param=' + 'value' * 1000; // 非常に長いクエリ
-      
+
       final extremelyLongUrl = baseUrl + veryLongPath + '?' + longQuery;
-      
+
       // 長いURLでもクラッシュしないことを確認
       await proxy.clearCacheForUrl(extremelyLongUrl);
     });
@@ -407,9 +409,9 @@ void main() {
 /// TimeoutExceptionクラスの定義（テスト用）
 class TimeoutException implements Exception {
   final String message;
-  
+
   const TimeoutException(this.message);
-  
+
   @override
   String toString() => 'TimeoutException: $message';
 }

@@ -2,22 +2,22 @@
 class CookieInfo {
   /// Cookie名
   final String name;
-  
+
   /// Cookie値（セキュリティ上"***"でマスク）
   final String value;
-  
+
   /// 有効ドメイン
   final String domain;
-  
+
   /// 有効パス
   final String path;
-  
+
   /// 有効期限（null=セッションCookie）
   final DateTime? expires;
-  
+
   /// Secure属性の有無
   final bool secure;
-  
+
   /// SameSite属性（"Strict", "Lax", "None"）
   final String? sameSite;
 
