@@ -28,7 +28,7 @@ dependencies:
   hive_flutter: ^1.1.0
   http: ^1.5.0
   path_provider: ^2.1.5
-  shelf: 1.4.1
+  shelf: ^1.4.1
   shelf_proxy: ^1.0.4
   shelf_router: ^1.1.4
 
