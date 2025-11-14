@@ -1,7 +1,52 @@
-// Flutter WebView用オフライン対応ローカルプロキシサーバライブラリ。
-//
-// 既存のWebシステムをアプリ化する際に、オンライン/オフラインを意識せずに
-// 動作させることを目的とする軽量プロキシサーバを提供します。
+/// # offline_web_proxy
+/// 
+/// An offline-compatible local proxy server that operates within Flutter WebView.
+/// Enables existing web systems to function seamlessly in mobile apps without 
+/// requiring awareness of online/offline states.
+/// 
+/// ## Key Features
+/// 
+/// * **Intelligent Caching**: RFC-compliant cache control with offline strategies
+/// * **Request Queuing**: Automatic queuing of POST/PUT/DELETE requests when offline
+/// * **Cookie Management**: Secure AES-256 encrypted cookie persistence
+/// * **Static Resource Serving**: Local serving of bundled static assets
+/// * **Seamless Offline Support**: Transparent online/offline operation
+/// 
+/// ## Quick Start
+/// 
+/// ```dart
+/// import 'package:offline_web_proxy/offline_web_proxy.dart';
+/// 
+/// final proxy = OfflineWebProxy();
+/// final config = ProxyConfig(
+///   origin: 'https://your-api-server.com',
+///   port: 0, // Auto-assign port
+/// );
+/// 
+/// // Start the proxy server
+/// final port = await proxy.start(config: config);
+/// print('Proxy running on http://127.0.0.1:$port');
+/// 
+/// // Use in WebView
+/// webViewController.loadUrl('http://127.0.0.1:$port/your-app-path');
+/// ```
+/// 
+/// ## Architecture
+/// 
+/// The proxy intercepts HTTP requests from WebView and:
+/// 1. **Online**: Forwards requests to upstream server, caches responses
+/// 2. **Offline**: Serves from cache or queues update requests
+/// 3. **Recovery**: Automatically drains queued requests when online
+/// 
+/// ## Cache Strategy
+/// 
+/// * **Fresh**: Within TTL, served immediately
+/// * **Stale**: Past TTL but within stale period, validated if online
+/// * **Expired**: Beyond stale period, removed during cleanup
+/// 
+/// See [ProxyConfig] for configuration options and [specs.md](https://github.com/meibinlab/offline_web_proxy/blob/main/specs.md) 
+/// for detailed technical specifications.
+library offline_web_proxy;
 
 import 'dart:async';
 import 'dart:collection';
@@ -47,11 +92,65 @@ typedef WarmupProgressCallback = void Function(int completed, int total);
 typedef WarmupErrorCallback = void Function(String path, String error);
 
 /// Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
+/// The main proxy server class that provides offline-compatible HTTP proxying
+/// for Flutter WebView applications.
 ///
-/// WebViewから送信されるHTTPリクエストを中継し、オンライン時は上流サーバへ転送、
-/// オフライン時はキャッシュからレスポンスを返却します。
-/// 更新系リクエスト（POST/PUT/DELETE）はオフライン時にキューに保存し、
-/// オンライン復帰時に自動送信することで、シームレスなオフライン対応を実現します。
+/// This class creates a local HTTP server that intercepts requests from WebView
+/// and intelligently handles them based on network connectivity:
+///
+/// * **Online Mode**: Forwards requests to upstream server and caches responses
+/// * **Offline Mode**: Serves from cache or queues update requests  
+/// * **Recovery Mode**: Automatically drains queued requests when connectivity returns
+///
+/// ## Usage Example
+///
+/// ```dart
+/// final proxy = OfflineWebProxy();
+/// 
+/// // Configure the proxy
+/// final config = ProxyConfig(
+///   origin: 'https://api.example.com',
+///   cacheMaxSize: 100 * 1024 * 1024, // 100MB cache
+///   connectTimeout: Duration(seconds: 10),
+/// );
+/// 
+/// // Start the server
+/// final port = await proxy.start(config: config);
+/// 
+/// // Use in WebView
+/// webViewController.loadUrl('http://127.0.0.1:$port');
+/// 
+/// // Monitor events
+/// proxy.events.listen((event) {
+///   if (event.type == ProxyEventType.cacheHit) {
+///     print('Cache hit: ${event.url}');
+///   }
+/// });
+/// 
+/// // Get statistics
+/// final stats = await proxy.getStats();
+/// print('Hit rate: ${stats.cacheHitRate}');
+/// 
+/// // Cleanup
+/// await proxy.stop();
+/// ```
+///
+/// ## Thread Safety
+///
+/// This class is thread-safe for concurrent operations. Cache operations
+/// are serialized using mutex locks to ensure data consistency.
+///
+/// ## Security
+///
+/// * Server binds to `127.0.0.1` only (no external access)
+/// * Cookies are encrypted with AES-256 before persistence
+/// * Sensitive headers are masked in logs
+/// * Path traversal attacks are prevented for static assets
+///
+/// See also:
+/// * [ProxyConfig] for configuration options
+/// * [ProxyStats] for monitoring capabilities  
+/// * [ProxyEvent] for real-time event streaming
 class OfflineWebProxy {
   /// 内部HTTPサーバのインスタンス。
   HttpServer? _server;
