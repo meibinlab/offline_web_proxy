@@ -68,7 +68,9 @@ void main() {
 
     /// キャッシュキー生成の一貫性テスト
     /// オンライン時とオフライン時で同じキャッシュキーが生成されることを確認
-    test('should generate consistent cache keys for online and offline requests', () async {
+    test(
+        'should generate consistent cache keys for online and offline requests',
+        () async {
       final config = ProxyConfig(
         origin: 'https://httpbin.org',
         port: 0,
@@ -373,7 +375,8 @@ void main() {
     });
 
     /// 異なるクエリパラメータが異なるキャッシュエントリとして扱われることをテスト
-    test('should treat different query parameters as different cache entries', () async {
+    test('should treat different query parameters as different cache entries',
+        () async {
       final config = ProxyConfig(
         origin: 'https://api.example.com',
         port: 0,
@@ -421,7 +424,8 @@ void main() {
     });
 
     /// 同じパスで異なるクエリパラメータの統計テスト
-    test('should track stats correctly for paths with different query params', () async {
+    test('should track stats correctly for paths with different query params',
+        () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
         port: 0,
