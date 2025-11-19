@@ -948,8 +948,11 @@ class OfflineWebProxy {
   ///
   /// Returns: HTTPレスポンス。
   Future<shelf.Response> _handleOnlineRequest(shelf.Request request) async {
-    // 最初にキャッシュをチェック
-    final cacheKey = _generateCacheKey(request.url.toString());
+    // 上流サーバのURLでキャッシュキーを生成（クエリパラメータを含む）
+    final path = request.url.path.startsWith('/') ? request.url.path : '/${request.url.path}';
+    final query = request.url.query.isNotEmpty ? '?${request.url.query}' : '';
+    final upstreamUrl = '${_config!.origin}$path$query';
+    final cacheKey = _generateCacheKey(upstreamUrl);
     final cachedResponse = await _getCachedResponse(cacheKey);
 
     if (cachedResponse != null && _isCacheValid(cachedResponse)) {
@@ -999,8 +1002,11 @@ class OfflineWebProxy {
   /// Returns: HTTPレスポンス。
   Future<shelf.Response> _handleOfflineRequest(shelf.Request request) async {
     if (request.method == 'GET') {
-      // キャッシュから配信を試みる
-      final cacheKey = _generateCacheKey(request.url.toString());
+      // 上流サーバのURLでキャッシュキーを生成（クエリパラメータを含む）
+      final path = request.url.path.startsWith('/') ? request.url.path : '/${request.url.path}';
+      final query = request.url.query.isNotEmpty ? '?${request.url.query}' : '';
+      final upstreamUrl = '${_config!.origin}$path$query';
+      final cacheKey = _generateCacheKey(upstreamUrl);
       final cachedResponse = await _getCachedResponse(cacheKey);
 
       if (cachedResponse != null) {
