@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -303,7 +302,7 @@ void main() {
         port: 0,
       );
 
-      final port = await proxy.start(config: config);
+      await proxy.start(config: config);
 
       // 同じパスに対して複数回リクエストした場合、
       // キャッシュヒット/ミスの統計が正しく更新されることを確認
