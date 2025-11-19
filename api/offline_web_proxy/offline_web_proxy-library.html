@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="offline_web_proxy library API docs, for the Dart programming language.">
+  <title>offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../static-assets/styles.css?v1">
+  <link rel="icon" href="../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../index.html">offline_web_proxy</a></li>
+    <li class="self-crumb">offline_web_proxy.dart</li>
+  </ol>
+  <div class="self-name">offline_web_proxy</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar=""
+    data-below-sidebar="offline_web_proxy&#47;offline_web_proxy-library-sidebar.html">
+  
+    <div>
+      
+
+      <h1>
+        <span class="kind-library">offline_web_proxy</span>
+        library 
+ 
+
+      </h1>
+    </div>
+
+    
+<section class="desc markdown">
+  <h1 id="offline_web_proxy">offline_web_proxy</h1>
+<p>An offline-compatible local proxy server that operates within Flutter WebView.
+Enables existing web systems to function seamlessly in mobile apps without
+requiring awareness of online/offline states.</p>
+<h2 id="key-features">Key Features</h2>
+<ul>
+<li><strong>Intelligent Caching</strong>: RFC-compliant cache control with offline strategies</li>
+<li><strong>Request Queuing</strong>: Automatic queuing of POST/PUT/DELETE requests when offline</li>
+<li><strong>Cookie Management</strong>: Secure AES-256 encrypted cookie persistence</li>
+<li><strong>Static Resource Serving</strong>: Local serving of bundled static assets</li>
+<li><strong>Seamless Offline Support</strong>: Transparent online/offline operation</li>
+</ul>
+<h2 id="quick-start">Quick Start</h2>
+<pre class="language-dart"><code class="language-dart">import 'package:offline_web_proxy/offline_web_proxy.dart';
+
+final proxy = OfflineWebProxy();
+final config = ProxyConfig(
+  origin: 'https://your-api-server.com',
+  port: 0, // Auto-assign port
+);
+
+// Start the proxy server
+final port = await proxy.start(config: config);
+print('Proxy running on http://127.0.0.1:$port');
+
+// Use in WebView
+webViewController.loadUrl('http://127.0.0.1:$port/your-app-path');
+</code></pre>
+<h2 id="architecture">Architecture</h2>
+<p>The proxy intercepts HTTP requests from WebView and:</p>
+<ol>
+<li><strong>Online</strong>: Forwards requests to upstream server, caches responses</li>
+<li><strong>Offline</strong>: Serves from cache or queues update requests</li>
+<li><strong>Recovery</strong>: Automatically drains queued requests when online</li>
+</ol>
+<h2 id="cache-strategy">Cache Strategy</h2>
+<ul>
+<li><strong>Fresh</strong>: Within TTL, served immediately</li>
+<li><strong>Stale</strong>: Past TTL but within stale period, validated if online</li>
+<li><strong>Expired</strong>: Beyond stale period, removed during cleanup</li>
+</ul>
+<p>See <a href="../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a> for configuration options and <a href="https://github.com/meibinlab/offline_web_proxy/blob/main/specs.md">specs.md</a>
+for detailed technical specifications.</p>
+</section>
+
+
+    <section class="summary offset-anchor" id="classes">
+      <h2>Classes</h2>
+
+      <dl>
+          <dt id="CacheEntry">
+  <span class="name "><a href="../offline_web_proxy/CacheEntry-class.html">CacheEntry</a></span> 
+
+</dt>
+<dd>
+  キャッシュエントリの情報を表すクラス
+</dd>
+
+          <dt id="CacheStats">
+  <span class="name "><a href="../offline_web_proxy/CacheStats-class.html">CacheStats</a></span> 
+
+</dt>
+<dd>
+  キャッシュシステム固有の統計情報を表すクラス
+</dd>
+
+          <dt id="CookieInfo">
+  <span class="name "><a href="../offline_web_proxy/CookieInfo-class.html">CookieInfo</a></span> 
+
+</dt>
+<dd>
+  保存されているCookieの情報を表すクラス（値はセキュリティ上マスクされる）
+</dd>
+
+          <dt id="DroppedRequest">
+  <span class="name "><a href="../offline_web_proxy/DroppedRequest-class.html">DroppedRequest</a></span> 
+
+</dt>
+<dd>
+  エラーによりキューからドロップされたリクエストの履歴を表すクラス
+</dd>
+
+          <dt id="OfflineWebProxy">
+  <span class="name "><a href="../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></span> 
+
+</dt>
+<dd>
+  Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
+The main proxy server class that provides offline-compatible HTTP proxying
+for Flutter WebView applications.
+</dd>
+
+          <dt id="ProxyConfig">
+  <span class="name "><a href="../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></span> 
+
+</dt>
+<dd>
+  Configuration settings for the <a href="../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a> server.
+</dd>
+
+          <dt id="ProxyEvent">
+  <span class="name "><a href="../offline_web_proxy/ProxyEvent-class.html">ProxyEvent</a></span> 
+
+</dt>
+<dd>
+  プロキシサーバのイベント情報を表すクラス（リアルタイム監視用）
+</dd>
+
+          <dt id="ProxyStats">
+  <span class="name "><a href="../offline_web_proxy/ProxyStats-class.html">ProxyStats</a></span> 
+
+</dt>
+<dd>
+  Statistics and performance metrics for the <a href="../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a> server.
+</dd>
+
+          <dt id="QueuedRequest">
+  <span class="name "><a href="../offline_web_proxy/QueuedRequest-class.html">QueuedRequest</a></span> 
+
+</dt>
+<dd>
+  オフライン時にキューイングされたリクエストの情報を表すクラス
+</dd>
+
+          <dt id="Semaphore">
+  <span class="name "><a href="../offline_web_proxy/Semaphore-class.html">Semaphore</a></span> 
+
+</dt>
+<dd>
+  並行性制御用のセマフォクラス。
+</dd>
+
+          <dt id="WarmupEntry">
+  <span class="name "><a href="../offline_web_proxy/WarmupEntry-class.html">WarmupEntry</a></span> 
+
+</dt>
+<dd>
+  個別パスの更新結果
+</dd>
+
+          <dt id="WarmupResult">
+  <span class="name "><a href="../offline_web_proxy/WarmupResult-class.html">WarmupResult</a></span> 
+
+</dt>
+<dd>
+  キャッシュ事前更新（Warmup）処理の結果を表すクラス
+</dd>
+
+      </dl>
+    </section>
+
+    <section class="summary offset-anchor" id="enums">
+      <h2>Enums</h2>
+
+      <dl>
+          <dt id="CacheStatus">
+  <span class="name "><a href="../offline_web_proxy/CacheStatus.html">CacheStatus</a></span> 
+
+</dt>
+<dd>
+  キャッシュの状態
+</dd>
+
+          <dt id="ProxyEventType">
+  <span class="name "><a href="../offline_web_proxy/ProxyEventType.html">ProxyEventType</a></span> 
+
+</dt>
+<dd>
+  プロキシイベントの種別
+</dd>
+
+      </dl>
+    </section>
+
+
+
+
+
+
+
+    <section class="summary offset-anchor" id="typedefs">
+      <h2>Typedefs</h2>
+
+      <dl>
+          
+  <dt id="WarmupErrorCallback" class="callable">
+    <span class="name"><a href="../offline_web_proxy/WarmupErrorCallback.html">WarmupErrorCallback</a></span><span class="signature">
+      <span class="returntype parameter">= void Function<span class="signature">(<span class="parameter" id="param-path"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">path</span>, </span><span class="parameter" id="param-error"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">error</span></span>)</span></span>
+    </span>
+    
+
+  </dt>
+  <dd>
+    キャッシュ事前更新でエラーが発生した際に呼ばれるコールバック関数。
+    
+
+  </dd>
+
+          
+  <dt id="WarmupProgressCallback" class="callable">
+    <span class="name"><a href="../offline_web_proxy/WarmupProgressCallback.html">WarmupProgressCallback</a></span><span class="signature">
+      <span class="returntype parameter">= void Function<span class="signature">(<span class="parameter" id="param-completed"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">completed</span>, </span><span class="parameter" id="param-total"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">total</span></span>)</span></span>
+    </span>
+    
+
+  </dt>
+  <dd>
+    キャッシュ事前更新の進捗を通知するコールバック関数。
+    
+
+  </dd>
+
+      </dl>
+    </section>
+
+    <section class="summary offset-anchor" id="exceptions">
+      <h2>Exceptions / Errors</h2>
+
+      <dl>
+          <dt id="CacheOperationException">
+  <span class="name "><a href="../offline_web_proxy/CacheOperationException-class.html">CacheOperationException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when cache operations fail.
+</dd>
+
+          <dt id="CookieOperationException">
+  <span class="name "><a href="../offline_web_proxy/CookieOperationException-class.html">CookieOperationException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when cookie operations fail.
+</dd>
+
+          <dt id="NetworkException">
+  <span class="name "><a href="../offline_web_proxy/NetworkException-class.html">NetworkException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when network operations fail.
+</dd>
+
+          <dt id="PortBindException">
+  <span class="name "><a href="../offline_web_proxy/PortBindException-class.html">PortBindException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when unable to bind to the specified network port.
+</dd>
+
+          <dt id="ProxyStartException">
+  <span class="name "><a href="../offline_web_proxy/ProxyStartException-class.html">ProxyStartException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when proxy server fails to start.
+</dd>
+
+          <dt id="ProxyStopException">
+  <span class="name "><a href="../offline_web_proxy/ProxyStopException-class.html">ProxyStopException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when proxy server fails to stop cleanly.
+</dd>
+
+          <dt id="QueueOperationException">
+  <span class="name "><a href="../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when offline request queue operations fail.
+</dd>
+
+          <dt id="StatsOperationException">
+  <span class="name "><a href="../offline_web_proxy/StatsOperationException-class.html">StatsOperationException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when statistics collection or retrieval fails.
+</dd>
+
+          <dt id="WarmupException">
+  <span class="name "><a href="../offline_web_proxy/WarmupException-class.html">WarmupException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when cache warmup operations fail.
+</dd>
+
+      </dl>
+    </section>
+
+  </div> <!-- /.main-content -->
+
+  <div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+    <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../index.html">offline_web_proxy</a></li>
+    <li class="self-crumb">offline_web_proxy.dart</li>
+</ol>
+
+
+    <h5><span class="package-name">offline_web_proxy</span> <span class="package-kind">package</span></h5>
+    <ol>
+      <li class="section-title">Libraries</li>
+      <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+</ol>
+
+  </div>
+
+  <div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+    <h5>offline_web_proxy library</h5>
+  </div><!--/sidebar-offcanvas-right-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.1.1
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../static-assets/highlight.pack.js?v1"></script>
+<script src="../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+

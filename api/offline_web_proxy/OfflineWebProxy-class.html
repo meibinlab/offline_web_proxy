@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="API docs for the OfflineWebProxy class from the offline_web_proxy library, for the Dart programming language.">
+  <title>OfflineWebProxy class - offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../static-assets/styles.css?v1">
+  <link rel="icon" href="../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../index.html">offline_web_proxy</a></li>
+    <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
+    <li class="self-crumb">OfflineWebProxy class</li>
+  </ol>
+  <div class="self-name">OfflineWebProxy</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;offline_web_proxy-library-sidebar.html"
+    data-below-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html">
+    <div>
+<h1><span class="kind-class">OfflineWebProxy</span> class 
+ 
+</h1></div>
+
+    
+<section class="desc markdown">
+  <p>Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
+The main proxy server class that provides offline-compatible HTTP proxying
+for Flutter WebView applications.</p>
+<p>This class creates a local HTTP server that intercepts requests from WebView
+and intelligently handles them based on network connectivity:</p>
+<ul>
+<li><strong>Online Mode</strong>: Forwards requests to upstream server and caches responses</li>
+<li><strong>Offline Mode</strong>: Serves from cache or queues update requests</li>
+<li><strong>Recovery Mode</strong>: Automatically drains queued requests when connectivity returns</li>
+</ul>
+<h2 id="usage-example">Usage Example</h2>
+<pre class="language-dart"><code class="language-dart">final proxy = OfflineWebProxy();
+
+// Configure the proxy
+final config = ProxyConfig(
+  origin: 'https://api.example.com',
+  cacheMaxSize: 100 * 1024 * 1024, // 100MB cache
+  connectTimeout: Duration(seconds: 10),
+);
+
+// Start the server
+final port = await proxy.start(config: config);
+
+// Use in WebView
+webViewController.loadUrl('http://127.0.0.1:$port');
+
+// Monitor events
+proxy.events.listen((event) {
+  if (event.type == ProxyEventType.cacheHit) {
+    print('Cache hit: ${event.url}');
+  }
+});
+
+// Get statistics
+final stats = await proxy.getStats();
+print('Hit rate: ${stats.cacheHitRate}');
+
+// Cleanup
+await proxy.stop();
+</code></pre>
+<h2 id="thread-safety">Thread Safety</h2>
+<p>This class is thread-safe for concurrent operations. Cache operations
+are serialized using mutex locks to ensure data consistency.</p>
+<h2 id="security">Security</h2>
+<ul>
+<li>Server binds to <code>127.0.0.1</code> only (no external access)</li>
+<li>Cookies are encrypted with AES-256 before persistence</li>
+<li>Sensitive headers are masked in logs</li>
+<li>Path traversal attacks are prevented for static assets</li>
+</ul>
+<p>See also:</p>
+<ul>
+<li><a href="../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a> for configuration options</li>
+<li><a href="../offline_web_proxy/ProxyStats-class.html">ProxyStats</a> for monitoring capabilities</li>
+<li><a href="../offline_web_proxy/ProxyEvent-class.html">ProxyEvent</a> for real-time event streaming</li>
+</ul>
+</section>
+
+
+
+    
+  <section class="summary offset-anchor" id="constructors">
+    <h2>Constructors</h2>
+
+    <dl class="constructor-summary-list">
+        <dt id="OfflineWebProxy" class="callable">
+          <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/OfflineWebProxy.html">OfflineWebProxy</a></span><span class="signature">()</span>
+        </dt>
+        <dd>
+          
+        </dd>
+    </dl>
+  </section>
+    
+  <section
+      class="summary offset-anchor"
+      id="instance-properties">
+    <h2>Properties</h2>
+    <dl class="properties">
+        <dt id="events" class="property">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/events.html">events</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Stream-class.html">Stream</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/ProxyEvent-class.html">ProxyEvent</a></span>&gt;</span></span>
+  
+
+</dt>
+<dd>
+  プロキシサーバのイベントストリームを取得します。
+  <div class="features"><span class="feature">no setter</span></div>
+
+</dd>
+
+        <dt id="hashCode" class="property inherited">
+  <span class="name"><a href="https://api.flutter.dev/flutter/dart-core/Object/hashCode.html">hashCode</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
+  
+
+</dt>
+<dd class="inherited">
+  The hash code for this object.
+  <div class="features"><span class="feature">no setter</span><span class="feature">inherited</span></div>
+
+</dd>
+
+        <dt id="isRunning" class="property">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/isRunning.html">isRunning</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
+  
+
+</dt>
+<dd>
+  プロキシサーバの動作状態を取得します。
+  <div class="features"><span class="feature">no setter</span></div>
+
+</dd>
+
+        <dt id="runtimeType" class="property inherited">
+  <span class="name"><a href="https://api.flutter.dev/flutter/dart-core/Object/runtimeType.html">runtimeType</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Type-class.html">Type</a></span>
+  
+
+</dt>
+<dd class="inherited">
+  A representation of the runtime type of the object.
+  <div class="features"><span class="feature">no setter</span><span class="feature">inherited</span></div>
+
+</dd>
+
+    </dl>
+  </section>
+    
+  <section
+      class="summary offset-anchor"
+      id="instance-methods">
+    <h2>Methods</h2>
+    <dl class="callables">
+        <dt id="clearCache" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/clearCache.html">clearCache</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  全キャッシュを即座に削除します。
+  
+
+</dd>
+
+        <dt id="clearCacheForUrl" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/clearCacheForUrl.html">clearCacheForUrl</a></span><span class="signature">(<wbr><span class="parameter" id="clearCacheForUrl-param-url"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span></span>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  特定URLのキャッシュを削除します。
+  
+
+</dd>
+
+        <dt id="clearCookies" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/clearCookies.html">clearCookies</a></span><span class="signature">(<wbr>{<span class="parameter" id="clearCookies-param-domain"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">domain</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  保存されているCookieを削除します。
+  
+
+</dd>
+
+        <dt id="clearDroppedRequests" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/clearDroppedRequests.html">clearDroppedRequests</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  ドロップされたリクエストの履歴を全て削除します。
+  
+
+</dd>
+
+        <dt id="clearExpiredCache" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/clearExpiredCache.html">clearExpiredCache</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  期限切れキャッシュのみを削除します。
+  
+
+</dd>
+
+        <dt id="getCacheList" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/getCacheList.html">getCacheList</a></span><span class="signature">(<wbr>{<span class="parameter" id="getCacheList-param-limit"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">limit</span>, </span><span class="parameter" id="getCacheList-param-offset"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">offset</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/CacheEntry-class.html">CacheEntry</a></span>&gt;</span></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  キャッシュエントリの一覧を取得します。
+  
+
+</dd>
+
+        <dt id="getCacheStats" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/getCacheStats.html">getCacheStats</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/CacheStats-class.html">CacheStats</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  キャッシュの統計情報を取得します。
+  
+
+</dd>
+
+        <dt id="getCookies" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/getCookies.html">getCookies</a></span><span class="signature">(<wbr>{<span class="parameter" id="getCookies-param-domain"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">domain</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/CookieInfo-class.html">CookieInfo</a></span>&gt;</span></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  保存されているCookieの一覧を取得します。
+  
+
+</dd>
+
+        <dt id="getDroppedRequests" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/getDroppedRequests.html">getDroppedRequests</a></span><span class="signature">(<wbr>{<span class="parameter" id="getDroppedRequests-param-limit"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">limit</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/DroppedRequest-class.html">DroppedRequest</a></span>&gt;</span></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  キューから除外されたリクエストの履歴を取得します。
+  
+
+</dd>
+
+        <dt id="getQueuedRequests" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/getQueuedRequests.html">getQueuedRequests</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/QueuedRequest-class.html">QueuedRequest</a></span>&gt;</span></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  オフライン時にキューに保存されたリクエストの一覧を取得します。
+  
+
+</dd>
+
+        <dt id="getStats" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/getStats.html">getStats</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/ProxyStats-class.html">ProxyStats</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  プロキシサーバの統計情報を取得します。
+  
+
+</dd>
+
+        <dt id="noSuchMethod" class="callable inherited">
+  <span class="name"><a href="https://api.flutter.dev/flutter/dart-core/Object/noSuchMethod.html">noSuchMethod</a></span><span class="signature">(<wbr><span class="parameter" id="noSuchMethod-param-invocation"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Invocation-class.html">Invocation</a></span> <span class="parameter-name">invocation</span></span>)
+    <span class="returntype parameter">&#8594; dynamic</span>
+  </span>
+  
+
+</dt>
+<dd class="inherited">
+  Invoked when a nonexistent method or property is accessed.
+  <div class="features"><span class="feature">inherited</span></div>
+
+</dd>
+
+        <dt id="start" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/start.html">start</a></span><span class="signature">(<wbr>{<span class="parameter" id="start-param-config"><span class="type-annotation"><a href="../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a>?</span> <span class="parameter-name">config</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  プロキシサーバを起動します。
+  
+
+</dd>
+
+        <dt id="stop" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/stop.html">stop</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  プロキシサーバを停止します。
+  
+
+</dd>
+
+        <dt id="toString" class="callable inherited">
+  <span class="name"><a href="https://api.flutter.dev/flutter/dart-core/Object/toString.html">toString</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+  </span>
+  
+
+</dt>
+<dd class="inherited">
+  A string representation of this object.
+  <div class="features"><span class="feature">inherited</span></div>
+
+</dd>
+
+        <dt id="warmupCache" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/warmupCache.html">warmupCache</a></span><span class="signature">(<wbr>{<span class="parameter" id="warmupCache-param-paths"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span>?</span> <span class="parameter-name">paths</span>, </span><span class="parameter" id="warmupCache-param-timeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">timeout</span>, </span><span class="parameter" id="warmupCache-param-maxConcurrency"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">maxConcurrency</span>, </span><span class="parameter" id="warmupCache-param-onProgress"><span class="type-annotation"><a href="../offline_web_proxy/WarmupProgressCallback.html">WarmupProgressCallback</a>?</span> <span class="parameter-name">onProgress</span>, </span><span class="parameter" id="warmupCache-param-onError"><span class="type-annotation"><a href="../offline_web_proxy/WarmupErrorCallback.html">WarmupErrorCallback</a>?</span> <span class="parameter-name">onError</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/WarmupResult-class.html">WarmupResult</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  指定したパス一覧でキャッシュの事前ウォームアップを実行します。
+  
+
+</dd>
+
+    </dl>
+  </section>
+    
+  <section
+      class="summary offset-anchor inherited"
+      id="operators">
+    <h2>Operators</h2>
+    <dl class="callables">
+        <dt id="operator ==" class="callable inherited">
+  <span class="name"><a href="https://api.flutter.dev/flutter/dart-core/Object/operator_equals.html">operator ==</a></span><span class="signature">(<wbr><span class="parameter" id="==-param-other"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Object-class.html">Object</a></span> <span class="parameter-name">other</span></span>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
+  </span>
+  
+
+</dt>
+<dd class="inherited">
+  The equality operator.
+  <div class="features"><span class="feature">inherited</span></div>
+
+</dd>
+
+    </dl>
+  </section>
+    
+    
+    
+
+
+  </div> <!-- /.main-content -->
+
+  <div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+    <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../index.html">offline_web_proxy</a></li>
+    <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+    <li class="self-crumb">OfflineWebProxy class</li>
+</ol>
+
+
+    <h5>offline_web_proxy library</h5>
+    <div id="dartdoc-sidebar-left-content"></div>
+  </div>
+
+  <div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+  </div><!--/.sidebar-offcanvas-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.1.1
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../static-assets/highlight.pack.js?v1"></script>
+<script src="../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+
