@@ -1,6 +1,6 @@
 name: offline_web_proxy
 description: "Offline-capable local proxy server for Flutter WebView. Provides seamless online/offline operation when converting existing web systems to mobile apps."
-version: 0.1.0
+version: 0.1.1
 repository: https://github.com/meibinlab/offline_web_proxy
 homepage: https://github.com/meibinlab/offline_web_proxy
 issue_tracker: https://github.com/meibinlab/offline_web_proxy/issues
