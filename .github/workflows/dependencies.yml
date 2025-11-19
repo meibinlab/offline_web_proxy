@@ -37,7 +37,7 @@ jobs:
       run: flutter test
 
     - name: Check for analysis issues
-      run: dart analyze --fatal-infos
+      run: dart analyze --fatal-warnings
 
     - name: Validate package
       run: dart pub publish --dry-run

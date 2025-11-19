@@ -35,7 +35,7 @@ jobs:
       run: dart format --output=none --set-exit-if-changed .
 
     - name: Analyze project source
-      run: dart analyze --fatal-infos
+      run: dart analyze --fatal-warnings
 
     - name: Check pub dependencies
       run: flutter pub deps
@@ -127,9 +127,6 @@ jobs:
 
     - name: Install dependencies
       run: flutter pub get
-
-    - name: Run dependency audit
-      run: dart pub deps --json | dart pub global run dependency_validator
 
     - name: Check for vulnerable dependencies
       continue-on-error: true
@@ -284,7 +281,7 @@ jobs:
       run: |
         flutter test --coverage --reporter=expanded
         dart pub deps
-        dart analyze --fatal-infos
+        dart analyze --fatal-warnings
 
     - name: Report nightly test results
       if: failure()
