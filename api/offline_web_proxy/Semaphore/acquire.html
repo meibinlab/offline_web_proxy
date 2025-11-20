@@ -64,24 +64,26 @@
       
 
 <span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
-<span class="name ">acquire</span>(<wbr>)
+<span class="name ">acquire</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="acquire-param-timeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">timeout</span> = <span class="default-value">const Duration(seconds: 30)</span>, </span></li>
+</ol>})
 
       
 
     </section>
     
 <section class="desc markdown">
-  <p>セマフォを取得します。</p>
-<p>リソースが利用可能な場合は即座に返却し、
-利用不可な場合は待機キューに登録して待機します。</p>
-<p>Returns: リソースが利用可能になったときに完了するFuture。</p>
+  <p>セマフォを取得します（タイムアウト付き）。</p>
+<p><code>timeout</code> 最大待機時間。デフォルトは30秒。
+リソースが利用可能な場合は即座に返却し、
+利用不可な場合は待機キューに登録して待機します。
+タイムアウト時は例外を投げます。</p>
 </section>
 
 
     
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; acquire() async {
+  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; acquire({Duration timeout = const Duration(seconds: 30)}) async {
   if (_currentCount &gt; 0) {
     _currentCount--;
     return;
@@ -89,7 +91,16 @@
 
   final completer = Completer&lt;void&gt;();
   _waitQueue.add(completer);
-  return completer.future;
+  try {
+    await completer.future.timeout(timeout, onTimeout: () {
+      &#47;&#47; タイムアウト時はキューから削除
+      _waitQueue.remove(completer);
+      throw TimeoutException(
+          &#39;Semaphore acquire timed out after ${timeout.inSeconds} seconds&#39;);
+    });
+  } catch (e) {
+    rethrow;
+  }
 }</code></pre>
 </section>
 

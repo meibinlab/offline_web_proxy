@@ -117,48 +117,48 @@
 
   try {
     &#47;&#47; Process paths with concurrency control
-    final semaphore = Semaphore(maxConcurrency ?? 3);
-    final futures = targetPaths.asMap().entries.map((entry) async {
+
+    final semaphore = Semaphore(maxConcurrency ?? 10);
+    final results =
+        await Future.wait(targetPaths.asMap().entries.map((entry) async {
       final index = entry.key;
       final path = entry.value;
 
-      await semaphore.acquire();
+      await semaphore.acquire(timeout: const Duration(seconds: 30));
       try {
         final entryStartTime = DateTime.now();
-
         try {
           final response = await _fetchFromUpstream(path, timeout: timeout);
           final duration = DateTime.now().difference(entryStartTime);
-
-          entries.add(WarmupEntry(
+          successCount++;
+          return WarmupEntry(
             path: path,
             success: true,
             statusCode: response.statusCode,
             errorMessage: null,
             duration: duration,
-          ));
-          successCount++;
+          );
         } catch (e) {
           final duration = DateTime.now().difference(entryStartTime);
-          entries.add(WarmupEntry(
+          onError?.call(path, e.toString());
+          failureCount++;
+          return WarmupEntry(
             path: path,
             success: false,
             statusCode: null,
             errorMessage: e.toString(),
             duration: duration,
-          ));
-          failureCount++;
-
-          onError?.call(path, e.toString());
+          );
+        } finally {
+          &#47;&#47; 成功・失敗問わず進捗コールバックを呼ぶ
+          onProgress?.call(index + 1, targetPaths.length);
         }
-
-        onProgress?.call(index + 1, targetPaths.length);
       } finally {
         semaphore.release();
       }
-    });
+    }));
 
-    await Future.wait(futures);
+    entries.addAll(results);
 
     final totalDuration = DateTime.now().difference(startTime);
 

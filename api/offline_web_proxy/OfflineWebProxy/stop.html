@@ -98,6 +98,10 @@
     await _cookieBox?.close();
     await _idempotencyBox?.close();
 
+    &#47;&#47; Close HTTP client
+    _httpClient?.close(force: true);
+    _httpClient = null;
+
     _isRunning = false;
     _server = null;
 
