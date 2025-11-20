@@ -13,7 +13,8 @@ void main() {
     channel.setMockMethodCallHandler((MethodCall methodCall) async {
       if (methodCall.method == 'getApplicationDocumentsDirectory') {
         // テスト用の一時ディレクトリパスのみ返す
-        final tempDir = Directory.systemTemp.createTempSync('offline_web_proxy_test');
+        final tempDir =
+            Directory.systemTemp.createTempSync('offline_web_proxy_test');
         return tempDir.path;
       }
       return null;

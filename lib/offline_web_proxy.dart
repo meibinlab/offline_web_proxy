@@ -511,7 +511,8 @@ class OfflineWebProxy {
       // Process paths with concurrency control
 
       final semaphore = Semaphore(maxConcurrency ?? 10);
-      final results = await Future.wait(targetPaths.asMap().entries.map((entry) async {
+      final results =
+          await Future.wait(targetPaths.asMap().entries.map((entry) async {
         final index = entry.key;
         final path = entry.value;
 
@@ -1189,7 +1190,8 @@ class OfflineWebProxy {
 
       // GET以外のリクエストの場合はボディをコピー
       if (request.method != 'GET') {
-        final bodyBytes = await request.read().expand((chunk) => chunk).toList();
+        final bodyBytes =
+            await request.read().expand((chunk) => chunk).toList();
         ioRequest.add(bodyBytes);
       }
 
@@ -1253,8 +1255,8 @@ class OfflineWebProxy {
       'headers': headers,
       'body': body,
       'createdAt': DateTime.now().toIso8601String(),
-      'expiresAt':
-          _calculateExpirationFromHeaders(headers, contentType).toIso8601String(),
+      'expiresAt': _calculateExpirationFromHeaders(headers, contentType)
+          .toIso8601String(),
       'contentType': contentType,
       'sizeBytes': bodyBytes.length,
     };
@@ -1373,8 +1375,8 @@ class OfflineWebProxy {
       request.headers.set('accept-encoding', 'gzip, deflate');
 
       final response = await request.close().timeout(
-        Duration(seconds: timeout ?? 30),
-      );
+            Duration(seconds: timeout ?? 30),
+          );
 
       final bodyBytes = await response.fold<List<int>>(
         <int>[],
@@ -1723,7 +1725,8 @@ class Semaphore {
       await completer.future.timeout(timeout, onTimeout: () {
         // タイムアウト時はキューから削除
         _waitQueue.remove(completer);
-        throw TimeoutException('Semaphore acquire timed out after ${timeout.inSeconds} seconds');
+        throw TimeoutException(
+            'Semaphore acquire timed out after ${timeout.inSeconds} seconds');
       });
     } catch (e) {
       rethrow;
