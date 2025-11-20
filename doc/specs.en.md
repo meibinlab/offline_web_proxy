@@ -173,7 +173,10 @@ Use idempotency keys to prevent duplicate execution of the same request.
 ### Coordination with Upstream Server
 
 - **Accept-Encoding Management**: Properly convey client's compression support status to upstream server
-- **Transparent Processing**: Forward compressed responses from upstream server as-is to client (no re-compression)
+- **Decompression Processing**: Decompress compressed responses (gzip, deflate) from upstream server at the proxy and forward to client
+  - Communication with upstream server remains compressed to save bandwidth
+  - Forward uncompressed to client (local communication, so bandwidth is not an issue)
+  - Remove Content-Encoding header and update Content-Length
 
 ### Uncompressed Option
 

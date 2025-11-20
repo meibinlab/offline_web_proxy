@@ -53,6 +53,7 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -183,6 +184,9 @@ class OfflineWebProxy {
   /// 現在のオンライン状態。
   bool _isOnline = true;
 
+  /// 上流サーバへのリクエスト用HTTPクライアント（dart:io）。
+  HttpClient? _httpClient;
+
   /// キャッシュデータの永続化ボックス。
   Box? _cacheBox;
 
@@ -280,6 +284,10 @@ class OfflineWebProxy {
       await _queueBox?.close();
       await _cookieBox?.close();
       await _idempotencyBox?.close();
+
+      // Close HTTP client
+      _httpClient?.close(force: true);
+      _httpClient = null;
 
       _isRunning = false;
       _server = null;
@@ -501,48 +509,47 @@ class OfflineWebProxy {
 
     try {
       // Process paths with concurrency control
-      final semaphore = Semaphore(maxConcurrency ?? 3);
-      final futures = targetPaths.asMap().entries.map((entry) async {
+
+      final semaphore = Semaphore(maxConcurrency ?? 10);
+      final results = await Future.wait(targetPaths.asMap().entries.map((entry) async {
         final index = entry.key;
         final path = entry.value;
 
-        await semaphore.acquire();
+        await semaphore.acquire(timeout: const Duration(seconds: 30));
         try {
           final entryStartTime = DateTime.now();
-
           try {
             final response = await _fetchFromUpstream(path, timeout: timeout);
             final duration = DateTime.now().difference(entryStartTime);
-
-            entries.add(WarmupEntry(
+            successCount++;
+            return WarmupEntry(
               path: path,
               success: true,
               statusCode: response.statusCode,
               errorMessage: null,
               duration: duration,
-            ));
-            successCount++;
+            );
           } catch (e) {
             final duration = DateTime.now().difference(entryStartTime);
-            entries.add(WarmupEntry(
+            onError?.call(path, e.toString());
+            failureCount++;
+            return WarmupEntry(
               path: path,
               success: false,
               statusCode: null,
               errorMessage: e.toString(),
               duration: duration,
-            ));
-            failureCount++;
-
-            onError?.call(path, e.toString());
+            );
+          } finally {
+            // 成功・失敗問わず進捗コールバックを呼ぶ
+            onProgress?.call(index + 1, targetPaths.length);
           }
-
-          onProgress?.call(index + 1, targetPaths.length);
         } finally {
           semaphore.release();
         }
-      });
+      }));
 
-      await Future.wait(futures);
+      entries.addAll(results);
 
       final totalDuration = DateTime.now().difference(startTime);
 
@@ -965,20 +972,26 @@ class OfflineWebProxy {
 
     // 上流サーバに転送
     try {
-      final upstreamResponse = await _forwardToUpstream(request);
+      final result = await _forwardToUpstream(request);
 
       // GETレスポンスをキャッシュ
       if (request.method == 'GET') {
-        await _cacheResponse(cacheKey, upstreamResponse);
+        await _cacheResponseBytes(
+            cacheKey, result.statusCode, result.headers, result.bodyBytes);
       }
 
       // GET以外のリクエストが失敗した場合はキューに保存
-      if (request.method != 'GET' && upstreamResponse.statusCode >= 500) {
+      if (request.method != 'GET' && result.statusCode >= 500) {
         await _queueRequest(request);
       }
 
       _cacheMisses++;
-      return upstreamResponse;
+      // ボディを含む新しいレスポンスを返す
+      return shelf.Response(
+        result.statusCode,
+        body: Uint8List.fromList(result.bodyBytes),
+        headers: result.headers,
+      );
     } catch (e) {
       // リクエストが失敗した場合、キャッシュを試すかキューに保存
       if (request.method == 'GET' && cachedResponse != null) {
@@ -1134,41 +1147,74 @@ class OfflineWebProxy {
   ///
   /// [request] 転送するHTTPリクエスト。
   ///
-  /// Returns: 上流サーバからのHTTPレスポンス。
-  Future<shelf.Response> _forwardToUpstream(shelf.Request request) async {
+  /// Returns: ステータスコード、ヘッダ、ボディバイトを含むレコード。
+  Future<({int statusCode, Map<String, String> headers, List<int> bodyBytes})>
+      _forwardToUpstream(shelf.Request request) async {
     if (_config?.origin.isEmpty ?? true) {
       throw Exception('No upstream origin configured');
     }
 
-    final upstreamUrl = '${_config!.origin}${request.url.path}';
-    final upstreamRequest =
-        http.Request(request.method, Uri.parse(upstreamUrl));
+    // パスとクエリパラメータを正規化して上流URLを構築
+    final path = request.url.path.startsWith('/')
+        ? request.url.path
+        : '/${request.url.path}';
+    final query = request.url.query.isNotEmpty ? '?${request.url.query}' : '';
+    final upstreamUrl = '${_config!.origin}$path$query';
+    final uri = Uri.parse(upstreamUrl);
 
-    // ヘッダをコピー
-    request.headers.forEach((key, value) {
-      if (!_isHopByHopHeader(key)) {
-        upstreamRequest.headers[key] = value;
-      }
-    });
+    // dart:io HttpClientを使用（接続を再利用しない設定）
+    final client = HttpClient();
+    client.autoUncompress = false; // 自動解凍を無効化
 
-    // GET以外のリクエストの場合はボディをコピー
-    if (request.method != 'GET') {
-      upstreamRequest.bodyBytes =
-          await request.read().expand((chunk) => chunk).toList();
-    }
-
-    final client = http.Client();
     try {
-      final response = await client.send(upstreamRequest);
-      final body = await response.stream.bytesToString();
+      final ioRequest = await client.openUrl(request.method, uri);
 
-      return shelf.Response(
-        response.statusCode,
-        body: body,
-        headers: response.headers,
+      // 接続を再利用しない
+      ioRequest.persistentConnection = false;
+
+      // ヘッダをコピー
+      request.headers.forEach((key, value) {
+        final lowerKey = key.toLowerCase();
+        if (!_isHopByHopHeader(key) &&
+            lowerKey != 'accept-encoding' &&
+            lowerKey != 'host') {
+          ioRequest.headers.set(key, value);
+        }
+      });
+
+      // 非圧縮レスポンスを要求
+      ioRequest.headers.set('accept-encoding', 'identity');
+      // 接続を閉じる
+      ioRequest.headers.set('connection', 'close');
+
+      // GET以外のリクエストの場合はボディをコピー
+      if (request.method != 'GET') {
+        final bodyBytes = await request.read().expand((chunk) => chunk).toList();
+        ioRequest.add(bodyBytes);
+      }
+
+      final ioResponse = await ioRequest.close();
+      final bodyBytes = await ioResponse.fold<List<int>>(
+        <int>[],
+        (previous, chunk) => previous..addAll(chunk),
       );
+
+      // ヘッダをMap<String, String>に変換
+      final headers = <String, String>{};
+      ioResponse.headers.forEach((name, values) {
+        headers[name] = values.join(', ');
+      });
+
+      return (
+        statusCode: ioResponse.statusCode,
+        headers: headers,
+        bodyBytes: bodyBytes,
+      );
+    } catch (e) {
+      print('Forward error: $e');
+      rethrow;
     } finally {
-      client.close();
+      client.close(force: true);
     }
   }
 
@@ -1193,27 +1239,46 @@ class OfflineWebProxy {
     return hopByHopHeaders.contains(header.toLowerCase());
   }
 
-  /// HTTPレスポンスをキャッシュに保存します。
-  ///
-  /// レスポンスのステータス、ヘッダ、ボディをHiveデータベースに
-  /// 永続化し、有効期限やメタデータも合わせて保存します。
+  /// レスポンスをキャッシュに保存します（バイト配列版）。
   ///
   /// [cacheKey] キャッシュキー。
   /// [response] キャッシュするHTTPレスポンス。
-  Future<void> _cacheResponse(String cacheKey, shelf.Response response) async {
-    final body = await response.readAsString();
+  /// [bodyBytes] レスポンスボディのバイト配列。
+  Future<void> _cacheResponseBytes(String cacheKey, int statusCode,
+      Map<String, String> headers, List<int> bodyBytes) async {
+    final body = utf8.decode(bodyBytes, allowMalformed: true);
+    final contentType = headers['content-type'] ?? 'application/octet-stream';
     final data = {
-      'statusCode': response.statusCode,
-      'headers': response.headers,
+      'statusCode': statusCode,
+      'headers': headers,
       'body': body,
       'createdAt': DateTime.now().toIso8601String(),
-      'expiresAt': _calculateExpiration(response).toIso8601String(),
-      'contentType':
-          response.headers['content-type'] ?? 'application/octet-stream',
-      'sizeBytes': body.length,
+      'expiresAt':
+          _calculateExpirationFromHeaders(headers, contentType).toIso8601String(),
+      'contentType': contentType,
+      'sizeBytes': bodyBytes.length,
     };
 
     await _cacheBox?.put(cacheKey, data);
+  }
+
+  /// ヘッダからキャッシュ有効期限を算出します。
+  DateTime _calculateExpirationFromHeaders(
+      Map<String, String> headers, String contentType) {
+    // Cache-Controlヘッダに基づいて有効期限を算出
+    final cacheControl = headers['cache-control'];
+    if (cacheControl != null && cacheControl.contains('max-age=')) {
+      final maxAge =
+          int.tryParse(cacheControl.split('max-age=')[1].split(',')[0].trim());
+      if (maxAge != null) {
+        return DateTime.now().add(Duration(seconds: maxAge));
+      }
+    }
+
+    // デフォルトTTLを使用
+    final ttl =
+        _config?.cacheTtl[contentType] ?? _config?.cacheTtl['default'] ?? 3600;
+    return DateTime.now().add(Duration(seconds: ttl));
   }
 
   /// レスポンスのキャッシュ有効期限を算出します。
@@ -1298,14 +1363,36 @@ class OfflineWebProxy {
     }
 
     final url = '${_config!.origin}$path';
-    final client = http.Client();
-
+    final uri = Uri.parse(url);
+    final client = HttpClient();
+    client.autoUncompress = true;
     try {
-      return await client.get(Uri.parse(url)).timeout(
-            Duration(seconds: timeout ?? 30),
-          );
+      final request = await client.getUrl(uri);
+      request.persistentConnection = false;
+      request.headers.set('connection', 'close');
+      request.headers.set('accept-encoding', 'gzip, deflate');
+
+      final response = await request.close().timeout(
+        Duration(seconds: timeout ?? 30),
+      );
+
+      final bodyBytes = await response.fold<List<int>>(
+        <int>[],
+        (previous, chunk) => previous..addAll(chunk),
+      );
+
+      final headers = <String, String>{};
+      response.headers.forEach((name, values) {
+        headers[name] = values.join(', ');
+      });
+
+      return http.Response.bytes(
+        bodyBytes,
+        response.statusCode,
+        headers: headers,
+      );
     } finally {
-      client.close();
+      client.close(force: true);
     }
   }
 
@@ -1368,37 +1455,41 @@ class OfflineWebProxy {
   ///
   /// Returns: 送信成功時は `true`。
   Future<bool> _sendQueuedRequest(Map data) async {
-    try {
-      if (_config?.origin.isEmpty ?? true) {
-        return false;
-      }
-
-      final url = data['url'] as String;
-      final method = data['method'] as String;
-      final headers = Map<String, String>.from(data['headers'] as Map? ?? {});
-      final body = data['body'] as List<int>? ?? [];
-
-      final client = http.Client();
-      try {
-        final request = http.Request(method, Uri.parse(url));
-        request.headers.addAll(headers);
-
-        if (body.isNotEmpty && method != 'GET') {
-          request.bodyBytes = body;
-        }
-
-        final response = await client
-            .send(request)
-            .timeout(_config?.requestTimeout ?? const Duration(seconds: 60));
-
-        // 2xxステータスコードを成功とみなす
-        return response.statusCode >= 200 && response.statusCode < 300;
-      } finally {
-        client.close();
-      }
-    } catch (e) {
-      // エラーの場合は再試行が必要
+    if (_config?.origin.isEmpty ?? true) {
       return false;
+    }
+
+    final url = data['url'] as String;
+    final method = data['method'] as String;
+    final headers = Map<String, String>.from(data['headers'] as Map? ?? {});
+    final body = data['body'] as List<int>? ?? [];
+
+    final client = HttpClient();
+    client.autoUncompress = true;
+    try {
+      final uri = Uri.parse(url);
+      final request = await client.openUrl(method, uri);
+
+      request.persistentConnection = false;
+      request.headers.set('connection', 'close');
+      request.headers.set('accept-encoding', 'gzip, deflate');
+
+      headers.forEach((key, value) {
+        request.headers.set(key, value);
+      });
+
+      if (body.isNotEmpty && method != 'GET') {
+        request.add(body);
+      }
+
+      final response = await request
+          .close()
+          .timeout(_config?.requestTimeout ?? const Duration(seconds: 60));
+
+      // 2xxステータスコードを成功とみなす
+      return response.statusCode >= 200 && response.statusCode < 300;
+    } finally {
+      client.close(force: true);
     }
   }
 
@@ -1614,13 +1705,13 @@ class Semaphore {
   /// [maxCount] 最大同時実行数。
   Semaphore(this.maxCount) : _currentCount = maxCount;
 
-  /// セマフォを取得します。
+  /// セマフォを取得します（タイムアウト付き）。
   ///
+  /// [timeout] 最大待機時間。デフォルトは30秒。
   /// リソースが利用可能な場合は即座に返却し、
   /// 利用不可な場合は待機キューに登録して待機します。
-  ///
-  /// Returns: リソースが利用可能になったときに完了するFuture。
-  Future<void> acquire() async {
+  /// タイムアウト時は例外を投げます。
+  Future<void> acquire({Duration timeout = const Duration(seconds: 30)}) async {
     if (_currentCount > 0) {
       _currentCount--;
       return;
@@ -1628,7 +1719,15 @@ class Semaphore {
 
     final completer = Completer<void>();
     _waitQueue.add(completer);
-    return completer.future;
+    try {
+      await completer.future.timeout(timeout, onTimeout: () {
+        // タイムアウト時はキューから削除
+        _waitQueue.remove(completer);
+        throw TimeoutException('Semaphore acquire timed out after ${timeout.inSeconds} seconds');
+      });
+    } catch (e) {
+      rethrow;
+    }
   }
 
   /// セマフォを解放します。
