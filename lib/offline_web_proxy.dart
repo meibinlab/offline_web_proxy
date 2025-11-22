@@ -1,18 +1,18 @@
 /// # offline_web_proxy
 ///
-/// An offline-compatible local proxy server that operates within Flutter WebView.
-/// Enables existing web systems to function seamlessly in mobile apps without
-/// requiring awareness of online/offline states.
+/// Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
+/// 既存のWebシステムをモバイルアプリでシームレスに動作させ、
+/// オンライン/オフライン状態を意識する必要をなくします。
 ///
-/// ## Key Features
+/// ## 主な機能
 ///
-/// * **Intelligent Caching**: RFC-compliant cache control with offline strategies
-/// * **Request Queuing**: Automatic queuing of POST/PUT/DELETE requests when offline
-/// * **Cookie Management**: Secure AES-256 encrypted cookie persistence
-/// * **Static Resource Serving**: Local serving of bundled static assets
-/// * **Seamless Offline Support**: Transparent online/offline operation
+/// * **インテリジェントキャッシング**: RFC準拠のキャッシュ制御とオフライン戦略
+/// * **リクエストキューイング**: オフライン時のPOST/PUT/DELETEリクエストの自動キュー
+/// * **Cookie管理**: AES-256暗号化による安全なCookie永続化
+/// * **静的リソース配信**: バンドルされた静的アセットのローカル配信
+/// * **シームレスなオフライン対応**: 透過的なオンライン/オフライン切り替え
 ///
-/// ## Quick Start
+/// ## クイックスタート
 ///
 /// ```dart
 /// import 'package:offline_web_proxy/offline_web_proxy.dart';
@@ -20,39 +20,38 @@
 /// final proxy = OfflineWebProxy();
 /// final config = ProxyConfig(
 ///   origin: 'https://your-api-server.com',
-///   port: 0, // Auto-assign port
+///   port: 0, // ポート自動割り当て
 /// );
 ///
-/// // Start the proxy server
+/// // プロキシサーバを起動
 /// final port = await proxy.start(config: config);
 /// print('Proxy running on http://127.0.0.1:$port');
 ///
-/// // Use in WebView
+/// // WebViewで使用
 /// webViewController.loadUrl('http://127.0.0.1:$port/your-app-path');
 /// ```
 ///
-/// ## Architecture
+/// ## アーキテクチャ
 ///
-/// The proxy intercepts HTTP requests from WebView and:
-/// 1. **Online**: Forwards requests to upstream server, caches responses
-/// 2. **Offline**: Serves from cache or queues update requests
-/// 3. **Recovery**: Automatically drains queued requests when online
+/// プロキシはWebViewからのHTTPリクエストを横取りして:
+/// 1. **オンライン時**: リクエストを上流サーバに転送し、レスポンスをキャッシュ
+/// 2. **オフライン時**: キャッシュから配信、または更新リクエストをキューに保存
+/// 3. **復旧時**: オンライン復帰時にキューされたリクエストを自動的に消化
 ///
-/// ## Cache Strategy
+/// ## キャッシュ戦略
 ///
-/// * **Fresh**: Within TTL, served immediately
-/// * **Stale**: Past TTL but within stale period, validated if online
-/// * **Expired**: Beyond stale period, removed during cleanup
+/// * **Fresh**: TTL内、即座に配信
+/// * **Stale**: TTL切れだがStale期間内、オンラインなら検証
+/// * **Expired**: Stale期間外、クリーンアップ時に削除
 ///
-/// See [ProxyConfig] for configuration options and [specs.md](https://github.com/meibinlab/offline_web_proxy/blob/main/specs.md)
-/// for detailed technical specifications.
+/// 設定オプションは [ProxyConfig] を、詳細な技術仕様は
+/// [specs.md](https://github.com/meibinlab/offline_web_proxy/blob/main/specs.md) を参照してください。
 library;
 
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
@@ -62,7 +61,7 @@ import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
 
-// Import model classes and exceptions
+// モデルクラスと例外をインポート
 import 'src/models/cache_entry.dart';
 import 'src/models/cache_stats.dart';
 import 'src/models/cookie_info.dart';
@@ -74,7 +73,7 @@ import 'src/models/queued_request.dart';
 import 'src/models/warmup_result.dart';
 import 'src/exceptions/exceptions.dart';
 
-// Export classes for public API
+// パブリックAPI用にクラスをエクスポート
 export 'src/models/cache_entry.dart';
 export 'src/models/cache_stats.dart';
 export 'src/models/cookie_info.dart';
@@ -93,65 +92,62 @@ typedef WarmupProgressCallback = void Function(int completed, int total);
 typedef WarmupErrorCallback = void Function(String path, String error);
 
 /// Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
-/// The main proxy server class that provides offline-compatible HTTP proxying
-/// for Flutter WebView applications.
+/// WebViewからのリクエストを横取りし、ネットワーク接続状態に基づいて
+/// インテリジェントに処理を行うローカルHTTPサーバを作成します。
 ///
-/// This class creates a local HTTP server that intercepts requests from WebView
-/// and intelligently handles them based on network connectivity:
+/// * **オンラインモード**: リクエストを上流サーバに転送し、レスポンスをキャッシュ
+/// * **オフラインモード**: キャッシュから配信、または更新リクエストをキューに保存
+/// * **復旧モード**: 接続復帰時にキューされたリクエストを自動的に消化
 ///
-/// * **Online Mode**: Forwards requests to upstream server and caches responses
-/// * **Offline Mode**: Serves from cache or queues update requests
-/// * **Recovery Mode**: Automatically drains queued requests when connectivity returns
-///
-/// ## Usage Example
+/// ## 使用例
 ///
 /// ```dart
 /// final proxy = OfflineWebProxy();
 ///
-/// // Configure the proxy
+/// // プロキシの設定
 /// final config = ProxyConfig(
 ///   origin: 'https://api.example.com',
-///   cacheMaxSize: 100 * 1024 * 1024, // 100MB cache
+///   cacheMaxSize: 100 * 1024 * 1024, // 100MBキャッシュ
 ///   connectTimeout: Duration(seconds: 10),
 /// );
 ///
-/// // Start the server
+/// // サーバを起動
 /// final port = await proxy.start(config: config);
 ///
-/// // Use in WebView
+/// // WebViewで使用
 /// webViewController.loadUrl('http://127.0.0.1:$port');
 ///
-/// // Monitor events
+/// // イベントを監視
 /// proxy.events.listen((event) {
 ///   if (event.type == ProxyEventType.cacheHit) {
 ///     print('Cache hit: ${event.url}');
 ///   }
 /// });
 ///
-/// // Get statistics
+/// // 統計情報を取得
 /// final stats = await proxy.getStats();
 /// print('Hit rate: ${stats.cacheHitRate}');
 ///
-/// // Cleanup
+/// // クリーンアップ
 /// await proxy.stop();
 /// ```
 ///
-/// ## Thread Safety
+/// ## スレッドセーフティ
 ///
-/// This class is thread-safe for concurrent operations. Cache operations
-/// are serialized using mutex locks to ensure data consistency.
+/// このクラスは並行操作に対してスレッドセーフです。キャッシュ操作は
+/// mutexロックを使用してシリアライズされ、データの一貫性が保証されます。
 ///
-/// ## Security
+/// ## セキュリティ
 ///
-/// * Server binds to `127.0.0.1` only (no external access)
-/// * Cookies are encrypted with AES-256 before persistence
-/// * Sensitive headers are masked in logs
-/// * Path traversal attacks are prevented for static assets
+/// * サーバは `127.0.0.1` のみにバインド（外部アクセス不可）
+/// * Cookieは永続化前にAES-256で暗号化
+/// * 機密ヘッダはログ内でマスク
+/// * 静的アセットに対するパストラバーサル攻撃を防止
 ///
-/// See also:
-/// * [ProxyConfig] for configuration options
-/// * [ProxyStats] for monitoring capabilities
-/// * [ProxyEvent] for real-time event streaming
+/// 参照:
+/// * [ProxyConfig] 設定オプション
+/// * [ProxyStats] 監視機能
+/// * [ProxyEvent] リアルタイムイベントストリーミング
 class OfflineWebProxy {
   /// 内部HTTPサーバのインスタンス。
   HttpServer? _server;
@@ -179,10 +175,15 @@ class OfflineWebProxy {
       StreamController<ProxyEvent>.broadcast();
 
   /// ネットワーク接続状態の監視用サブスクリプション。
-  late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
+  /// ライブラリのバージョンによって `ConnectivityResult` または `List<ConnectivityResult>` を返す場合があるため
+  /// 汎用的に受け取れるよう `dynamic` 型にしています。
+  late StreamSubscription<dynamic> _connectivitySubscription;
 
   /// 現在のオンライン状態。
   bool _isOnline = true;
+
+  /// キュー消化が実行中かを示すフラグ（重複実行防止）。
+  bool _isDrainingQueue = false;
 
   /// 上流サーバへのリクエスト用HTTPクライアント（dart:io）。
   HttpClient? _httpClient;
@@ -202,6 +203,10 @@ class OfflineWebProxy {
   /// 静的リソースの存在確認結果キャッシュ。
   final Map<String, bool> _staticResourceCache = {};
 
+  /// 上流サーバへの同時接続数を制限するセマフォ。
+  /// WebView が短時間に多数のリクエストを投げた場合にネイティブ側のソケット枯渇を防ぐ。
+  final Semaphore _upstreamSemaphore = Semaphore(50);
+
   /// プロキシサーバを起動します。
   ///
   /// [config] 設定オブジェクト。省略時はデフォルト設定を使用します。
@@ -217,29 +222,30 @@ class OfflineWebProxy {
     }
 
     try {
-      // Initialize Hive if not already initialized
+      // Hiveが初期化されていない場合は初期化
       if (!Hive.isAdapterRegistered(0)) {
         await Hive.initFlutter();
       }
 
-      // Load configuration
+      // 設定を読み込み
       _config = config ?? await _loadDefaultConfig();
 
-      // Initialize storage
+      // ストレージを初期化
       await _initializeStorage();
 
-      // Start connectivity monitoring
+      // 接続状態の監視を開始
       _startConnectivityMonitoring();
 
-      // Create router and middleware
+      // ルーターとミドルウェアを作成
       final router = _createRouter();
       final handler = const shelf.Pipeline()
+          .addMiddleware(_errorHandlingMiddleware)
           .addMiddleware(shelf.logRequests())
           .addMiddleware(_corsMiddleware)
           .addMiddleware(_statisticsMiddleware)
           .addHandler(router.call);
 
-      // Start server
+      // サーバを起動
       _server = await shelf_io.serve(
         handler,
         _config!.host,
@@ -249,13 +255,13 @@ class OfflineWebProxy {
       _isRunning = true;
       _startedAt = DateTime.now();
 
-      // Emit server started event
+      // サーバ起動イベントを発行
       _emitEvent(ProxyEventType.serverStarted, '', {
         'port': _server!.port,
         'host': _config!.host,
       });
 
-      // Start background tasks
+      // バックグラウンドタスクを開始
       _startBackgroundTasks();
 
       return _server!.port;
@@ -279,13 +285,13 @@ class OfflineWebProxy {
       await _connectivitySubscription.cancel();
       await _eventController.close();
 
-      // Close Hive boxes
+      // Hiveボックスを閉じる
       await _cacheBox?.close();
       await _queueBox?.close();
       await _cookieBox?.close();
       await _idempotencyBox?.close();
 
-      // Close HTTP client
+      // HTTPクライアントを閉じる
       _httpClient?.close(force: true);
       _httpClient = null;
 
@@ -321,7 +327,7 @@ class OfflineWebProxy {
       _emitEvent(ProxyEventType.cacheCleared, '', {});
     } catch (e) {
       throw CacheOperationException(
-          'clear', 'Failed to clear cache: $e', e is Exception ? e : null);
+          'clear', 'キャッシュのクリアに失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -352,8 +358,8 @@ class OfflineWebProxy {
         }
       }
     } catch (e) {
-      throw CacheOperationException('clearExpired',
-          'Failed to clear expired cache: $e', e is Exception ? e : null);
+      throw CacheOperationException(
+          'clearExpired', '期限切れキャッシュの削除に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -366,7 +372,7 @@ class OfflineWebProxy {
   ///   * [CacheOperationException] キャッシュ削除に失敗した場合。
   Future<void> clearCacheForUrl(String url) async {
     if (url.isEmpty || url.trim().isEmpty) {
-      throw ArgumentError('URL cannot be empty or whitespace-only');
+      throw ArgumentError('URLは空または空白のみにはできません');
     }
 
     try {
@@ -374,8 +380,8 @@ class OfflineWebProxy {
       final cacheKey = _generateCacheKey(normalizedUrl);
       await _cacheBox?.delete(cacheKey);
     } catch (e) {
-      throw CacheOperationException('clearForUrl',
-          'Failed to clear cache for URL: $e', e is Exception ? e : null);
+      throw CacheOperationException(
+          'clearForUrl', 'URLのキャッシュ削除に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -408,8 +414,8 @@ class OfflineWebProxy {
 
       return entries;
     } catch (e) {
-      throw CacheOperationException('getCacheList',
-          'Failed to get cache list: $e', e is Exception ? e : null);
+      throw CacheOperationException(
+          'getCacheList', 'キャッシュリストの取得に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -442,7 +448,7 @@ class OfflineWebProxy {
             if (now.isBefore(expiresAt)) {
               freshEntries++;
             } else {
-              // Check if within stale period
+              // Stale期間内かチェック
               final staleUntil = _calculateStaleExpiration(
                   createdAt, entry['contentType'] as String);
               if (now.isBefore(staleUntil)) {
@@ -468,8 +474,8 @@ class OfflineWebProxy {
         staleUsageRate: staleUsageRate,
       );
     } catch (e) {
-      throw CacheOperationException('getStats',
-          'Failed to get cache statistics: $e', e is Exception ? e : null);
+      throw CacheOperationException(
+          'getStats', 'キャッシュ統計情報の取得に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -562,7 +568,7 @@ class OfflineWebProxy {
       );
     } catch (e) {
       throw WarmupException(
-          'Warmup failed: $e', entries, e is Exception ? e : null);
+          'ウォームアップに失敗しました: $e', entries, e is Exception ? e : null);
     }
   }
 
@@ -579,6 +585,7 @@ class OfflineWebProxy {
       final cookies = <CookieInfo>[];
 
       if (_cookieBox != null) {
+        int _idx = 0;
         for (final key in _cookieBox!.keys) {
           final data = _cookieBox!.get(key) as Map?;
           if (data != null) {
@@ -587,13 +594,19 @@ class OfflineWebProxy {
               cookies.add(cookieInfo);
             }
           }
+
+          // 大量のCookieを処理する場合にUIをブロックしないよう一時的にyield
+          _idx++;
+          if (_idx % 50 == 0) {
+            await Future.delayed(Duration.zero);
+          }
         }
       }
 
       return cookies;
     } catch (e) {
       throw CookieOperationException(
-          'get', 'Failed to get cookies: $e', e is Exception ? e : null);
+          'get', 'Cookieの取得に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -607,10 +620,10 @@ class OfflineWebProxy {
     try {
       if (_cookieBox != null) {
         if (domain == null) {
-          // Clear all cookies
+          // 全Cookieを削除
           await _cookieBox!.clear();
         } else {
-          // Clear cookies for specific domain
+          // 特定ドメインのCookieを削除
           final keysToDelete = <String>[];
           for (final key in _cookieBox!.keys) {
             final data = _cookieBox!.get(key) as Map?;
@@ -626,7 +639,7 @@ class OfflineWebProxy {
       }
     } catch (e) {
       throw CookieOperationException(
-          'clear', 'Failed to clear cookies: $e', e is Exception ? e : null);
+          'clear', 'Cookieの削除に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -641,18 +654,25 @@ class OfflineWebProxy {
       final requests = <QueuedRequest>[];
 
       if (_queueBox != null) {
+        int _idx = 0;
         for (final key in _queueBox!.keys) {
           final data = _queueBox!.get(key) as Map?;
           if (data != null) {
             requests.add(_mapToQueuedRequest(data));
+          }
+
+          // 大量キュー走査時にUIをブロックしないようyield
+          _idx++;
+          if (_idx % 50 == 0) {
+            await Future.delayed(Duration.zero);
           }
         }
       }
 
       return requests;
     } catch (e) {
-      throw QueueOperationException('get', 'Failed to get queued requests: $e',
-          e is Exception ? e : null);
+      throw QueueOperationException(
+          'get', 'キューされたリクエストの取得に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -673,8 +693,8 @@ class OfflineWebProxy {
 
       return requests;
     } catch (e) {
-      throw QueueOperationException('getDropped',
-          'Failed to get dropped requests: $e', e is Exception ? e : null);
+      throw QueueOperationException('getDropped', 'ドロップされたリクエストの取得に失敗しました: $e',
+          e is Exception ? e : null);
     }
   }
 
@@ -688,7 +708,7 @@ class OfflineWebProxy {
       // 将来的には特別なストレージやログファイルをクリアすることを想定
     } catch (e) {
       throw QueueOperationException('clearDropped',
-          'Failed to clear dropped requests: $e', e is Exception ? e : null);
+          'ドロップされたリクエスト履歴の削除に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -717,7 +737,7 @@ class OfflineWebProxy {
       );
     } catch (e) {
       throw StatsOperationException(
-          'Failed to get statistics: $e', e is Exception ? e : null);
+          '統計情報の取得に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
@@ -775,12 +795,18 @@ class OfflineWebProxy {
   /// オンライン/オフラインの切り替わりを検知し、
   /// オンライン復帰時にキューの消化を自動実行します。
   void _startConnectivityMonitoring() {
-    _connectivitySubscription = Connectivity()
-        .onConnectivityChanged
-        .listen((List<ConnectivityResult> results) {
+    _connectivitySubscription =
+        Connectivity().onConnectivityChanged.listen((dynamic results) {
       final wasOnline = _isOnline;
-      _isOnline = results.isNotEmpty &&
-          !results.every((result) => result == ConnectivityResult.none);
+
+      // プラグインのバージョンによってConnectivityResultまたは
+      // List<ConnectivityResult>のどちらかの型で送られてくる場合がある
+      _isOnline = switch (results) {
+        List list when list.isNotEmpty =>
+          !list.every((r) => r == ConnectivityResult.none),
+        ConnectivityResult result => result != ConnectivityResult.none,
+        _ => true, // 不明な型の場合はフォールバックでオンラインと見なす（安全側）
+      };
 
       if (wasOnline != _isOnline) {
         _emitEvent(
@@ -831,6 +857,30 @@ class OfflineWebProxy {
               'Origin, Content-Type, Accept, Authorization',
           ...response.headers,
         });
+      };
+    };
+  }
+
+  /// グローバル例外ハンドリングミドルウェア
+  ///
+  /// ハンドラ内で未捕捉の例外が発生しても、コネクションを切断せずに
+  /// 500レスポンスを返すことでクライアント側の `Connection closed before full header` を防ぎます。
+  shelf.Middleware get _errorHandlingMiddleware {
+    return (shelf.Handler innerHandler) {
+      return (shelf.Request request) async {
+        try {
+          return await innerHandler(request);
+        } catch (e) {
+          return shelf.Response.internalServerError(
+            body: 'Internal server error',
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              // 再利用された接続で不完全なヘッダが見えるのを防ぐため
+              // 接続を確実に閉じる。
+              'Connection': 'close',
+            },
+          );
+        }
       };
     };
   }
@@ -910,9 +960,13 @@ class OfflineWebProxy {
       '.ttf',
       '.eot'
     };
-    final extension = path.toLowerCase().substring(path.lastIndexOf('.'));
-    final exists =
-        staticExtensions.contains(extension) && path.startsWith('/static/');
+    // pathに拡張子が無い場合にsubstring(-1)でクラッシュしないようガード
+    final lower = path.toLowerCase();
+    final dotIndex = lower.lastIndexOf('.');
+    final extension = dotIndex >= 0 ? lower.substring(dotIndex) : '';
+    final exists = extension.isNotEmpty &&
+        staticExtensions.contains(extension) &&
+        (path.startsWith('/static/') || path.startsWith('static/'));
 
     _staticResourceCache[path] = exists;
     return exists;
@@ -933,7 +987,7 @@ class OfflineWebProxy {
       final mimeType = _getMimeType(path);
 
       return shelf.Response.notFound(
-        'Static resource serving not implemented. Asset path: $path',
+        '静的リソースの配信は未実装です。アセットパス: $path',
         headers: {
           'Content-Type': mimeType,
           'X-Static-Resource': 'true',
@@ -941,9 +995,18 @@ class OfflineWebProxy {
       );
     } catch (e) {
       return shelf.Response.internalServerError(
-        body: 'Failed to serve static resource: $e',
+        body: '静的リソースの配信に失敗しました: $e',
       );
     }
+  }
+
+  /// リクエストから上流サーバのURLを構築します。
+  String _buildUpstreamUrl(shelf.Request request) {
+    final path = request.url.path.startsWith('/')
+        ? request.url.path
+        : '/${request.url.path}';
+    final query = request.url.query.isNotEmpty ? '?${request.url.query}' : '';
+    return '${_config!.origin}$path$query';
   }
 
   /// オンライン時のHTTPリクエストを処理します。
@@ -956,12 +1019,7 @@ class OfflineWebProxy {
   ///
   /// Returns: HTTPレスポンス。
   Future<shelf.Response> _handleOnlineRequest(shelf.Request request) async {
-    // 上流サーバのURLでキャッシュキーを生成（クエリパラメータを含む）
-    final path = request.url.path.startsWith('/')
-        ? request.url.path
-        : '/${request.url.path}';
-    final query = request.url.query.isNotEmpty ? '?${request.url.query}' : '';
-    final upstreamUrl = '${_config!.origin}$path$query';
+    final upstreamUrl = _buildUpstreamUrl(request);
     final cacheKey = _generateCacheKey(upstreamUrl);
     final cachedResponse = await _getCachedResponse(cacheKey);
 
@@ -1001,10 +1059,15 @@ class OfflineWebProxy {
         return cachedResponse;
       } else if (request.method != 'GET') {
         await _queueRequest(request);
-        return shelf.Response.ok('Request queued for retry');
+        return shelf.Response.ok('リクエストを再試行のためキューに保存しました', headers: {
+          // クライアント側で脆弱な接続を開いたままにするのを避けるため
+          // キューされたレスポンスでは接続を閉じる
+          'Connection': 'close',
+        });
       }
 
-      return shelf.Response.internalServerError(body: 'Upstream server error');
+      return shelf.Response.internalServerError(
+          body: '上流サーバエラー', headers: {'Connection': 'close'});
     }
   }
 
@@ -1018,12 +1081,7 @@ class OfflineWebProxy {
   /// Returns: HTTPレスポンス。
   Future<shelf.Response> _handleOfflineRequest(shelf.Request request) async {
     if (request.method == 'GET') {
-      // 上流サーバのURLでキャッシュキーを生成（クエリパラメータを含む）
-      final path = request.url.path.startsWith('/')
-          ? request.url.path
-          : '/${request.url.path}';
-      final query = request.url.query.isNotEmpty ? '?${request.url.query}' : '';
-      final upstreamUrl = '${_config!.origin}$path$query';
+      final upstreamUrl = _buildUpstreamUrl(request);
       final cacheKey = _generateCacheKey(upstreamUrl);
       final cachedResponse = await _getCachedResponse(cacheKey);
 
@@ -1051,7 +1109,7 @@ class OfflineWebProxy {
       await _queueRequest(request);
       _emitEvent(ProxyEventType.requestQueued, request.url.toString(), {});
 
-      return shelf.Response.ok('Request queued for retry when online');
+      return shelf.Response.ok('オンライン復帰時に再試行するためキューに保存しました');
     }
   }
 
@@ -1080,8 +1138,21 @@ class OfflineWebProxy {
   ///
   /// Returns: 正規化されたURL。
   String _normalizeUrl(String url) {
-    // URL正規化の実装
-    return url.toLowerCase().replaceAll('//', '/');
+    // 安全なURL正規化:
+    // - スキームとホスト部分は小文字化
+    // - パス内の連続するスラッシュは1つにまとめる
+    // - クエリはそのまま保持
+    try {
+      final uri = Uri.parse(url);
+      final scheme = uri.scheme.toLowerCase();
+      final authority = uri.hasAuthority ? uri.authority.toLowerCase() : '';
+      final path = uri.path.replaceAll(RegExp(r'/{2,}'), '/');
+      final query = uri.hasQuery ? '?${uri.query}' : '';
+      return '${scheme}://${authority}${path}${query}';
+    } catch (e) {
+      // パースできなければ大文字小文字のみ正規化して返す
+      return url.toLowerCase();
+    }
   }
 
   /// キャッシュからレスポンスを取得します。
@@ -1163,45 +1234,32 @@ class OfflineWebProxy {
     final upstreamUrl = '${_config!.origin}$path$query';
     final uri = Uri.parse(upstreamUrl);
 
-    // dart:io HttpClientを使用（接続を再利用しない設定）
-    final client = HttpClient();
+    // HttpClientを再利用する（大量リクエストでの生成コストを削減）
+    final client = _getOrCreateHttpClient();
     client.autoUncompress = false; // 自動解凍を無効化
+
+    // 同時上流接続数を制限してネイティブ側のリソース枯渇を防ぐ
+    await _upstreamSemaphore.acquire(timeout: const Duration(seconds: 30));
 
     try {
       final ioRequest = await client.openUrl(request.method, uri);
-
-      // 接続を再利用しない
-      ioRequest.persistentConnection = false;
-
-      // ヘッダをコピー
-      request.headers.forEach((key, value) {
-        final lowerKey = key.toLowerCase();
-        if (!_isHopByHopHeader(key) &&
-            lowerKey != 'accept-encoding' &&
-            lowerKey != 'host') {
-          ioRequest.headers.set(key, value);
-        }
-      });
-
-      // 非圧縮レスポンスを要求
-      ioRequest.headers.set('accept-encoding', 'identity');
-      // 接続を閉じる
-      ioRequest.headers.set('connection', 'close');
+      _copyRequestHeaders(request, ioRequest);
 
       // GET以外のリクエストの場合はボディをコピー
       if (request.method != 'GET') {
-        final bodyBytes =
-            await request.read().expand((chunk) => chunk).toList();
+        final bodyBytes = await request.read().expand((chunk) => chunk).toList();
         ioRequest.add(bodyBytes);
       }
 
-      final ioResponse = await ioRequest.close();
+      final ioResponse = await ioRequest.close().timeout(
+        _config?.requestTimeout ?? const Duration(seconds: 60),
+      );
+
       final bodyBytes = await ioResponse.fold<List<int>>(
         <int>[],
         (previous, chunk) => previous..addAll(chunk),
       );
 
-      // ヘッダをMap<String, String>に変換
       final headers = <String, String>{};
       ioResponse.headers.forEach((name, values) {
         headers[name] = values.join(', ');
@@ -1212,12 +1270,23 @@ class OfflineWebProxy {
         headers: headers,
         bodyBytes: bodyBytes,
       );
-    } catch (e) {
-      print('Forward error: $e');
-      rethrow;
     } finally {
-      client.close(force: true);
+      _upstreamSemaphore.release();
     }
+  }
+
+  /// リクエストヘッダを上流リクエストにコピーします。
+  void _copyRequestHeaders(shelf.Request request, HttpClientRequest ioRequest) {
+    request.headers.forEach((key, value) {
+      final lowerKey = key.toLowerCase();
+      if (!_isHopByHopHeader(key) &&
+          lowerKey != 'accept-encoding' &&
+          lowerKey != 'host') {
+        ioRequest.headers.set(key, value);
+      }
+    });
+    // 非圧縮レスポンスを要求
+    ioRequest.headers.set('accept-encoding', 'identity');
   }
 
   /// 指定したヘッダがHop-by-Hopヘッダかどうかを判定します。
@@ -1291,23 +1360,8 @@ class OfflineWebProxy {
   /// [response] 有効期限を算出するレスポンス。
   ///
   /// Returns: キャッシュ有効期限の日時。
-  DateTime _calculateExpiration(shelf.Response response) {
-    // Cache-Controlヘッダに基づいて有効期限を算出
-    final cacheControl = response.headers['cache-control'];
-    if (cacheControl != null && cacheControl.contains('max-age=')) {
-      final maxAge =
-          int.tryParse(cacheControl.split('max-age=')[1].split(',')[0].trim());
-      if (maxAge != null) {
-        return DateTime.now().add(Duration(seconds: maxAge));
-      }
-    }
-
-    // デフォルトTTLを使用
-    final contentType = response.headers['content-type'] ?? 'default';
-    final ttl =
-        _config?.cacheTtl[contentType] ?? _config?.cacheTtl['default'] ?? 3600;
-    return DateTime.now().add(Duration(seconds: ttl));
-  }
+  // 注: _calculateExpirationは未使用のためアナライザ警告を避けるために削除されました。
+  // 必要に応じて_calculateExpirationFromHeadersまたは_calculateStaleExpirationを使用してください。
 
   /// キャッシュのStale有効期限を算出します。
   ///
@@ -1323,6 +1377,34 @@ class OfflineWebProxy {
         _config?.cacheStale['default'] ??
         259200;
     return createdAt.add(Duration(seconds: stalePeriod));
+  }
+
+  /// キューの再試行バックオフ秒数を計算します。
+  ///
+  /// [retryCount] は 1 から始まる再試行回数です。
+  int _getBackoffDelay(int retryCount) {
+    final List<int>? backoff = _config?.retryBackoffSeconds;
+    if (backoff != null && backoff.isNotEmpty) {
+      final idx = retryCount - 1;
+      if (idx < backoff.length) return backoff[idx];
+      return backoff.last;
+    }
+
+    // デフォルトのバックオフシーケンス（安全側）
+    final defaultSeq = [1, 2, 5, 10, 20, 30];
+    final idx = retryCount - 1;
+    if (idx < defaultSeq.length) return defaultSeq[idx];
+    return defaultSeq.last;
+  }
+
+  /// キューデータのリトライスケジュールを更新します。
+  void _updateRetrySchedule(Map data) {
+    final retryCount = (data['retryCount'] as int? ?? 0) + 1;
+    final backoffSeconds = _getBackoffDelay(retryCount);
+    data['retryCount'] = retryCount;
+    data['nextRetryAt'] = DateTime.now()
+        .add(Duration(seconds: backoffSeconds))
+        .toIso8601String();
   }
 
   /// HTTPリクエストをキューに保存します。
@@ -1361,17 +1443,18 @@ class OfflineWebProxy {
   /// Returns: HTTPレスポンス。
   Future<http.Response> _fetchFromUpstream(String path, {int? timeout}) async {
     if (_config?.origin.isEmpty ?? true) {
-      throw Exception('No upstream origin configured');
+      throw Exception('上流サーバのオリジンが設定されていません');
     }
 
     final url = '${_config!.origin}$path';
     final uri = Uri.parse(url);
-    final client = HttpClient();
+    final client = _getOrCreateHttpClient();
     client.autoUncompress = true;
     try {
-      final request = await client.getUrl(uri);
-      request.persistentConnection = false;
-      request.headers.set('connection', 'close');
+      final request = await client.getUrl(uri).timeout(
+            Duration(seconds: timeout ?? 30),
+          );
+      // keep-aliveを有効にする（persistentConnectionデフォルトを使用）
       request.headers.set('accept-encoding', 'gzip, deflate');
 
       final response = await request.close().timeout(
@@ -1394,7 +1477,7 @@ class OfflineWebProxy {
         headers: headers,
       );
     } finally {
-      client.close(force: true);
+      // 共有クライアントをここで閉じない
     }
   }
 
@@ -1403,11 +1486,21 @@ class OfflineWebProxy {
   /// キューの消化、期限切れキャッシュのパージなどを
   /// 定期実行するタイマーを設定します。
   void _startBackgroundTasks() {
-    // キュー消化タイマーを開始
-    Timer.periodic(Duration(seconds: 3), (_) => _drainQueue());
+    // キュー消化タイマーを開始（重複実行を避けるためawait可能なコールバック）
+    Timer.periodic(Duration(seconds: 5), (timer) async {
+      if (_isDrainingQueue) return;
+      _isDrainingQueue = true;
+      try {
+        await _drainQueue();
+      } finally {
+        _isDrainingQueue = false;
+      }
+    });
 
-    // キャッシュパージタイマーを開始
-    Timer.periodic(Duration(hours: 1), (_) => _purgeExpiredCache());
+    // キャッシュパージタイマーを開始（重複実行を避けるためawait）
+    Timer.periodic(Duration(hours: 1), (timer) async {
+      await _purgeExpiredCache();
+    });
   }
 
   /// キューに保存されたリクエストを消化します。
@@ -1415,36 +1508,43 @@ class OfflineWebProxy {
   /// オンライン時にキュー内のリクエストを順次上流サーバに送信し、
   /// 成功時はキューから削除、失敗時はバックオフで再試行します。
   Future<void> _drainQueue() async {
-    if (!_isOnline || _queueBox == null) {
+    if (!_isOnline || _queueBox == null || _isDrainingQueue) {
       return;
     }
 
-    final keys = _queueBox!.keys.toList();
-    for (final key in keys) {
-      final data = _queueBox!.get(key) as Map?;
-      if (data == null) {
-        continue;
-      }
-
-      try {
-        // キューされたリクエストの送信を試みる
-        final success = await _sendQueuedRequest(data);
-        if (success) {
-          await _queueBox!.delete(key);
-          _emitEvent(ProxyEventType.queueDrained, data['url'] as String, {});
+    _isDrainingQueue = true;
+    try {
+      final keys = _queueBox!.keys.toList();
+      for (var i = 0; i < keys.length; i++) {
+        await _processQueuedItem(keys[i]);
+        if (i % 10 == 0) {
+          await Future.delayed(Duration.zero); // UIフリーズ防止
         }
-      } catch (e) {
-        // 再試行回数を更新し、次の再試行をスケジュール
-        final retryCount = (data['retryCount'] as int) + 1;
-        final backoffSeconds = _getBackoffDelay(retryCount);
+      }
+    } finally {
+      _isDrainingQueue = false;
+    }
+  }
 
-        data['retryCount'] = retryCount;
-        data['nextRetryAt'] = DateTime.now()
-            .add(Duration(seconds: backoffSeconds))
-            .toIso8601String();
+  /// キューの個別アイテムを処理します。
+  Future<void> _processQueuedItem(dynamic key) async {
+    final data = _queueBox!.get(key) as Map?;
+    if (data == null) return;
 
+    final itemUrl = data['url'] as String? ?? '';
+
+    try {
+      final success = await _sendQueuedRequest(data);
+      if (success) {
+        await _queueBox!.delete(key);
+        _emitEvent(ProxyEventType.queueDrained, itemUrl, {});
+      } else {
+        _updateRetrySchedule(data);
         await _queueBox!.put(key, data);
       }
+    } catch (e) {
+      _updateRetrySchedule(data);
+      await _queueBox!.put(key, data);
     }
   }
 
@@ -1466,14 +1566,13 @@ class OfflineWebProxy {
     final headers = Map<String, String>.from(data['headers'] as Map? ?? {});
     final body = data['body'] as List<int>? ?? [];
 
-    final client = HttpClient();
+    final client = _getOrCreateHttpClient();
     client.autoUncompress = true;
     try {
       final uri = Uri.parse(url);
       final request = await client.openUrl(method, uri);
 
-      request.persistentConnection = false;
-      request.headers.set('connection', 'close');
+      // keep-aliveを有効化（接続を閉じる指示を送らない）
       request.headers.set('accept-encoding', 'gzip, deflate');
 
       headers.forEach((key, value) {
@@ -1484,39 +1583,39 @@ class OfflineWebProxy {
         request.add(body);
       }
 
-      final response = await request
-          .close()
-          .timeout(_config?.requestTimeout ?? const Duration(seconds: 60));
+      try {
+        final response = await request
+            .close()
+            .timeout(_config?.requestTimeout ?? const Duration(seconds: 60));
 
-      // 2xxステータスコードを成功とみなす
-      return response.statusCode >= 200 && response.statusCode < 300;
+        // 2xxステータスコードを成功とみなす
+        return response.statusCode >= 200 && response.statusCode < 300;
+      } catch (e) {
+        return false;
+      }
     } finally {
-      client.close(force: true);
+      // 共有クライアントをここで閉じない
     }
   }
 
-  /// 再試行のバックオフ遅延時間を算出します。
+  /// 内部で再利用するHttpClientインスタンスを返却します。
   ///
-  /// 設定ファイルのバックオフシーケンスに基づいて遅延時間を算出し、
-  /// ジッターを加えて集中アクセスを回避します。
-  ///
-  /// [retryCount] 現在の再試行回数。
-  ///
-  /// Returns: バックオフ遅延秒数。
-  int _getBackoffDelay(int retryCount) {
-    final backoffSeconds =
-        _config?.retryBackoffSeconds ?? [1, 2, 5, 10, 20, 30];
-    final index = (retryCount - 1).clamp(0, backoffSeconds.length - 1);
-    final baseDelay = backoffSeconds[index];
+  /// 共有HttpClientをインスタンスで保持し、個々のリクエストで
+  /// 再生成しないようにします。アプリケーション終了時に `stop()` で
+  /// `close()` します。
+  HttpClient _getOrCreateHttpClient() {
+    if (_httpClient != null) return _httpClient!;
 
-    // ジッターを追加（±20%）
-    final jitter = (Random().nextDouble() - 0.5) * 0.4;
-    return (baseDelay * (1 + jitter)).round();
+    _httpClient = HttpClient()
+      ..connectionTimeout =
+          _config?.connectTimeout ?? const Duration(seconds: 10)
+      ..autoUncompress = true
+      ..maxConnectionsPerHost = 50;
+
+    return _httpClient!;
   }
 
   /// 期限切れキャッシュをパージします。
-  ///
-  /// バックグラウンドタスクで定期実行され、
   /// エラーが発生しても例外をスローしません。
   Future<void> _purgeExpiredCache() async {
     try {
@@ -1627,7 +1726,7 @@ class OfflineWebProxy {
   CookieInfo _mapToCookieInfo(Map data) {
     return CookieInfo(
       name: data['name'] as String? ?? '',
-      value: '***', // Always mask the value
+      value: '***', // セキュリティのため常に値をマスク
       domain: data['domain'] as String? ?? '',
       path: data['path'] as String? ?? '/',
       expires: data['expires'] != null
@@ -1725,8 +1824,7 @@ class Semaphore {
       await completer.future.timeout(timeout, onTimeout: () {
         // タイムアウト時はキューから削除
         _waitQueue.remove(completer);
-        throw TimeoutException(
-            'Semaphore acquire timed out after ${timeout.inSeconds} seconds');
+        throw TimeoutException('セマフォの取得が${timeout.inSeconds}秒でタイムアウトしました');
       });
     } catch (e) {
       rethrow;
