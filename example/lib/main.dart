@@ -36,6 +36,7 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
   String _responseData = 'No data yet';
   bool _isProxyRunning = false;
   ProxyStats? _stats;
+  int _totalErrorCount = 0;
 
   final List<String> _apiEndpoints = [
     '/posts/1',
@@ -67,6 +68,10 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
       );
 
       final port = await _proxy.start(config: config);
+
+      // 開発/検証時はバックグラウンドタスクを有効化してキュー消化を行う
+      // デフォルト実装ではテストの切り分け用に無効になっているため明示的に有効化する
+      _proxy.setDisableBackgroundTasksForDebug(false);
 
       setState(() {
         _proxyUrl = 'localhost:$port';
@@ -144,6 +149,83 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
         _responseData = 'Failed to clear cache: $e';
       });
     }
+  }
+
+  Future<void> _stressTest() async {
+    if (!_isProxyRunning) return;
+
+    setState(() {
+      _responseData = 'Starting stress test...';
+    });
+
+    final proxyBaseUrl =
+        _proxyUrl.replaceAll('http://', '').replaceAll('https://', '');
+
+    // 低負荷再現用: 合計を少なくし並列数を下げる
+    const int total = 50;
+    // 並列数を制限して上流や端末のソケット枯渇を避ける
+    const int concurrency = 3;
+    int successCount = 0;
+
+    final endpoints = List<String>.generate(
+      total,
+      (i) => _apiEndpoints[i % _apiEndpoints.length],
+    );
+
+    for (int i = 0; i < endpoints.length; i += concurrency) {
+      final batch = endpoints.skip(i).take(concurrency).toList();
+      final batchStartIndex = i;
+      int batchErrorCount = 0;
+      final List<String> batchErrorDetails = [];
+      final futures = batch.map((endpoint) async {
+        try {
+          final res = await http
+              .get(Uri.parse('http://$proxyBaseUrl$endpoint'))
+              .timeout(const Duration(seconds: 10));
+          return res;
+        } catch (e) {
+          // 個別の失敗はここでカウントしてバッチ単位でまとめる
+          batchErrorCount++;
+          batchErrorDetails.add('$endpoint: $e');
+          return null;
+        }
+      }).toList();
+
+      final results = await Future.wait(futures);
+      int batchSuccess = 0;
+      for (final r in results) {
+        if (r != null && r.statusCode == 200) batchSuccess++;
+      }
+      successCount += batchSuccess;
+      _totalErrorCount += batchErrorCount;
+
+      // バッチ単位で進捗とエラー数を表示（UI負荷を抑える）
+      final processed = (batchStartIndex + batch.length).clamp(0, endpoints.length);
+
+      // ログにも出力して後で解析しやすくする
+      // 重要: debugPrint で出力すると `flutter logs` に表示されます
+      if (batchErrorCount > 0) {
+        debugPrint('StressTest batch: processed=$processed batchSuccess=$batchSuccess batchErrors=$batchErrorCount totalErrors=$_totalErrorCount');
+        for (final d in batchErrorDetails) {
+          debugPrint('StressTest error detail: $d');
+        }
+      } else {
+        debugPrint('StressTest batch: processed=$processed batchSuccess=$batchSuccess batchErrors=0 totalErrors=$_totalErrorCount');
+      }
+      if (mounted) {
+        setState(() {
+          _responseData = 'Stress test running... processed: $processed / $total (success +$batchSuccess, errors +$batchErrorCount)';
+        });
+      }
+
+      // 小休止を挟んでメインスレッド負荷を軽減
+      await Future.delayed(const Duration(milliseconds: 20));
+    }
+
+    setState(() {
+      _responseData = 'Stress test complete. Success: $successCount / $total Errors: $_totalErrorCount';
+    });
+    debugPrint('StressTest complete: success=$successCount totalErrors=$_totalErrorCount');
   }
 
   @override
@@ -230,6 +312,12 @@ class _ProxyExampleScreenState extends State<ProxyExampleScreen> {
                       _isProxyRunning ? () => _makeRequest('/posts') : null,
                   icon: const Icon(Icons.refresh),
                   label: const Text('Fetch Posts'),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton.icon(
+                  onPressed: _isProxyRunning ? _stressTest : null,
+                  icon: const Icon(Icons.bolt),
+                  label: const Text('Stress Test'),
                 ),
               ],
             ),
