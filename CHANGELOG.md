@@ -1,3 +1,11 @@
+## 0.2.2
+
+### CI/リリース
+
+- **タグpushで自動公開**: `v*` タグのpushをトリガーに pub.dev publish → GitHub Release 作成まで自動化
+
+---
+
 ## 0.2.1
 
 ### CI/リリース
