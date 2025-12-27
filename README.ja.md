@@ -38,7 +38,7 @@ Flutter WebView内で動作するオフライン対応ローカルプロキシ�
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.2.0
+  offline_web_proxy: ^0.2.1
   # WebViewを使用する場合は以下も追加
   # webview_flutter: ^4.4.2
 ```
