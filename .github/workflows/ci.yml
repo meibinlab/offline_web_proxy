@@ -65,7 +65,7 @@ jobs:
       run: flutter pub get
 
     - name: Run unit tests
-      run: flutter test --coverage --reporter=expanded
+      run: flutter test --coverage
 
     - name: Upload coverage to Codecov
       if: matrix.flutter-version == env.FLUTTER_VERSION
