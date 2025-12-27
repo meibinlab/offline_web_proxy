@@ -204,39 +204,14 @@ jobs:
         if [[ -n "$PUB_CREDENTIALS" ]]; then
           printf '%s' "$PUB_CREDENTIALS" > ~/.config/dart/pub-credentials.json
         elif [[ -n "$PUB_DEV_PUBLISH_ACCESS_TOKEN" && -n "$PUB_DEV_PUBLISH_REFRESH_TOKEN" && -n "$PUB_DEV_PUBLISH_TOKEN_ENDPOINT" && -n "$PUB_DEV_PUBLISH_EXPIRATION" ]]; then
-          python3 - <<'PY'
-          import json
-          import os
-          import pathlib
-
-          data = {
-              "accessToken": os.environ["PUB_DEV_PUBLISH_ACCESS_TOKEN"],
-              "refreshToken": os.environ["PUB_DEV_PUBLISH_REFRESH_TOKEN"],
-              "tokenEndpoint": os.environ["PUB_DEV_PUBLISH_TOKEN_ENDPOINT"],
-              "scopes": [
-                  "https://www.googleapis.com/auth/userinfo.email",
-                  "openid",
-              ],
-              "expiration": int(os.environ["PUB_DEV_PUBLISH_EXPIRATION"]),
-          }
-
-          p = pathlib.Path.home() / ".config" / "dart" / "pub-credentials.json"
-          p.parent.mkdir(parents=True, exist_ok=True)
-          p.write_text(json.dumps(data), encoding="utf-8")
-          print("wrote", p)
-          PY
+          python3 -c 'import json, os, pathlib; data={"accessToken": os.environ["PUB_DEV_PUBLISH_ACCESS_TOKEN"], "refreshToken": os.environ["PUB_DEV_PUBLISH_REFRESH_TOKEN"], "tokenEndpoint": os.environ["PUB_DEV_PUBLISH_TOKEN_ENDPOINT"], "scopes": ["https://www.googleapis.com/auth/userinfo.email", "openid"], "expiration": int(os.environ["PUB_DEV_PUBLISH_EXPIRATION"])}; p=pathlib.Path.home()/".config"/"dart"/"pub-credentials.json"; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(data), encoding="utf-8"); print("wrote", p)'
         else
           echo "::error::Missing pub.dev credentials. Set secret PUB_CREDENTIALS (recommended) OR all of PUB_DEV_PUBLISH_ACCESS_TOKEN, PUB_DEV_PUBLISH_REFRESH_TOKEN, PUB_DEV_PUBLISH_TOKEN_ENDPOINT, PUB_DEV_PUBLISH_EXPIRATION."
           exit 1
         fi
 
         # Validate JSON to avoid falling back to interactive login.
-        python3 - <<'PY'
-        import json, pathlib
-        p = pathlib.Path.home() / '.config' / 'dart' / 'pub-credentials.json'
-        json.loads(p.read_text(encoding='utf-8'))
-        print('pub-credentials.json looks valid')
-        PY
+        python3 -c 'import json, pathlib; p=pathlib.Path.home()/".config"/"dart"/"pub-credentials.json"; json.loads(p.read_text(encoding="utf-8")); print("pub-credentials.json looks valid")'
 
     - name: Publish to pub.dev
       run: dart pub publish --force
