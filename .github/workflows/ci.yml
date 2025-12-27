@@ -218,7 +218,6 @@ jobs:
       with:
         tag_name: ${{ github.ref_name }}
         generate_release_notes: true
-        generate_release_notes: true
 
   # 開発環境ビルド（プルリクエスト用）
   build_preview:
