@@ -335,8 +335,7 @@ return {status: r.status, body: t};
                 if (range != null && range.startsWith('bytes=')) {
                   final parts = range.substring('bytes='.length).split('-');
                   final start = int.tryParse(parts.first) ?? 0;
-                  final end =
-                      int.tryParse(parts.length > 1 ? parts[1] : '') ??
+                  final end = int.tryParse(parts.length > 1 ? parts[1] : '') ??
                       (totalSize - 1);
                   final safeStart = start.clamp(0, totalSize - 1);
                   final safeEnd = end.clamp(safeStart, totalSize - 1);
@@ -468,8 +467,7 @@ return {status: r.status, len: b.byteLength, first: u[0], last: u[u.length-1]};
                   final spec = range.substring('bytes='.length);
                   final parts = spec.split('-');
                   final start = int.tryParse(parts[0]) ?? 0;
-                  final end =
-                      int.tryParse(parts.length > 1 ? parts[1] : '') ??
+                  final end = int.tryParse(parts.length > 1 ? parts[1] : '') ??
                       (start + 1023);
                   final safeStart = start.clamp(0, totalSize - 1);
                   final safeEnd = end.clamp(safeStart, totalSize - 1);
