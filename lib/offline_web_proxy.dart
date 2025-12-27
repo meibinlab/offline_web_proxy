@@ -188,6 +188,10 @@ class OfflineWebProxy {
   /// 上流サーバへのリクエスト用HTTPクライアント（dart:io）。
   HttpClient? _httpClient;
 
+  /// バックグラウンドタスク用タイマー（stop()で確実に停止する）。
+  Timer? _queueDrainTimer;
+  Timer? _cachePurgeTimer;
+
   /// キャッシュデータの永続化ボックス。
   Box? _cacheBox;
 
@@ -281,6 +285,11 @@ class OfflineWebProxy {
     }
 
     try {
+      _queueDrainTimer?.cancel();
+      _queueDrainTimer = null;
+      _cachePurgeTimer?.cancel();
+      _cachePurgeTimer = null;
+
       await _server?.close();
       await _connectivitySubscription.cancel();
       await _eventController.close();
@@ -343,7 +352,9 @@ class OfflineWebProxy {
       final keysToDelete = <String>[];
 
       if (_cacheBox != null) {
-        for (final key in _cacheBox!.keys) {
+        final keys = _cacheBox!.keys.toList(growable: false);
+        for (var i = 0; i < keys.length; i++) {
+          final key = keys[i];
           final entry = _cacheBox!.get(key) as Map?;
           if (entry != null) {
             final expiresAt = DateTime.parse(entry['expiresAt'] as String);
@@ -351,10 +362,19 @@ class OfflineWebProxy {
               keysToDelete.add(key as String);
             }
           }
+
+          if (i % 200 == 0) {
+            await Future.delayed(Duration.zero);
+          }
         }
 
-        for (final key in keysToDelete) {
+        for (var i = 0; i < keysToDelete.length; i++) {
+          final key = keysToDelete[i];
           await _cacheBox!.delete(key);
+
+          if (i % 200 == 0) {
+            await Future.delayed(Duration.zero);
+          }
         }
       }
     } catch (e) {
@@ -585,7 +605,7 @@ class OfflineWebProxy {
       final cookies = <CookieInfo>[];
 
       if (_cookieBox != null) {
-        int _idx = 0;
+        int idx = 0;
         for (final key in _cookieBox!.keys) {
           final data = _cookieBox!.get(key) as Map?;
           if (data != null) {
@@ -596,8 +616,8 @@ class OfflineWebProxy {
           }
 
           // 大量のCookieを処理する場合にUIをブロックしないよう一時的にyield
-          _idx++;
-          if (_idx % 50 == 0) {
+          idx++;
+          if (idx % 50 == 0) {
             await Future.delayed(Duration.zero);
           }
         }
@@ -654,7 +674,7 @@ class OfflineWebProxy {
       final requests = <QueuedRequest>[];
 
       if (_queueBox != null) {
-        int _idx = 0;
+        int idx = 0;
         for (final key in _queueBox!.keys) {
           final data = _queueBox!.get(key) as Map?;
           if (data != null) {
@@ -662,8 +682,8 @@ class OfflineWebProxy {
           }
 
           // 大量キュー走査時にUIをブロックしないようyield
-          _idx++;
-          if (_idx % 50 == 0) {
+          idx++;
+          if (idx % 50 == 0) {
             await Future.delayed(Duration.zero);
           }
         }
@@ -1026,22 +1046,46 @@ class OfflineWebProxy {
     if (cachedResponse != null && _isCacheValid(cachedResponse)) {
       _cacheHits++;
       _emitEvent(ProxyEventType.cacheHit, request.url.toString(), {});
+      final rangeEntry = await _getCachedResponseBytesEntry(cacheKey);
+      if (rangeEntry != null) {
+        final rangeResp = _tryBuildRangeResponseFromCache(
+          request,
+          cachedHeaders: rangeEntry.headers,
+          cachedBodyBytes: rangeEntry.bodyBytes,
+        );
+        if (rangeResp != null) return rangeResp;
+      }
       return cachedResponse;
     }
 
+    // NOTE: 非GETは、失敗時のキュー保存や再送のためにボディを保持する必要がある。
+    // shelf.Request のストリームは一度しか読めないため、ここで一度だけ読み取り
+    // 上流転送とキュー保存で共有する。
+    final Uint8List? requestBodyBytes =
+        request.method == 'GET' ? null : await _readRequestBodyBytes(request);
+
     // 上流サーバに転送
     try {
-      final result = await _forwardToUpstream(request);
+      final result = await _forwardToUpstream(
+        request,
+        requestBodyBytes: requestBodyBytes,
+      );
 
       // GETレスポンスをキャッシュ
       if (request.method == 'GET') {
-        await _cacheResponseBytes(
-            cacheKey, result.statusCode, result.headers, result.bodyBytes);
+        // Range要求（206）やRange付きGETをキャッシュすると
+        // 同一URLの通常GET(200)のキャッシュを壊す可能性があるため避ける。
+        final hasRange =
+            request.headers.keys.any((k) => k.toLowerCase() == 'range');
+        if (!hasRange && result.statusCode == 200) {
+          await _cacheResponseBytes(
+              cacheKey, result.statusCode, result.headers, result.bodyBytes);
+        }
       }
 
       // GET以外のリクエストが失敗した場合はキューに保存
       if (request.method != 'GET' && result.statusCode >= 500) {
-        await _queueRequest(request);
+        await _queueRequest(request, bodyBytes: requestBodyBytes);
       }
 
       _cacheMisses++;
@@ -1056,9 +1100,18 @@ class OfflineWebProxy {
       if (request.method == 'GET' && cachedResponse != null) {
         _cacheHits++;
         _emitEvent(ProxyEventType.cacheStaleUsed, request.url.toString(), {});
+        final rangeEntry = await _getCachedResponseBytesEntry(cacheKey);
+        if (rangeEntry != null) {
+          final rangeResp = _tryBuildRangeResponseFromCache(
+            request,
+            cachedHeaders: rangeEntry.headers,
+            cachedBodyBytes: rangeEntry.bodyBytes,
+          );
+          if (rangeResp != null) return rangeResp;
+        }
         return cachedResponse;
       } else if (request.method != 'GET') {
-        await _queueRequest(request);
+        await _queueRequest(request, bodyBytes: requestBodyBytes);
         return shelf.Response.ok('リクエストを再試行のためキューに保存しました', headers: {
           // クライアント側で脆弱な接続を開いたままにするのを避けるため
           // キューされたレスポンスでは接続を閉じる
@@ -1069,6 +1122,14 @@ class OfflineWebProxy {
       return shelf.Response.internalServerError(
           body: '上流サーバエラー', headers: {'Connection': 'close'});
     }
+  }
+
+  Future<Uint8List> _readRequestBodyBytes(shelf.Request request) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in request.read()) {
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
   }
 
   /// オフライン時のHTTPリクエストを処理します。
@@ -1086,6 +1147,24 @@ class OfflineWebProxy {
       final cachedResponse = await _getCachedResponse(cacheKey);
 
       if (cachedResponse != null) {
+        final rangeEntry = await _getCachedResponseBytesEntry(cacheKey);
+        if (rangeEntry != null) {
+          final rangeResp = _tryBuildRangeResponseFromCache(
+            request,
+            cachedHeaders: rangeEntry.headers,
+            cachedBodyBytes: rangeEntry.bodyBytes,
+          );
+          if (rangeResp != null) {
+            _cacheHits++;
+            _emitEvent(ProxyEventType.cacheHit, request.url.toString(), {});
+            return rangeResp.change(headers: {
+              'X-Offline': '1',
+              'X-Offline-Source': 'cache',
+              ...rangeResp.headers,
+            });
+          }
+        }
+
         _cacheHits++;
         _emitEvent(ProxyEventType.cacheHit, request.url.toString(), {});
         return cachedResponse.change(headers: {
@@ -1148,7 +1227,7 @@ class OfflineWebProxy {
       final authority = uri.hasAuthority ? uri.authority.toLowerCase() : '';
       final path = uri.path.replaceAll(RegExp(r'/{2,}'), '/');
       final query = uri.hasQuery ? '?${uri.query}' : '';
-      return '${scheme}://${authority}${path}${query}';
+      return '$scheme://$authority$path$query';
     } catch (e) {
       // パースできなければ大文字小文字のみ正規化して返す
       return url.toLowerCase();
@@ -1170,10 +1249,99 @@ class OfflineWebProxy {
     }
 
     // キャッシュデータからレスポンスを再構築
+    final statusCode = data['statusCode'] as int;
+    final headers = Map<String, String>.from(data['headers'] as Map);
+    final body = data['body'];
+
+    // 互換性: 旧バージョンは body を String で保存していた
+    if (body is String) {
+      return shelf.Response(statusCode, body: body, headers: headers);
+    }
+    if (body is Uint8List) {
+      return shelf.Response(statusCode, body: body, headers: headers);
+    }
+    if (body is List<int>) {
+      return shelf.Response(
+        statusCode,
+        body: Uint8List.fromList(body),
+        headers: headers,
+      );
+    }
+
+    // 未知の形式はキャッシュ不一致扱い
+    return null;
+  }
+
+  Future<
+      ({
+        int statusCode,
+        Map<String, String> headers,
+        Uint8List bodyBytes,
+      })?> _getCachedResponseBytesEntry(String cacheKey) async {
+    final data = _cacheBox?.get(cacheKey) as Map?;
+    if (data == null) return null;
+
+    final statusCode = data['statusCode'] as int;
+    final headers = Map<String, String>.from(data['headers'] as Map);
+    final body = data['body'];
+
+    if (body is Uint8List) {
+      return (statusCode: statusCode, headers: headers, bodyBytes: body);
+    }
+    if (body is List<int>) {
+      return (
+        statusCode: statusCode,
+        headers: headers,
+        bodyBytes: Uint8List.fromList(body),
+      );
+    }
+
+    // 旧バージョンの String body は Range 対応対象外
+    return null;
+  }
+
+  shelf.Response? _tryBuildRangeResponseFromCache(
+    shelf.Request request, {
+    required Map<String, String> cachedHeaders,
+    required Uint8List cachedBodyBytes,
+  }) {
+    String? rangeValue;
+    request.headers.forEach((k, v) {
+      if (k.toLowerCase() == 'range') rangeValue = v;
+    });
+    final range = rangeValue;
+    if (range == null || range.isEmpty) return null;
+
+    // 仕様: bytes=<start>-<end> の単一Rangeのみサポート
+    final m = RegExp(r'^bytes=(\d+)-(\d+)$').firstMatch(range.trim());
+    if (m == null) return null;
+
+    final start = int.tryParse(m.group(1) ?? '');
+    final end = int.tryParse(m.group(2) ?? '');
+    if (start == null || end == null) return null;
+
+    final total = cachedBodyBytes.length;
+    if (total == 0) return null;
+    if (start < 0 || end < start || start >= total) {
+      return shelf.Response(416, headers: {
+        'Content-Range': 'bytes */$total',
+        'Accept-Ranges': 'bytes',
+      });
+    }
+
+    final safeEnd = end >= total ? total - 1 : end;
+    final slice = cachedBodyBytes.sublist(start, safeEnd + 1);
+
+    final headers = Map<String, String>.from(cachedHeaders);
+    headers['Accept-Ranges'] = 'bytes';
+    headers['Content-Range'] = 'bytes $start-$safeEnd/$total';
+    headers.removeWhere((k, _) => k.toLowerCase() == 'content-length');
+    headers.removeWhere((k, _) => k.toLowerCase() == 'transfer-encoding');
+
     return shelf.Response(
-      data['statusCode'] as int,
-      body: data['body'] as String,
-      headers: Map<String, String>.from(data['headers'] as Map),
+      206,
+      body: Uint8List.fromList(slice),
+      headers: headers,
     );
   }
 
@@ -1221,7 +1389,10 @@ class OfflineWebProxy {
   ///
   /// Returns: ステータスコード、ヘッダ、ボディバイトを含むレコード。
   Future<({int statusCode, Map<String, String> headers, List<int> bodyBytes})>
-      _forwardToUpstream(shelf.Request request) async {
+      _forwardToUpstream(
+    shelf.Request request, {
+    Uint8List? requestBodyBytes,
+  }) async {
     if (_config?.origin.isEmpty ?? true) {
       throw Exception('No upstream origin configured');
     }
@@ -1247,27 +1418,32 @@ class OfflineWebProxy {
 
       // GET以外のリクエストの場合はボディをコピー
       if (request.method != 'GET') {
-        final bodyBytes = await request.read().expand((chunk) => chunk).toList();
-        ioRequest.add(bodyBytes);
+        final bytes = requestBodyBytes ?? await _readRequestBodyBytes(request);
+        if (bytes.isNotEmpty) {
+          ioRequest.add(bytes);
+        }
       }
 
       final ioResponse = await ioRequest.close().timeout(
-        _config?.requestTimeout ?? const Duration(seconds: 60),
-      );
+            _config?.requestTimeout ?? const Duration(seconds: 60),
+          );
 
-      final bodyBytes = await ioResponse.fold<List<int>>(
-        <int>[],
-        (previous, chunk) => previous..addAll(chunk),
-      );
+      final builder = BytesBuilder(copy: false);
+      await for (final chunk in ioResponse) {
+        builder.add(chunk);
+      }
+      final bodyBytes = builder.takeBytes();
 
       final headers = <String, String>{};
       ioResponse.headers.forEach((name, values) {
         headers[name] = values.join(', ');
       });
 
+      final sanitizedHeaders = _sanitizeResponseHeaders(headers);
+
       return (
         statusCode: ioResponse.statusCode,
-        headers: headers,
+        headers: sanitizedHeaders,
         bodyBytes: bodyBytes,
       );
     } finally {
@@ -1310,6 +1486,32 @@ class OfflineWebProxy {
     return hopByHopHeaders.contains(header.toLowerCase());
   }
 
+  /// 上流レスポンスヘッダをクライアント返却/キャッシュ向けにサニタイズします。
+  ///
+  /// `transfer-encoding: chunked` 等をそのまま転送すると、shelf 側の実際の
+  /// ボディエンコード（content-length 付き等）と矛盾してクライアントが
+  /// デコードエラー（FormatException）を起こすことがあります。
+  Map<String, String> _sanitizeResponseHeaders(Map<String, String> headers) {
+    final sanitized = Map<String, String>.from(headers);
+
+    const hopByHop = {
+      'connection',
+      'upgrade',
+      'proxy-authenticate',
+      'proxy-authorization',
+      'te',
+      'trailers',
+      'transfer-encoding',
+      'keep-alive',
+    };
+    sanitized.removeWhere((key, _) => hopByHop.contains(key.toLowerCase()));
+
+    // shelf がボディ長/転送方式を決めるため、上流由来の値は捨てる
+    sanitized.removeWhere((key, _) => key.toLowerCase() == 'content-length');
+
+    return sanitized;
+  }
+
   /// レスポンスをキャッシュに保存します（バイト配列版）。
   ///
   /// [cacheKey] キャッシュキー。
@@ -1317,15 +1519,18 @@ class OfflineWebProxy {
   /// [bodyBytes] レスポンスボディのバイト配列。
   Future<void> _cacheResponseBytes(String cacheKey, int statusCode,
       Map<String, String> headers, List<int> bodyBytes) async {
-    final body = utf8.decode(bodyBytes, allowMalformed: true);
-    final contentType = headers['content-type'] ?? 'application/octet-stream';
+    final sanitizedHeaders = _sanitizeResponseHeaders(headers);
+    final contentType =
+        sanitizedHeaders['content-type'] ?? 'application/octet-stream';
     final data = {
       'statusCode': statusCode,
-      'headers': headers,
-      'body': body,
+      'headers': sanitizedHeaders,
+      // バイナリも含めてそのまま保存（UTF-8変換は高コストで破損も起こし得る）
+      'body': Uint8List.fromList(bodyBytes),
       'createdAt': DateTime.now().toIso8601String(),
-      'expiresAt': _calculateExpirationFromHeaders(headers, contentType)
-          .toIso8601String(),
+      'expiresAt':
+          _calculateExpirationFromHeaders(sanitizedHeaders, contentType)
+              .toIso8601String(),
       'contentType': contentType,
       'sizeBytes': bodyBytes.length,
     };
@@ -1402,9 +1607,8 @@ class OfflineWebProxy {
     final retryCount = (data['retryCount'] as int? ?? 0) + 1;
     final backoffSeconds = _getBackoffDelay(retryCount);
     data['retryCount'] = retryCount;
-    data['nextRetryAt'] = DateTime.now()
-        .add(Duration(seconds: backoffSeconds))
-        .toIso8601String();
+    data['nextRetryAt'] =
+        DateTime.now().add(Duration(seconds: backoffSeconds)).toIso8601String();
   }
 
   /// HTTPリクエストをキューに保存します。
@@ -1413,13 +1617,23 @@ class OfflineWebProxy {
   /// キューに保存し、オンライン復帰時に自動再送します。
   ///
   /// [request] キューに保存するHTTPリクエスト。
-  Future<void> _queueRequest(shelf.Request request) async {
-    final body = request.method != 'GET'
-        ? await request.read().expand((chunk) => chunk).toList()
-        : <int>[];
+  Future<void> _queueRequest(
+    shelf.Request request, {
+    List<int>? bodyBytes,
+  }) async {
+    final List<int> body;
+    if (request.method == 'GET') {
+      body = <int>[];
+    } else {
+      body = bodyBytes ?? await _readRequestBodyBytes(request);
+    }
+
+    // NOTE: キュー再送は HttpClient で行うため、必ず絶対URLを保存する。
+    // 旧バージョン互換のため、相対URLを保存していたデータは _sendQueuedRequest 側で補正する。
+    final upstreamUrl = _buildUpstreamUrl(request);
 
     final queueData = {
-      'url': request.url.toString(),
+      'url': upstreamUrl,
       'method': request.method,
       'headers': request.headers,
       'body': body,
@@ -1461,20 +1675,23 @@ class OfflineWebProxy {
             Duration(seconds: timeout ?? 30),
           );
 
-      final bodyBytes = await response.fold<List<int>>(
-        <int>[],
-        (previous, chunk) => previous..addAll(chunk),
-      );
+      final builder = BytesBuilder(copy: false);
+      await for (final chunk in response) {
+        builder.add(chunk);
+      }
+      final bodyBytes = builder.takeBytes();
 
       final headers = <String, String>{};
       response.headers.forEach((name, values) {
         headers[name] = values.join(', ');
       });
 
+      final sanitizedHeaders = _sanitizeResponseHeaders(headers);
+
       return http.Response.bytes(
         bodyBytes,
         response.statusCode,
-        headers: headers,
+        headers: sanitizedHeaders,
       );
     } finally {
       // 共有クライアントをここで閉じない
@@ -1486,20 +1703,20 @@ class OfflineWebProxy {
   /// キューの消化、期限切れキャッシュのパージなどを
   /// 定期実行するタイマーを設定します。
   void _startBackgroundTasks() {
-    // キュー消化タイマーを開始（重複実行を避けるためawait可能なコールバック）
-    Timer.periodic(Duration(seconds: 5), (timer) async {
-      if (_isDrainingQueue) return;
-      _isDrainingQueue = true;
-      try {
-        await _drainQueue();
-      } finally {
-        _isDrainingQueue = false;
-      }
+    // 既存タイマーがあれば止めてから再設定（再起動時の多重実行防止）
+    _queueDrainTimer?.cancel();
+    _cachePurgeTimer?.cancel();
+
+    // キュー消化タイマーを開始（重複実行は _drainQueue 内でガード）
+    _queueDrainTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      // ignore: discarded_futures
+      _drainQueue();
     });
 
-    // キャッシュパージタイマーを開始（重複実行を避けるためawait）
-    Timer.periodic(Duration(hours: 1), (timer) async {
-      await _purgeExpiredCache();
+    // キャッシュパージタイマーを開始
+    _cachePurgeTimer = Timer.periodic(const Duration(hours: 1), (timer) {
+      // ignore: discarded_futures
+      _purgeExpiredCache();
     });
   }
 
@@ -1509,6 +1726,10 @@ class OfflineWebProxy {
   /// 成功時はキューから削除、失敗時はバックオフで再試行します。
   Future<void> _drainQueue() async {
     if (!_isOnline || _queueBox == null || _isDrainingQueue) {
+      return;
+    }
+
+    if (_queueBox!.isEmpty) {
       return;
     }
 
@@ -1569,7 +1790,18 @@ class OfflineWebProxy {
     final client = _getOrCreateHttpClient();
     client.autoUncompress = true;
     try {
-      final uri = Uri.parse(url);
+      Uri uri = Uri.parse(url);
+
+      // 互換性: 旧キューデータが相対URLだった場合は origin を付与
+      if (!uri.isAbsolute) {
+        final origin = _config?.origin ?? '';
+        if (origin.isEmpty) {
+          return false;
+        }
+
+        final normalizedPath = url.startsWith('/') ? url : '/$url';
+        uri = Uri.parse('$origin$normalizedPath');
+      }
       final request = await client.openUrl(method, uri);
 
       // keep-aliveを有効化（接続を閉じる指示を送らない）

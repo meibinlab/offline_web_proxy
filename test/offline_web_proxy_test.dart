@@ -10,7 +10,8 @@ void main() {
 
   setUpAll(() {
     const channel = MethodChannel('plugins.flutter.io/path_provider');
-    channel.setMockMethodCallHandler((MethodCall methodCall) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
       if (methodCall.method == 'getApplicationDocumentsDirectory') {
         // テスト用の一時ディレクトリパスのみ返す
         final tempDir =
