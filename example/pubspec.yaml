@@ -34,7 +34,8 @@ dependencies:
   offline_web_proxy:
     path: ../
 
-  webview_flutter: ^4.13.0
+  # CI uses Flutter 3.24.x (Dart 3.5.x). Newer webview_flutter requires Dart >=3.6.
+  webview_flutter: ^4.10.0
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
