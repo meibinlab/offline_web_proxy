@@ -89,7 +89,9 @@
     final keysToDelete = &lt;String&gt;[];
 
     if (_cacheBox != null) {
-      for (final key in _cacheBox!.keys) {
+      final keys = _cacheBox!.keys.toList(growable: false);
+      for (var i = 0; i &lt; keys.length; i++) {
+        final key = keys[i];
         final entry = _cacheBox!.get(key) as Map?;
         if (entry != null) {
           final expiresAt = DateTime.parse(entry[&#39;expiresAt&#39;] as String);
@@ -97,15 +99,24 @@
             keysToDelete.add(key as String);
           }
         }
+
+        if (i % 200 == 0) {
+          await Future.delayed(Duration.zero);
+        }
       }
 
-      for (final key in keysToDelete) {
+      for (var i = 0; i &lt; keysToDelete.length; i++) {
+        final key = keysToDelete[i];
         await _cacheBox!.delete(key);
+
+        if (i % 200 == 0) {
+          await Future.delayed(Duration.zero);
+        }
       }
     }
   } catch (e) {
-    throw CacheOperationException(&#39;clearExpired&#39;,
-        &#39;Failed to clear expired cache: $e&#39;, e is Exception ? e : null);
+    throw CacheOperationException(
+        &#39;clearExpired&#39;, &#39;期限切れキャッシュの削除に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -141,7 +152,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

@@ -106,7 +106,7 @@
           if (now.isBefore(expiresAt)) {
             freshEntries++;
           } else {
-            &#47;&#47; Check if within stale period
+            &#47;&#47; Stale期間内かチェック
             final staleUntil = _calculateStaleExpiration(
                 createdAt, entry[&#39;contentType&#39;] as String);
             if (now.isBefore(staleUntil)) {
@@ -132,8 +132,8 @@
       staleUsageRate: staleUsageRate,
     );
   } catch (e) {
-    throw CacheOperationException(&#39;getStats&#39;,
-        &#39;Failed to get cache statistics: $e&#39;, e is Exception ? e : null);
+    throw CacheOperationException(
+        &#39;getStats&#39;, &#39;キャッシュ統計情報の取得に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -169,7 +169,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

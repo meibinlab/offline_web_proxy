@@ -88,7 +88,7 @@
     _emitEvent(ProxyEventType.cacheCleared, &#39;&#39;, {});
   } catch (e) {
     throw CacheOperationException(
-        &#39;clear&#39;, &#39;Failed to clear cache: $e&#39;, e is Exception ? e : null);
+        &#39;clear&#39;, &#39;キャッシュのクリアに失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -124,7 +124,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

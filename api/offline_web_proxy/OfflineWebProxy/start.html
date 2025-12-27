@@ -92,29 +92,30 @@
   }
 
   try {
-    &#47;&#47; Initialize Hive if not already initialized
+    &#47;&#47; Hiveが初期化されていない場合は初期化
     if (!Hive.isAdapterRegistered(0)) {
       await Hive.initFlutter();
     }
 
-    &#47;&#47; Load configuration
+    &#47;&#47; 設定を読み込み
     _config = config ?? await _loadDefaultConfig();
 
-    &#47;&#47; Initialize storage
+    &#47;&#47; ストレージを初期化
     await _initializeStorage();
 
-    &#47;&#47; Start connectivity monitoring
+    &#47;&#47; 接続状態の監視を開始
     _startConnectivityMonitoring();
 
-    &#47;&#47; Create router and middleware
+    &#47;&#47; ルーターとミドルウェアを作成
     final router = _createRouter();
     final handler = const shelf.Pipeline()
+        .addMiddleware(_errorHandlingMiddleware)
         .addMiddleware(shelf.logRequests())
         .addMiddleware(_corsMiddleware)
         .addMiddleware(_statisticsMiddleware)
         .addHandler(router.call);
 
-    &#47;&#47; Start server
+    &#47;&#47; サーバを起動
     _server = await shelf_io.serve(
       handler,
       _config!.host,
@@ -124,13 +125,13 @@
     _isRunning = true;
     _startedAt = DateTime.now();
 
-    &#47;&#47; Emit server started event
+    &#47;&#47; サーバ起動イベントを発行
     _emitEvent(ProxyEventType.serverStarted, &#39;&#39;, {
       &#39;port&#39;: _server!.port,
       &#39;host&#39;: _config!.host,
     });
 
-    &#47;&#47; Start background tasks
+    &#47;&#47; バックグラウンドタスクを開始
     _startBackgroundTasks();
 
     return _server!.port;
@@ -172,7 +173,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

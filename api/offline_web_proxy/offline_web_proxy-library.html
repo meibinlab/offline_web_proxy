@@ -69,48 +69,48 @@
     
 <section class="desc markdown">
   <h1 id="offline_web_proxy">offline_web_proxy</h1>
-<p>An offline-compatible local proxy server that operates within Flutter WebView.
-Enables existing web systems to function seamlessly in mobile apps without
-requiring awareness of online/offline states.</p>
-<h2 id="key-features">Key Features</h2>
+<p>Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
+既存のWebシステムをモバイルアプリでシームレスに動作させ、
+オンライン/オフライン状態を意識する必要をなくします。</p>
+<h2 id="">主な機能</h2>
 <ul>
-<li><strong>Intelligent Caching</strong>: RFC-compliant cache control with offline strategies</li>
-<li><strong>Request Queuing</strong>: Automatic queuing of POST/PUT/DELETE requests when offline</li>
-<li><strong>Cookie Management</strong>: Secure AES-256 encrypted cookie persistence</li>
-<li><strong>Static Resource Serving</strong>: Local serving of bundled static assets</li>
-<li><strong>Seamless Offline Support</strong>: Transparent online/offline operation</li>
+<li><strong>インテリジェントキャッシング</strong>: RFC準拠のキャッシュ制御とオフライン戦略</li>
+<li><strong>リクエストキューイング</strong>: オフライン時のPOST/PUT/DELETEリクエストの自動キュー</li>
+<li><strong>Cookie管理</strong>: AES-256暗号化による安全なCookie永続化</li>
+<li><strong>静的リソース配信</strong>: バンドルされた静的アセットのローカル配信</li>
+<li><strong>シームレスなオフライン対応</strong>: 透過的なオンライン/オフライン切り替え</li>
 </ul>
-<h2 id="quick-start">Quick Start</h2>
+<h2 id="-2">クイックスタート</h2>
 <pre class="language-dart"><code class="language-dart">import 'package:offline_web_proxy/offline_web_proxy.dart';
 
 final proxy = OfflineWebProxy();
 final config = ProxyConfig(
   origin: 'https://your-api-server.com',
-  port: 0, // Auto-assign port
+  port: 0, // ポート自動割り当て
 );
 
-// Start the proxy server
+// プロキシサーバを起動
 final port = await proxy.start(config: config);
 print('Proxy running on http://127.0.0.1:$port');
 
-// Use in WebView
+// WebViewで使用
 webViewController.loadUrl('http://127.0.0.1:$port/your-app-path');
 </code></pre>
-<h2 id="architecture">Architecture</h2>
-<p>The proxy intercepts HTTP requests from WebView and:</p>
+<h2 id="-3">アーキテクチャ</h2>
+<p>プロキシはWebViewからのHTTPリクエストを横取りして:</p>
 <ol>
-<li><strong>Online</strong>: Forwards requests to upstream server, caches responses</li>
-<li><strong>Offline</strong>: Serves from cache or queues update requests</li>
-<li><strong>Recovery</strong>: Automatically drains queued requests when online</li>
+<li><strong>オンライン時</strong>: リクエストを上流サーバに転送し、レスポンスをキャッシュ</li>
+<li><strong>オフライン時</strong>: キャッシュから配信、または更新リクエストをキューに保存</li>
+<li><strong>復旧時</strong>: オンライン復帰時にキューされたリクエストを自動的に消化</li>
 </ol>
-<h2 id="cache-strategy">Cache Strategy</h2>
+<h2 id="-4">キャッシュ戦略</h2>
 <ul>
-<li><strong>Fresh</strong>: Within TTL, served immediately</li>
-<li><strong>Stale</strong>: Past TTL but within stale period, validated if online</li>
-<li><strong>Expired</strong>: Beyond stale period, removed during cleanup</li>
+<li><strong>Fresh</strong>: TTL内、即座に配信</li>
+<li><strong>Stale</strong>: TTL切れだがStale期間内、オンラインなら検証</li>
+<li><strong>Expired</strong>: Stale期間外、クリーンアップ時に削除</li>
 </ul>
-<p>See <a href="../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a> for configuration options and <a href="https://github.com/meibinlab/offline_web_proxy/blob/main/specs.md">specs.md</a>
-for detailed technical specifications.</p>
+<p>設定オプションは <a href="../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a> を、詳細な技術仕様は
+<a href="https://github.com/meibinlab/offline_web_proxy/blob/main/specs.md">specs.md</a> を参照してください。</p>
 </section>
 
 
@@ -156,8 +156,8 @@ for detailed technical specifications.</p>
 </dt>
 <dd>
   Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
-The main proxy server class that provides offline-compatible HTTP proxying
-for Flutter WebView applications.
+WebViewからのリクエストを横取りし、ネットワーク接続状態に基づいて
+インテリジェントに処理を行うローカルHTTPサーバを作成します。
 </dd>
 
           <dt id="ProxyConfig">
@@ -395,7 +395,7 @@ for Flutter WebView applications.
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

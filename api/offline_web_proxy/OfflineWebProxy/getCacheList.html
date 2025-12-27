@@ -107,8 +107,8 @@
 
     return entries;
   } catch (e) {
-    throw CacheOperationException(&#39;getCacheList&#39;,
-        &#39;Failed to get cache list: $e&#39;, e is Exception ? e : null);
+    throw CacheOperationException(
+        &#39;getCacheList&#39;, &#39;キャッシュリストの取得に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -144,7 +144,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

@@ -88,7 +88,7 @@
     &#47;&#47; 将来的には特別なストレージやログファイルをクリアすることを想定
   } catch (e) {
     throw QueueOperationException(&#39;clearDropped&#39;,
-        &#39;Failed to clear dropped requests: $e&#39;, e is Exception ? e : null);
+        &#39;ドロップされたリクエスト履歴の削除に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -124,7 +124,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

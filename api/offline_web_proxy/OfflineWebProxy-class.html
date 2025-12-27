@@ -63,60 +63,58 @@
     
 <section class="desc markdown">
   <p>Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
-The main proxy server class that provides offline-compatible HTTP proxying
-for Flutter WebView applications.</p>
-<p>This class creates a local HTTP server that intercepts requests from WebView
-and intelligently handles them based on network connectivity:</p>
+WebViewからのリクエストを横取りし、ネットワーク接続状態に基づいて
+インテリジェントに処理を行うローカルHTTPサーバを作成します。</p>
 <ul>
-<li><strong>Online Mode</strong>: Forwards requests to upstream server and caches responses</li>
-<li><strong>Offline Mode</strong>: Serves from cache or queues update requests</li>
-<li><strong>Recovery Mode</strong>: Automatically drains queued requests when connectivity returns</li>
+<li><strong>オンラインモード</strong>: リクエストを上流サーバに転送し、レスポンスをキャッシュ</li>
+<li><strong>オフラインモード</strong>: キャッシュから配信、または更新リクエストをキューに保存</li>
+<li><strong>復旧モード</strong>: 接続復帰時にキューされたリクエストを自動的に消化</li>
 </ul>
-<h2 id="usage-example">Usage Example</h2>
+<h2 id="">使用例</h2>
 <pre class="language-dart"><code class="language-dart">final proxy = OfflineWebProxy();
 
-// Configure the proxy
+// プロキシの設定
 final config = ProxyConfig(
   origin: 'https://api.example.com',
-  cacheMaxSize: 100 * 1024 * 1024, // 100MB cache
+  cacheMaxSize: 100 * 1024 * 1024, // 100MBキャッシュ
   connectTimeout: Duration(seconds: 10),
 );
 
-// Start the server
+// サーバを起動
 final port = await proxy.start(config: config);
 
-// Use in WebView
+// WebViewで使用
 webViewController.loadUrl('http://127.0.0.1:$port');
 
-// Monitor events
+// イベントを監視
 proxy.events.listen((event) {
   if (event.type == ProxyEventType.cacheHit) {
     print('Cache hit: ${event.url}');
   }
 });
 
-// Get statistics
+// 統計情報を取得
 final stats = await proxy.getStats();
 print('Hit rate: ${stats.cacheHitRate}');
 
-// Cleanup
+// クリーンアップ
 await proxy.stop();
 </code></pre>
-<h2 id="thread-safety">Thread Safety</h2>
-<p>This class is thread-safe for concurrent operations. Cache operations
-are serialized using mutex locks to ensure data consistency.</p>
-<h2 id="security">Security</h2>
+<h2 id="-2">スレッドセーフティ</h2>
+<p>このクラスは並行操作に対してスレッドセーフです。キャッシュ操作は
+mutexロックを使用してシリアライズされ、データの一貫性が保証されます。</p>
+<h2 id="-3">セキュリティ</h2>
 <ul>
-<li>Server binds to <code>127.0.0.1</code> only (no external access)</li>
-<li>Cookies are encrypted with AES-256 before persistence</li>
-<li>Sensitive headers are masked in logs</li>
-<li>Path traversal attacks are prevented for static assets</li>
+<li>サーバは <code>127.0.0.1</code> のみにバインド（外部アクセス不可）</li>
+<li>Cookieは永続化前にAES-256で暗号化</li>
+<li>機密ヘッダはログ内でマスク</li>
+<li>静的アセットに対するパストラバーサル攻撃を防止</li>
 </ul>
-<p>See also:</p>
+<p>参照:</p>
 <ul>
-<li><a href="../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a> for configuration options</li>
-<li><a href="../offline_web_proxy/ProxyStats-class.html">ProxyStats</a> for monitoring capabilities</li>
-<li><a href="../offline_web_proxy/ProxyEvent-class.html">ProxyEvent</a> for real-time event streaming</li>
+<li><a href="../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a> 設定オプション</li>
+<li><a href="../offline_web_proxy/ProxyStats-class.html">ProxyStats</a> 監視機能</li>
+<li><a href="../offline_web_proxy/ProxyEvent-class.html">ProxyEvent</a> リアルタイムイベントストリーミング</li>
 </ul>
 </section>
 
@@ -462,7 +460,7 @@ are serialized using mutex locks to ensure data consistency.</p>
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

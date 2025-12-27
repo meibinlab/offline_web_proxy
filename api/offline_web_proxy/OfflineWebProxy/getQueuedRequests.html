@@ -88,18 +88,25 @@
     final requests = &lt;QueuedRequest&gt;[];
 
     if (_queueBox != null) {
+      int idx = 0;
       for (final key in _queueBox!.keys) {
         final data = _queueBox!.get(key) as Map?;
         if (data != null) {
           requests.add(_mapToQueuedRequest(data));
+        }
+
+        &#47;&#47; 大量キュー走査時にUIをブロックしないようyield
+        idx++;
+        if (idx % 50 == 0) {
+          await Future.delayed(Duration.zero);
         }
       }
     }
 
     return requests;
   } catch (e) {
-    throw QueueOperationException(&#39;get&#39;, &#39;Failed to get queued requests: $e&#39;,
-        e is Exception ? e : null);
+    throw QueueOperationException(
+        &#39;get&#39;, &#39;キューされたリクエストの取得に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -135,7 +142,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

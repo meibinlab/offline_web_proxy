@@ -88,10 +88,10 @@
   try {
     if (_cookieBox != null) {
       if (domain == null) {
-        &#47;&#47; Clear all cookies
+        &#47;&#47; 全Cookieを削除
         await _cookieBox!.clear();
       } else {
-        &#47;&#47; Clear cookies for specific domain
+        &#47;&#47; 特定ドメインのCookieを削除
         final keysToDelete = &lt;String&gt;[];
         for (final key in _cookieBox!.keys) {
           final data = _cookieBox!.get(key) as Map?;
@@ -107,7 +107,7 @@
     }
   } catch (e) {
     throw CookieOperationException(
-        &#39;clear&#39;, &#39;Failed to clear cookies: $e&#39;, e is Exception ? e : null);
+        &#39;clear&#39;, &#39;Cookieの削除に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -143,7 +143,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

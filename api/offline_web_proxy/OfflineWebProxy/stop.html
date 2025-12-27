@@ -88,17 +88,22 @@
   }
 
   try {
+    _queueDrainTimer?.cancel();
+    _queueDrainTimer = null;
+    _cachePurgeTimer?.cancel();
+    _cachePurgeTimer = null;
+
     await _server?.close();
     await _connectivitySubscription.cancel();
     await _eventController.close();
 
-    &#47;&#47; Close Hive boxes
+    &#47;&#47; Hiveボックスを閉じる
     await _cacheBox?.close();
     await _queueBox?.close();
     await _cookieBox?.close();
     await _idempotencyBox?.close();
 
-    &#47;&#47; Close HTTP client
+    &#47;&#47; HTTPクライアントを閉じる
     _httpClient?.close(force: true);
     _httpClient = null;
 
@@ -144,7 +149,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

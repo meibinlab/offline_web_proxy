@@ -90,6 +90,7 @@
     final cookies = &lt;CookieInfo&gt;[];
 
     if (_cookieBox != null) {
+      int idx = 0;
       for (final key in _cookieBox!.keys) {
         final data = _cookieBox!.get(key) as Map?;
         if (data != null) {
@@ -98,13 +99,19 @@
             cookies.add(cookieInfo);
           }
         }
+
+        &#47;&#47; 大量のCookieを処理する場合にUIをブロックしないよう一時的にyield
+        idx++;
+        if (idx % 50 == 0) {
+          await Future.delayed(Duration.zero);
+        }
       }
     }
 
     return cookies;
   } catch (e) {
     throw CookieOperationException(
-        &#39;get&#39;, &#39;Failed to get cookies: $e&#39;, e is Exception ? e : null);
+        &#39;get&#39;, &#39;Cookieの取得に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -140,7 +147,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

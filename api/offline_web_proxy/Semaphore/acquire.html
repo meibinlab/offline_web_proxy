@@ -95,8 +95,7 @@
     await completer.future.timeout(timeout, onTimeout: () {
       &#47;&#47; タイムアウト時はキューから削除
       _waitQueue.remove(completer);
-      throw TimeoutException(
-          &#39;Semaphore acquire timed out after ${timeout.inSeconds} seconds&#39;);
+      throw TimeoutException(&#39;セマフォの取得が${timeout.inSeconds}秒でタイムアウトしました&#39;);
     });
   } catch (e) {
     rethrow;
@@ -135,7 +134,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   

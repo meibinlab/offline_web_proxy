@@ -87,7 +87,7 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearCacheForUrl(String url) async {
   if (url.isEmpty || url.trim().isEmpty) {
-    throw ArgumentError(&#39;URL cannot be empty or whitespace-only&#39;);
+    throw ArgumentError(&#39;URLは空または空白のみにはできません&#39;);
   }
 
   try {
@@ -95,8 +95,8 @@
     final cacheKey = _generateCacheKey(normalizedUrl);
     await _cacheBox?.delete(cacheKey);
   } catch (e) {
-    throw CacheOperationException(&#39;clearForUrl&#39;,
-        &#39;Failed to clear cache for URL: $e&#39;, e is Exception ? e : null);
+    throw CacheOperationException(
+        &#39;clearForUrl&#39;, &#39;URLのキャッシュ削除に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>
@@ -132,7 +132,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.1.1
+      0.2.0
   </span>
 
   
