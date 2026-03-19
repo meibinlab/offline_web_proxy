@@ -104,8 +104,9 @@ class CookieRecord {
   /// [requestPath] 判定対象のリクエストパスです。
   /// 戻り値は一致する場合に `true` です。
   bool matchesPath(String requestPath) {
-    final normalizedRequestPath =
-        requestPath.isEmpty ? '/' : (requestPath.startsWith('/') ? requestPath : '/$requestPath');
+    final normalizedRequestPath = requestPath.isEmpty
+        ? '/'
+        : (requestPath.startsWith('/') ? requestPath : '/$requestPath');
     final normalizedCookiePath = path.isEmpty ? '/' : path;
 
     if (normalizedRequestPath == normalizedCookiePath) {
@@ -231,18 +232,22 @@ class CookieRecord {
       switch (attributeName) {
         case 'domain':
           if (attributeValue.isNotEmpty) {
-            domain = attributeValue.replaceFirst(RegExp(r'^\.'), '').toLowerCase();
+            domain =
+                attributeValue.replaceFirst(RegExp(r'^\.'), '').toLowerCase();
             hostOnly = false;
           }
           break;
         case 'path':
           if (attributeValue.isNotEmpty) {
-            path = attributeValue.startsWith('/') ? attributeValue : '/$attributeValue';
+            path = attributeValue.startsWith('/')
+                ? attributeValue
+                : '/$attributeValue';
           }
           break;
         case 'expires':
           if (attributeValue.isNotEmpty) {
-            expires = DateTime.tryParse(attributeValue) ?? _tryParseHttpDate(attributeValue);
+            expires = DateTime.tryParse(attributeValue) ??
+                _tryParseHttpDate(attributeValue);
           }
           break;
         case 'max-age':

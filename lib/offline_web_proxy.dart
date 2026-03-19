@@ -1669,7 +1669,8 @@ class OfflineWebProxy {
   /// 戻り値は該当 Cookie がある場合の `Cookie` ヘッダ値です。
   Future<String?> _buildCookieHeaderForUri(Uri uri) async {
     final cookieRecords = await _getCookieRecordsForUri(uri);
-    return buildCookieHeaderForUri(cookieRecords, uri, at: DateTime.now().toUtc());
+    return buildCookieHeaderForUri(cookieRecords, uri,
+        at: DateTime.now().toUtc());
   }
 
   /// レスポンスをキャッシュに保存します（バイト配列版）。

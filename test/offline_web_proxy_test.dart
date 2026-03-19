@@ -96,7 +96,8 @@ void main() {
 
     /// 対象URL向けCookieヘッダ取得のテスト
     test('should build cookie header for target url', () async {
-      await proxy.start(config: const ProxyConfig(origin: 'https://example.com'));
+      await proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'));
 
       final cookieBox = Hive.box('proxy_cookies');
       final createdAt = DateTime.utc(2026, 3, 19, 10);
@@ -120,34 +121,37 @@ void main() {
       await cookieBox.put(appCookie.storageKey, appCookie.toMap());
       await cookieBox.put(foreignCookie.storageKey, foreignCookie.toMap());
 
-      final cookieHeader =
-          await proxy.getCookieHeaderForUrl('https://example.com/app/dashboard');
+      final cookieHeader = await proxy
+          .getCookieHeaderForUrl('https://example.com/app/dashboard');
 
       expect(cookieHeader, equals('APP=app; ROOT=root'));
     });
 
     /// 対象Cookieが無い場合はnullを返すテスト
     test('should return null when no cookies match target url', () async {
-      await proxy.start(config: const ProxyConfig(origin: 'https://example.com'));
+      await proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'));
 
-      final cookieHeader =
-          await proxy.getCookieHeaderForUrl('https://example.com/app/dashboard');
+      final cookieHeader = await proxy
+          .getCookieHeaderForUrl('https://example.com/app/dashboard');
 
       expect(cookieHeader, isNull);
     });
 
     /// 不正URLのCookieヘッダ取得エラーテスト
     test('should throw error for invalid cookie header url', () async {
-      expect(() => proxy.getCookieHeaderForUrl('not-a-url'),
-          throwsArgumentError);
+      expect(
+          () => proxy.getCookieHeaderForUrl('not-a-url'), throwsArgumentError);
     });
 
     /// origin 外URLのCookieヘッダ取得エラーテスト
     test('should throw error for url outside configured origin', () async {
-      await proxy.start(config: const ProxyConfig(origin: 'https://example.com'));
+      await proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'));
 
       expect(
-        () => proxy.getCookieHeaderForUrl('https://api.example.com/app/dashboard'),
+        () => proxy
+            .getCookieHeaderForUrl('https://api.example.com/app/dashboard'),
         throwsArgumentError,
       );
     });

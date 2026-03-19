@@ -80,7 +80,8 @@ void main() {
     });
 
     /// CookieRecordのドメイン一致テスト
-    test('CookieRecord should match host-only and domain cookies correctly', () {
+    test('CookieRecord should match host-only and domain cookies correctly',
+        () {
       final hostOnlyCookie = CookieRecord.fromSetCookieHeader(
         setCookieHeader: 'HOST=1; Path=/',
         requestUri: Uri.parse('https://example.com/login'),
