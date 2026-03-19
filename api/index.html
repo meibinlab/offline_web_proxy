@@ -88,7 +88,7 @@
 <h2 id="installation">Installation</h2>
 <p>Add the following to your <code>pubspec.yaml</code>:</p>
 <pre class="language-yaml"><code class="language-yaml">dependencies:
-  offline_web_proxy: ^0.2.2
+  offline_web_proxy: ^0.3.0
   # Add the following if using WebView
   # webview_flutter: ^4.4.2
 </code></pre>
@@ -228,6 +228,15 @@ final cookies = await proxy.getCookies();
 for (final cookie in cookies) {
   print('${cookie.name}: ${cookie.value} (${cookie.domain})');
 }
+
+// Get the Cookie header value for a target URL
+final cookieHeader =
+    await proxy.getCookieHeaderForUrl('https://api.example.com/app/api');
+if (cookieHeader != null) {
+  print('Cookie: $cookieHeader');
+}
+
+// Note: getCookieHeaderForUrl only allows URLs in the same origin as the configured origin
 
 // Clear all cookies
 await proxy.clearCookies();
@@ -416,7 +425,7 @@ Timer.periodic(Duration(minutes: 5), (timer) async {
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.2.2
+      0.3.0
   </span>
 
   

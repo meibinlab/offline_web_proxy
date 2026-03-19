@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the WarmupResult constructor from Class WarmupResult from the offline_web_proxy library, for the Dart programming language.">
-  <title>WarmupResult constructor - WarmupResult - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the getCookieHeaderForUrl method from the OfflineWebProxy class, for the Dart programming language.">
+  <title>getCookieHeaderForUrl method - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/WarmupResult-class.html">WarmupResult</a></li>
-    <li class="self-crumb">WarmupResult const constructor</li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">getCookieHeaderForUrl method</li>
   </ol>
-  <div class="self-name">WarmupResult</div>
+  <div class="self-name">getCookieHeaderForUrl</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -51,36 +51,66 @@
 </header>
 <main>
 
-  <div
-      id="dartdoc-main-content"
-      class="main-content"
-      data-above-sidebar="offline_web_proxy&#47;WarmupResult-class-sidebar.html"
-      data-below-sidebar="">
-      <div>
-<h1><span class="kind-constructor">WarmupResult</span> constructor 
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html"
+    data-below-sidebar="">
+    <div>
+<h1><span class="kind-method">getCookieHeaderForUrl</span> method 
 </h1></div>
 
     <section class="multi-line-signature">
-      const
-      <span class="name ">WarmupResult</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="-param-successCount"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">successCount</span>, </span></li>
-<li><span class="parameter" id="-param-failureCount"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">failureCount</span>, </span></li>
-<li><span class="parameter" id="-param-totalDuration"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">totalDuration</span>, </span></li>
-<li><span class="parameter" id="-param-entries"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/WarmupEntry-class.html">WarmupEntry</a></span>&gt;</span></span> <span class="parameter-name">entries</span>, </span></li>
-</ol>})
-    </section>
+      
 
+<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span>&gt;</span></span>
+<span class="name ">getCookieHeaderForUrl</span>(<wbr><ol class="parameter-list single-line"> <li><span class="parameter" id="getCookieHeaderForUrl-param-url"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span></span></li>
+</ol>)
+
+      
+
+    </section>
     
+<section class="desc markdown">
+  <p>指定 URL に送信すべき Cookie ヘッダ値を取得します。</p>
+<p><code>url</code> は送信対象の絶対 URL です。</p>
+<p>Returns: <code>Cookie</code> ヘッダ値。送信対象 Cookie が無い場合は <code>null</code>。</p>
+<p>Throws:</p>
+<ul>
+<li><a href="https://api.flutter.dev/flutter/dart-core/ArgumentError-class.html">ArgumentError</a> URL が空または絶対 URL ではない場合。</li>
+<li><a href="../../offline_web_proxy/CookieOperationException-class.html">CookieOperationException</a> Cookie ヘッダ生成に失敗した場合。</li>
+</ul>
+</section>
 
 
     
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">const WarmupResult({
-  required this.successCount,
-  required this.failureCount,
-  required this.totalDuration,
-  required this.entries,
-});</code></pre>
+  <pre class="language-dart"><code class="language-dart">Future&lt;String?&gt; getCookieHeaderForUrl(String url) async {
+  if (url.trim().isEmpty) {
+    throw ArgumentError(&#39;URL must not be empty&#39;);
+  }
+
+  final uri = Uri.tryParse(url);
+  if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+    throw ArgumentError(&#39;URL must be an absolute URL: $url&#39;);
+  }
+  if (!_isSameOriginAsConfiguredOrigin(uri)) {
+    throw ArgumentError(
+      &#39;URL must match configured origin: $url&#39;,
+    );
+  }
+
+  try {
+    return await _buildCookieHeaderForUri(uri);
+  } catch (e) {
+    throw CookieOperationException(
+      &#39;getHeader&#39;,
+      &#39;Cookie ヘッダの生成に失敗しました: $e&#39;,
+      e is Exception ? e : null,
+    );
+  }
+}</code></pre>
 </section>
 
 
@@ -97,17 +127,17 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/WarmupResult-class.html">WarmupResult</a></li>
-    <li class="self-crumb">WarmupResult const constructor</li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">getCookieHeaderForUrl method</li>
 </ol>
 
 
-    <h5>WarmupResult class</h5>
+    <h5>OfflineWebProxy class</h5>
     <div id="dartdoc-sidebar-left-content"></div>
-  </div><!--/.sidebar-offcanvas-left-->
+  </div><!--/.sidebar-offcanvas-->
 
   <div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
-  </div><!--/.sidebar-offcanvas-->
+</div><!--/.sidebar-offcanvas-->
 
 </main>
 
