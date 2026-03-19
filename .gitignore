@@ -39,3 +39,8 @@ migrate_working_dir/
 **/GeneratedPluginRegistrant.java
 **/build/
 /coverage/
+
+# Github Copilot
+.github/agents/
+.github/instructions/
+.github/copilot-instructions.md
