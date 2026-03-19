@@ -64,12 +64,15 @@ import 'package:shelf_router/shelf_router.dart';
 // モデルクラスと例外をインポート
 import 'src/models/cache_entry.dart';
 import 'src/models/cache_stats.dart';
+import 'src/models/cookie_header_builder.dart';
 import 'src/models/cookie_info.dart';
+import 'src/models/cookie_record.dart';
 import 'src/models/dropped_request.dart';
 import 'src/models/proxy_config.dart';
 import 'src/models/proxy_event.dart';
 import 'src/models/proxy_stats.dart';
 import 'src/models/queued_request.dart';
+import 'src/models/response_header_snapshot.dart';
 import 'src/models/warmup_result.dart';
 import 'src/exceptions/exceptions.dart';
 
@@ -628,6 +631,73 @@ class OfflineWebProxy {
       throw CookieOperationException(
           'get', 'Cookieの取得に失敗しました: $e', e is Exception ? e : null);
     }
+  }
+
+  /// 指定 URL に送信すべき Cookie ヘッダ値を取得します。
+  ///
+  /// [url] は送信対象の絶対 URL です。
+  ///
+  /// Returns: `Cookie` ヘッダ値。送信対象 Cookie が無い場合は `null`。
+  ///
+  /// Throws:
+  ///   * [ArgumentError] URL が空または絶対 URL ではない場合。
+  ///   * [CookieOperationException] Cookie ヘッダ生成に失敗した場合。
+  Future<String?> getCookieHeaderForUrl(String url) async {
+    if (url.trim().isEmpty) {
+      throw ArgumentError('URL must not be empty');
+    }
+
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      throw ArgumentError('URL must be an absolute URL: $url');
+    }
+    if (!_isSameOriginAsConfiguredOrigin(uri)) {
+      throw ArgumentError(
+        'URL must match configured origin: $url',
+      );
+    }
+
+    try {
+      return await _buildCookieHeaderForUri(uri);
+    } catch (e) {
+      throw CookieOperationException(
+        'getHeader',
+        'Cookie ヘッダの生成に失敗しました: $e',
+        e is Exception ? e : null,
+      );
+    }
+  }
+
+  /// 指定 URI が設定済み origin と同一 origin かどうかを返します。
+  ///
+  /// [targetUri] は検証対象の URI です。
+  /// 戻り値は同一 origin の場合に `true` です。
+  bool _isSameOriginAsConfiguredOrigin(Uri targetUri) {
+    final configuredOrigin = _config?.origin ?? '';
+    if (configuredOrigin.isEmpty) {
+      return false;
+    }
+
+    final originUri = Uri.tryParse(configuredOrigin);
+    if (originUri == null || !originUri.hasScheme || originUri.host.isEmpty) {
+      return false;
+    }
+
+    return originUri.scheme.toLowerCase() == targetUri.scheme.toLowerCase() &&
+        originUri.host.toLowerCase() == targetUri.host.toLowerCase() &&
+        _effectivePort(originUri) == _effectivePort(targetUri);
+  }
+
+  /// URI の実効ポート番号を返します。
+  int _effectivePort(Uri uri) {
+    if (uri.hasPort) {
+      return uri.port;
+    }
+    return switch (uri.scheme.toLowerCase()) {
+      'https' => 443,
+      'http' => 80,
+      _ => -1,
+    };
   }
 
   /// 保存されているCookieを削除します。
@@ -1434,12 +1504,15 @@ class OfflineWebProxy {
       }
       final bodyBytes = builder.takeBytes();
 
-      final headers = <String, String>{};
-      ioResponse.headers.forEach((name, values) {
-        headers[name] = values.join(', ');
-      });
+      final headerSnapshot =
+          ResponseHeaderSnapshot.fromHttpHeaders(ioResponse.headers);
+      await _storeResponseCookies(
+        requestUri: uri,
+        setCookieHeaders: headerSnapshot.setCookieHeaders,
+      );
 
-      final sanitizedHeaders = _sanitizeResponseHeaders(headers);
+      final sanitizedHeaders =
+          _sanitizeResponseHeaders(headerSnapshot.flattenedHeaders);
 
       return (
         statusCode: ioResponse.statusCode,
@@ -1510,6 +1583,93 @@ class OfflineWebProxy {
     sanitized.removeWhere((key, _) => key.toLowerCase() == 'content-length');
 
     return sanitized;
+  }
+
+  /// 上流レスポンスの `Set-Cookie` を Cookie Box に保存します。
+  ///
+  /// 現段階では受信基盤のみを整備し、取得した Cookie を内部保存します。
+  /// パースや保存に失敗してもリクエスト処理全体は継続します。
+  Future<void> _storeResponseCookies({
+    required Uri requestUri,
+    required List<String> setCookieHeaders,
+  }) async {
+    if (_cookieBox == null || setCookieHeaders.isEmpty) {
+      return;
+    }
+
+    final now = DateTime.now();
+    for (final setCookieHeader in setCookieHeaders) {
+      try {
+        final cookieRecord = CookieRecord.fromSetCookieHeader(
+          setCookieHeader: setCookieHeader,
+          requestUri: requestUri,
+          receivedAt: now,
+        );
+
+        if (cookieRecord.isExpiredAt(now)) {
+          await _cookieBox!.delete(cookieRecord.storageKey);
+          continue;
+        }
+
+        await _cookieBox!.put(cookieRecord.storageKey, cookieRecord.toMap());
+      } catch (e) {
+        _emitEvent(
+          ProxyEventType.errorOccurred,
+          requestUri.toString(),
+          {
+            'operation': 'cookieSave',
+            'error': e.toString(),
+          },
+        );
+      }
+    }
+  }
+
+  /// 指定 URI に対して送信可能な Cookie レコード一覧を返します。
+  ///
+  /// [uri] は送信対象 URI です。
+  /// 戻り値は送信順序に並んだ Cookie レコード一覧です。
+  Future<List<CookieRecord>> _getCookieRecordsForUri(Uri uri) async {
+    if (_cookieBox == null) {
+      return const <CookieRecord>[];
+    }
+
+    final now = DateTime.now().toUtc();
+    final expiredKeys = <dynamic>[];
+    final cookieRecords = <CookieRecord>[];
+
+    for (final key in _cookieBox!.keys) {
+      final data = _cookieBox!.get(key) as Map?;
+      if (data == null) {
+        continue;
+      }
+
+      final cookieRecord = CookieRecord.fromMap(data);
+      if (cookieRecord.isExpiredAt(now)) {
+        expiredKeys.add(key);
+        continue;
+      }
+
+      if (cookieRecord.matchesUri(uri, at: now)) {
+        cookieRecords.add(cookieRecord);
+      }
+    }
+
+    for (final key in expiredKeys) {
+      await _cookieBox!.delete(key);
+    }
+
+    cookieRecords.sort(CookieRecord.compareForRequest);
+    return cookieRecords;
+  }
+
+  /// 指定 URI 向けの Cookie ヘッダ値を内部生成します。
+  ///
+  /// [uri] は送信対象 URI です。
+  /// 戻り値は該当 Cookie がある場合の `Cookie` ヘッダ値です。
+  Future<String?> _buildCookieHeaderForUri(Uri uri) async {
+    final cookieRecords = await _getCookieRecordsForUri(uri);
+    return buildCookieHeaderForUri(cookieRecords, uri, at: DateTime.now().toUtc());
   }
 
   /// レスポンスをキャッシュに保存します（バイト配列版）。
@@ -1681,12 +1841,15 @@ class OfflineWebProxy {
       }
       final bodyBytes = builder.takeBytes();
 
-      final headers = <String, String>{};
-      response.headers.forEach((name, values) {
-        headers[name] = values.join(', ');
-      });
+      final headerSnapshot =
+          ResponseHeaderSnapshot.fromHttpHeaders(response.headers);
+      await _storeResponseCookies(
+        requestUri: uri,
+        setCookieHeaders: headerSnapshot.setCookieHeaders,
+      );
 
-      final sanitizedHeaders = _sanitizeResponseHeaders(headers);
+      final sanitizedHeaders =
+          _sanitizeResponseHeaders(headerSnapshot.flattenedHeaders);
 
       return http.Response.bytes(
         bodyBytes,

@@ -949,6 +949,27 @@ for (final cookie in cookies) {
 }
 ```
 
+#### `Future<String?> getCookieHeaderForUrl(String url)`
+
+Gets the Cookie header value that should be sent to the specified absolute URL.
+
+This API only accepts URLs that are in the same origin as the `origin` configured at `start()`.
+
+- **Parameters**:
+  - `url`: Absolute target URL
+- **Return Value**: `Cookie` header value, or `null` when no cookies match
+- **Exceptions**:
+  - `ArgumentError`: When the URL is invalid or outside the configured origin
+  - `CookieOperationException`: When header generation fails
+
+```dart
+final cookieHeader =
+    await proxy.getCookieHeaderForUrl('https://api.example.com/app/api');
+if (cookieHeader != null) {
+  print('Cookie: $cookieHeader');
+}
+```
+
 #### `Future<void> clearCookies({String? domain})`
 
 Deletes cookies.

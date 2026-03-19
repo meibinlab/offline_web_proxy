@@ -949,6 +949,27 @@ for (final cookie in cookies) {
 }
 ```
 
+#### `Future<String?> getCookieHeaderForUrl(String url)`
+
+指定した絶対 URL に送信すべき Cookie ヘッダ値を取得します。
+
+この API は、`start()` で設定した `origin` と同一 origin の URL のみを受け付けます。
+
+- **パラメータ**:
+  - `url`: 送信対象の絶対 URL
+- **戻り値**: `Cookie` ヘッダ値。該当 Cookie がない場合は `null`
+- **例外**:
+  - `ArgumentError`: 無効な URL、または設定済み `origin` と異なる origin の URL が指定された場合
+  - `CookieOperationException`: Cookie ヘッダ生成に失敗した場合
+
+```dart
+final cookieHeader =
+    await proxy.getCookieHeaderForUrl('https://api.example.com/app/api');
+if (cookieHeader != null) {
+  print('Cookie: $cookieHeader');
+}
+```
+
 #### `Future<void> clearCookies({String? domain})`
 
 Cookie を削除します。

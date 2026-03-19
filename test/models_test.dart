@@ -1,5 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
+import 'package:offline_web_proxy/src/models/cookie_header_builder.dart';
+import 'package:offline_web_proxy/src/models/cookie_record.dart';
+import 'package:offline_web_proxy/src/models/response_header_snapshot.dart';
 
 void main() {
   group('Data Models Edge Cases', () {
@@ -42,6 +45,159 @@ void main() {
       expect(cookie.expires, isNull);
       expect(cookie.sameSite, isNull);
       expect(cookie.secure, isFalse);
+    });
+
+    /// CookieRecordのデフォルト属性テスト
+    test('CookieRecord should derive host-only cookie defaults', () {
+      final record = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'JSESSIONID=abc123; Path=/app; HttpOnly',
+        requestUri: Uri.parse('https://example.com/app/login'),
+        receivedAt: DateTime.utc(2026, 3, 19, 10),
+      );
+
+      expect(record.name, equals('JSESSIONID'));
+      expect(record.value, equals('abc123'));
+      expect(record.domain, equals('example.com'));
+      expect(record.path, equals('/app'));
+      expect(record.httpOnly, isTrue);
+      expect(record.hostOnly, isTrue);
+      expect(record.expires, isNull);
+    });
+
+    /// CookieRecordのMax-Age優先テスト
+    test('CookieRecord should prioritize max-age over expires', () {
+      final receivedAt = DateTime.utc(2026, 3, 19, 10);
+      final record = CookieRecord.fromSetCookieHeader(
+        setCookieHeader:
+            'SESSION=xyz; Expires=Wed, 20 Mar 2026 10:00:00 GMT; Max-Age=60; Secure; SameSite=Lax',
+        requestUri: Uri.parse('https://example.com/login'),
+        receivedAt: receivedAt,
+      );
+
+      expect(record.secure, isTrue);
+      expect(record.sameSite, equals('Lax'));
+      expect(record.expires, equals(receivedAt.add(Duration(seconds: 60))));
+    });
+
+    /// CookieRecordのドメイン一致テスト
+    test('CookieRecord should match host-only and domain cookies correctly', () {
+      final hostOnlyCookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'HOST=1; Path=/',
+        requestUri: Uri.parse('https://example.com/login'),
+        receivedAt: DateTime.utc(2026, 3, 19, 10),
+      );
+      final domainCookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'DOMAIN=1; Domain=example.com; Path=/',
+        requestUri: Uri.parse('https://example.com/login'),
+        receivedAt: DateTime.utc(2026, 3, 19, 10),
+      );
+
+      expect(hostOnlyCookie.matchesDomain('example.com'), isTrue);
+      expect(hostOnlyCookie.matchesDomain('api.example.com'), isFalse);
+      expect(domainCookie.matchesDomain('example.com'), isTrue);
+      expect(domainCookie.matchesDomain('api.example.com'), isTrue);
+      expect(domainCookie.matchesDomain('other.example.org'), isFalse);
+    });
+
+    /// CookieRecordのパス一致テスト
+    test('CookieRecord should evaluate path matching correctly', () {
+      final cookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'SESSION=1; Path=/app',
+        requestUri: Uri.parse('https://example.com/app/login'),
+        receivedAt: DateTime.utc(2026, 3, 19, 10),
+      );
+
+      expect(cookie.matchesPath('/app'), isTrue);
+      expect(cookie.matchesPath('/app/settings'), isTrue);
+      expect(cookie.matchesPath('/application'), isFalse);
+      expect(cookie.matchesPath('/other'), isFalse);
+    });
+
+    /// CookieRecordのURI一致テスト
+    test('CookieRecord should reject expired and insecure URI mismatches', () {
+      final now = DateTime.utc(2026, 3, 19, 10);
+      final secureCookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'SECURE=1; Path=/; Secure; Max-Age=60',
+        requestUri: Uri.parse('https://example.com/login'),
+        receivedAt: now,
+      );
+      final expiredCookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'EXPIRED=1; Path=/; Max-Age=0',
+        requestUri: Uri.parse('https://example.com/login'),
+        receivedAt: now,
+      );
+
+      expect(
+        secureCookie.matchesUri(Uri.parse('https://example.com/api'), at: now),
+        isTrue,
+      );
+      expect(
+        secureCookie.matchesUri(Uri.parse('http://example.com/api'), at: now),
+        isFalse,
+      );
+      expect(
+        expiredCookie.matchesUri(Uri.parse('https://example.com/api'), at: now),
+        isFalse,
+      );
+    });
+
+    /// Cookieヘッダ生成テスト
+    test('buildCookieHeaderForUri should filter and sort matching cookies', () {
+      final now = DateTime.utc(2026, 3, 19, 10);
+      final cookies = <CookieRecord>[
+        CookieRecord.fromSetCookieHeader(
+          setCookieHeader: 'ROOT=root; Path=/',
+          requestUri: Uri.parse('https://example.com/'),
+          receivedAt: now.add(Duration(minutes: 1)),
+        ),
+        CookieRecord.fromSetCookieHeader(
+          setCookieHeader: 'APP=app; Path=/app',
+          requestUri: Uri.parse('https://example.com/app/login'),
+          receivedAt: now,
+        ),
+        CookieRecord.fromSetCookieHeader(
+          setCookieHeader: 'SECURE=secure; Path=/app; Secure',
+          requestUri: Uri.parse('https://example.com/app/login'),
+          receivedAt: now,
+        ),
+        CookieRecord.fromSetCookieHeader(
+          setCookieHeader: 'OTHER=other; Domain=other.com; Path=/',
+          requestUri: Uri.parse('https://other.com/'),
+          receivedAt: now,
+        ),
+      ];
+
+      final httpsHeader = buildCookieHeaderForUri(
+        cookies,
+        Uri.parse('https://example.com/app/dashboard'),
+        at: now,
+      );
+      final httpHeader = buildCookieHeaderForUri(
+        cookies,
+        Uri.parse('http://example.com/app/dashboard'),
+        at: now,
+      );
+
+      expect(httpsHeader, equals('APP=app; SECURE=secure; ROOT=root'));
+      expect(httpHeader, equals('APP=app; ROOT=root'));
+    });
+
+    /// ResponseHeaderSnapshotのSet-Cookie保持テスト
+    test('ResponseHeaderSnapshot should preserve raw set-cookie values', () {
+      final snapshot = ResponseHeaderSnapshot.fromRawHeaders({
+        'content-type': ['text/plain'],
+        'set-cookie': [
+          'A=1; Path=/',
+          'B=2; Path=/; HttpOnly',
+        ],
+      });
+
+      expect(snapshot.flattenedHeaders['content-type'], equals('text/plain'));
+      expect(snapshot.flattenedHeaders['set-cookie'],
+          equals('A=1; Path=/, B=2; Path=/; HttpOnly'));
+      expect(snapshot.setCookieHeaders, hasLength(2));
+      expect(snapshot.setCookieHeaders.first, equals('A=1; Path=/'));
+      expect(snapshot.setCookieHeaders.last, equals('B=2; Path=/; HttpOnly'));
     });
 
     /// QueuedRequestの空ヘッダーテスト

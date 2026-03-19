@@ -1,3 +1,29 @@
+## 0.3.0
+
+### 機能追加
+
+- **Cookie ヘッダ取得 API を追加**: `getCookieHeaderForUrl(String url)` を追加し、native HTTP 通信やバックグラウンド通信で同一セッションの Cookie ヘッダ値を再利用可能に
+
+### セキュリティ
+
+- **取得対象を同一 origin に制限**: `getCookieHeaderForUrl` は `start()` で設定した `origin` と同一 origin の URL のみ許可
+
+### 内部改善
+
+- **Set-Cookie の保持を改善**: 複数 `Set-Cookie` を壊さず保持するレスポンスヘッダスナップショットを導入
+- **Cookie 評価基盤を追加**: Domain / Path / Expires / Max-Age / Secure を考慮した内部 evaluator を追加
+- **Cookie 内部モデルを追加**: 公開用 `CookieInfo` と分離した内部保存モデル `CookieRecord` を導入
+
+### ドキュメント
+
+- **README / 仕様書更新**: 新 API の使い方、戻り値、同一 origin 制約を追記
+
+### テスト
+
+- **Cookie 関連テストを追加**: Cookie matching、ヘッダ生成、URL 制約の検証を追加
+
+---
+
 ## 0.2.2
 
 ### CI/リリース

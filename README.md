@@ -38,7 +38,7 @@ Add the following to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.2.2
+  offline_web_proxy: ^0.3.0
   # Add the following if using WebView
   # webview_flutter: ^4.4.2
 ```
@@ -196,6 +196,15 @@ final cookies = await proxy.getCookies();
 for (final cookie in cookies) {
   print('${cookie.name}: ${cookie.value} (${cookie.domain})');
 }
+
+// Get the Cookie header value for a target URL
+final cookieHeader =
+    await proxy.getCookieHeaderForUrl('https://api.example.com/app/api');
+if (cookieHeader != null) {
+  print('Cookie: $cookieHeader');
+}
+
+// Note: getCookieHeaderForUrl only allows URLs in the same origin as the configured origin
 
 // Clear all cookies
 await proxy.clearCookies();

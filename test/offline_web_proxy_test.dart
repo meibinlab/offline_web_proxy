@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'dart:io';
+import 'package:offline_web_proxy/src/models/cookie_record.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -90,6 +92,64 @@ void main() {
     test('should have no cookies initially', () async {
       final cookies = await proxy.getCookies();
       expect(cookies, isEmpty);
+    });
+
+    /// 対象URL向けCookieヘッダ取得のテスト
+    test('should build cookie header for target url', () async {
+      await proxy.start(config: const ProxyConfig(origin: 'https://example.com'));
+
+      final cookieBox = Hive.box('proxy_cookies');
+      final createdAt = DateTime.utc(2026, 3, 19, 10);
+      final rootCookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'ROOT=root; Path=/',
+        requestUri: Uri.parse('https://example.com/login'),
+        receivedAt: createdAt,
+      );
+      final appCookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'APP=app; Path=/app; Secure',
+        requestUri: Uri.parse('https://example.com/app/login'),
+        receivedAt: createdAt,
+      );
+      final foreignCookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'FOREIGN=foreign; Domain=other.example.com; Path=/',
+        requestUri: Uri.parse('https://other.example.com/login'),
+        receivedAt: createdAt,
+      );
+
+      await cookieBox.put(rootCookie.storageKey, rootCookie.toMap());
+      await cookieBox.put(appCookie.storageKey, appCookie.toMap());
+      await cookieBox.put(foreignCookie.storageKey, foreignCookie.toMap());
+
+      final cookieHeader =
+          await proxy.getCookieHeaderForUrl('https://example.com/app/dashboard');
+
+      expect(cookieHeader, equals('APP=app; ROOT=root'));
+    });
+
+    /// 対象Cookieが無い場合はnullを返すテスト
+    test('should return null when no cookies match target url', () async {
+      await proxy.start(config: const ProxyConfig(origin: 'https://example.com'));
+
+      final cookieHeader =
+          await proxy.getCookieHeaderForUrl('https://example.com/app/dashboard');
+
+      expect(cookieHeader, isNull);
+    });
+
+    /// 不正URLのCookieヘッダ取得エラーテスト
+    test('should throw error for invalid cookie header url', () async {
+      expect(() => proxy.getCookieHeaderForUrl('not-a-url'),
+          throwsArgumentError);
+    });
+
+    /// origin 外URLのCookieヘッダ取得エラーテスト
+    test('should throw error for url outside configured origin', () async {
+      await proxy.start(config: const ProxyConfig(origin: 'https://example.com'));
+
+      expect(
+        () => proxy.getCookieHeaderForUrl('https://api.example.com/app/dashboard'),
+        throwsArgumentError,
+      );
     });
 
     /// キャッシュリストの初期状態テスト
