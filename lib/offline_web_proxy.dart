@@ -184,7 +184,7 @@ class OfflineWebProxy {
   int _cacheMisses = 0;
 
   /// プロキシイベントの配信用ストリームコントローラ。
-  final StreamController<ProxyEvent> _eventController =
+    StreamController<ProxyEvent> _eventController =
       StreamController<ProxyEvent>.broadcast();
 
   /// ネットワーク接続状態の監視用サブスクリプション。
@@ -242,6 +242,10 @@ class OfflineWebProxy {
     }
 
     try {
+      if (_eventController.isClosed) {
+        _eventController = StreamController<ProxyEvent>.broadcast();
+      }
+
       // Hiveが初期化されていない場合は初期化
       if (!Hive.isAdapterRegistered(0)) {
         await Hive.initFlutter();
@@ -308,7 +312,6 @@ class OfflineWebProxy {
 
       await _server?.close();
       await _connectivitySubscription.cancel();
-      await _eventController.close();
 
       // Hiveボックスを閉じる
       await _cacheBox?.close();

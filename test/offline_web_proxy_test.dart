@@ -227,6 +227,95 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
+    /// 停止前に serverStopped イベントが購読側へ届くことのテスト
+    test('should emit serverStopped event before closing stream', () async {
+      final eventTypes = <ProxyEventType>[];
+      final stoppedEvent = Completer<void>();
+
+      final subscription = proxy.events.listen(
+        (event) {
+          eventTypes.add(event.type);
+          if (event.type == ProxyEventType.serverStopped &&
+              !stoppedEvent.isCompleted) {
+            stoppedEvent.complete();
+          }
+        },
+      );
+
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      await proxy.stop();
+
+      await stoppedEvent.future.timeout(const Duration(seconds: 1));
+
+      expect(eventTypes, contains(ProxyEventType.serverStarted));
+      expect(eventTypes, contains(ProxyEventType.serverStopped));
+
+      await subscription.cancel();
+    });
+
+    /// stop 後に再起動してもイベント配信と上流転送が継続することのテスト
+    test('should restart same instance and emit events again', () async {
+      await HttpOverrides.runZoned(() async {
+        var upstreamRequestCount = 0;
+        upstreamServer =
+            await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          upstreamRequestCount++;
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..write('ok');
+          await request.response.close();
+        });
+
+        final upstreamOrigin = 'http://127.0.0.1:${upstreamServer!.port}';
+        final initialEvents = <ProxyEventType>[];
+        final initialStopped = Completer<void>();
+        final initialSubscription = proxy.events.listen((event) {
+          initialEvents.add(event.type);
+          if (event.type == ProxyEventType.serverStopped &&
+              !initialStopped.isCompleted) {
+            initialStopped.complete();
+          }
+        });
+
+        final firstPort = await proxy.start(
+          config: ProxyConfig(origin: upstreamOrigin),
+        );
+        await _performProxyGet(firstPort, '/health');
+        await proxy.stop();
+        await initialStopped.future.timeout(const Duration(seconds: 1));
+
+        expect(initialEvents, contains(ProxyEventType.serverStarted));
+        expect(initialEvents, contains(ProxyEventType.serverStopped));
+
+        await initialSubscription.cancel();
+
+        final restartedStarted = Completer<void>();
+        final restartedEvents = <ProxyEventType>[];
+        final restartedSubscription = proxy.events.listen((event) {
+          restartedEvents.add(event.type);
+          if (event.type == ProxyEventType.serverStarted &&
+              !restartedStarted.isCompleted) {
+            restartedStarted.complete();
+          }
+        });
+
+        final secondPort = await proxy.start(
+          config: ProxyConfig(origin: upstreamOrigin),
+        );
+        await restartedStarted.future.timeout(const Duration(seconds: 1));
+        await _performProxyGet(secondPort, '/health/restarted');
+
+        expect(restartedEvents, contains(ProxyEventType.serverStarted));
+        expect(upstreamRequestCount, equals(2));
+
+        await restartedSubscription.cancel();
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
     /// 上流の Set-Cookie を保存し次回上流転送へ適用することのテスト
     test('should capture upstream set-cookie and forward it later', () async {
       await HttpOverrides.runZoned(() async {
