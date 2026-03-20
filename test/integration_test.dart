@@ -416,6 +416,82 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
+    /// バックオフに応じて retryCount と nextRetryAt が進むことの統合テスト
+    test('should update retryCount and honor nextRetryAt backoff schedule',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        late HttpServer upstreamServer;
+        var upstreamRequestCount = 0;
+
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer.listen((HttpRequest request) async {
+          upstreamRequestCount++;
+          await request.drain<void>();
+          request.response
+            ..statusCode = HttpStatus.internalServerError
+            ..write('retry');
+          await request.response.close();
+        });
+
+        try {
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstreamServer.port}',
+              retryBackoffSeconds: const [7, 7, 7],
+            ),
+          );
+
+          await _sendProxyRequest(
+            proxyPort,
+            method: 'POST',
+            path: '/backoff',
+            body: 'payload',
+          );
+
+          final initialQueuedRequests = await proxy.getQueuedRequests();
+          expect(initialQueuedRequests, hasLength(1));
+          expect(initialQueuedRequests.single.retryCount, equals(0));
+
+          await _waitUntil(
+            () async {
+              final queued = await proxy.getQueuedRequests();
+              return queued.length == 1 && queued.single.retryCount == 1;
+            },
+            timeout: const Duration(seconds: 8),
+          );
+
+          final firstRetry = (await proxy.getQueuedRequests()).single;
+          expect(upstreamRequestCount, equals(2));
+          expect(
+            firstRetry.nextRetryAt.isAfter(
+              DateTime.now().add(const Duration(seconds: 3)),
+            ),
+            isTrue,
+          );
+
+          await Future.delayed(const Duration(seconds: 6));
+
+          final queuedBeforeNextRetry = (await proxy.getQueuedRequests()).single;
+          expect(queuedBeforeNextRetry.retryCount, equals(1));
+          expect(upstreamRequestCount, equals(2));
+
+          await _waitUntil(
+            () async {
+              final queued = await proxy.getQueuedRequests();
+              return queued.length == 1 && queued.single.retryCount == 2;
+            },
+            timeout: const Duration(seconds: 8),
+          );
+
+          final secondRetry = (await proxy.getQueuedRequests()).single;
+          expect(upstreamRequestCount, equals(3));
+          expect(secondRetry.nextRetryAt.isAfter(firstRetry.nextRetryAt), isTrue);
+        } finally {
+          await upstreamServer.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
     /// 4xx 再送時にドロップ履歴へ記録されることの統合テスト
     test('should record dropped requests for 4xx responses and clear history',
         () async {
