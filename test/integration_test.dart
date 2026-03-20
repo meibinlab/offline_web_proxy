@@ -1,10 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
+
+class _RealHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context);
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -276,6 +284,138 @@ void main() {
       final finalStats = await proxy.getStats();
       expect(finalStats, isNotNull);
     });
+
+    /// キューされたリクエストが FIFO 順で再送されることの統合テスト
+    test('should drain queued requests in fifo order', () async {
+      await HttpOverrides.runZoned(() async {
+        late HttpServer upstreamServer;
+        var upstreamStatus = HttpStatus.internalServerError;
+        final replayBodies = <String>[];
+
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer.listen((HttpRequest request) async {
+          final body = await utf8.decoder.bind(request).join();
+          if (upstreamStatus == HttpStatus.ok) {
+            replayBodies.add(body);
+          }
+
+          request.response
+            ..statusCode = upstreamStatus
+            ..write(upstreamStatus == HttpStatus.ok ? 'ok' : 'retry');
+          await request.response.close();
+        });
+
+        try {
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstreamServer.port}',
+            ),
+          );
+
+          await _sendProxyRequest(
+            proxyPort,
+            method: 'POST',
+            path: '/orders',
+            body: 'first',
+          );
+          await _sendProxyRequest(
+            proxyPort,
+            method: 'POST',
+            path: '/orders',
+            body: 'second',
+          );
+
+          final queuedBeforeDrain = await proxy.getQueuedRequests();
+          expect(queuedBeforeDrain, hasLength(2));
+          expect(
+            queuedBeforeDrain.map((request) => request.method).toList(),
+            equals(['POST', 'POST']),
+          );
+
+          upstreamStatus = HttpStatus.ok;
+
+          await _waitUntil(
+            () async => (await proxy.getQueuedRequests()).isEmpty,
+            timeout: const Duration(seconds: 8),
+          );
+
+          expect(replayBodies, equals(['first', 'second']));
+        } finally {
+          await upstreamServer.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// キュー状態が再起動後も保持され再送を再開できることの統合テスト
+    test('should persist queued requests across restart and resume draining',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        late HttpServer upstreamServer;
+        var upstreamStatus = HttpStatus.internalServerError;
+        final replayBodies = <String>[];
+
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer.listen((HttpRequest request) async {
+          final body = await utf8.decoder.bind(request).join();
+          if (upstreamStatus == HttpStatus.ok) {
+            replayBodies.add(body);
+          }
+
+          request.response
+            ..statusCode = upstreamStatus
+            ..write(upstreamStatus == HttpStatus.ok ? 'ok' : 'retry');
+          await request.response.close();
+        });
+
+        try {
+          final origin = 'http://127.0.0.1:${upstreamServer.port}';
+          final firstProxyPort = await proxy.start(
+            config: ProxyConfig(origin: origin),
+          );
+
+          await _sendProxyRequest(
+            firstProxyPort,
+            method: 'POST',
+            path: '/persist',
+            body: 'persisted',
+          );
+
+          final queuedBeforeRestart = await proxy.getQueuedRequests();
+          expect(queuedBeforeRestart, hasLength(1));
+          expect(queuedBeforeRestart.single.retryCount, equals(0));
+          expect(
+            queuedBeforeRestart.single.nextRetryAt
+                .isAfter(queuedBeforeRestart.single.queuedAt) ||
+                queuedBeforeRestart.single.nextRetryAt
+                    .isAtSameMomentAs(queuedBeforeRestart.single.queuedAt),
+            isTrue,
+          );
+
+          await proxy.stop();
+          proxy = OfflineWebProxy();
+
+          await proxy.start(
+            config: ProxyConfig(origin: origin),
+          );
+
+          final queuedAfterRestart = await proxy.getQueuedRequests();
+          expect(queuedAfterRestart, hasLength(1));
+          expect(queuedAfterRestart.single.method, equals('POST'));
+
+          upstreamStatus = HttpStatus.ok;
+
+          await _waitUntil(
+            () async => (await proxy.getQueuedRequests()).isEmpty,
+            timeout: const Duration(seconds: 8),
+          );
+
+          expect(replayBodies, equals(['persisted']));
+        } finally {
+          await upstreamServer.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
   });
 
   group('Configuration Integration Tests', () {
@@ -355,4 +495,43 @@ void main() {
       expect(partialConfig.connectTimeout, equals(Duration(seconds: 10)));
     });
   });
+}
+
+Future<void> _sendProxyRequest(
+  int proxyPort, {
+  required String method,
+  required String path,
+  String body = '',
+}) async {
+  final client = HttpClient();
+  try {
+    final request = await client.openUrl(
+      method,
+      Uri.parse('http://127.0.0.1:$proxyPort$path'),
+    );
+    if (body.isNotEmpty) {
+      request.headers.contentType = ContentType.text;
+      request.write(body);
+    }
+    final response = await request.close();
+    await response.drain<void>();
+  } finally {
+    client.close(force: true);
+  }
+}
+
+Future<void> _waitUntil(
+  Future<bool> Function() condition, {
+  required Duration timeout,
+  Duration interval = const Duration(milliseconds: 100),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(deadline)) {
+    if (await condition()) {
+      return;
+    }
+    await Future.delayed(interval);
+  }
+
+  throw TimeoutException('Condition was not satisfied within $timeout');
 }
