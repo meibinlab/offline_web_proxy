@@ -101,7 +101,7 @@ typedef WarmupErrorCallback = void Function(String path, String error);
 const String _encryptedCookieBoxName = 'proxy_cookies_secure';
 const String _legacyCookieBoxName = 'proxy_cookies';
 const String _cookieEncryptionKeyStorageKey =
-  'offline_web_proxy.cookie_box_encryption_key';
+    'offline_web_proxy.cookie_box_encryption_key';
 const int _cookieEncryptionKeyLength = 32;
 const String _droppedRequestBoxName = 'proxy_dropped_requests';
 
@@ -185,7 +185,7 @@ class OfflineWebProxy {
   int _cacheMisses = 0;
 
   /// プロキシイベントの配信用ストリームコントローラ。
-    StreamController<ProxyEvent> _eventController =
+  StreamController<ProxyEvent> _eventController =
       StreamController<ProxyEvent>.broadcast();
 
   /// ネットワーク接続状態の監視用サブスクリプション。
@@ -2257,13 +2257,14 @@ class OfflineWebProxy {
   /// [data] キューデータ。
   ///
   /// Returns: 送信成功時は `true`。
-  Future<({
-    bool success,
-    bool shouldDrop,
-    int statusCode,
-    String? dropReason,
-    String? errorMessage,
-  })> _sendQueuedRequest(Map data) async {
+  Future<
+      ({
+        bool success,
+        bool shouldDrop,
+        int statusCode,
+        String? dropReason,
+        String? errorMessage,
+      })> _sendQueuedRequest(Map data) async {
     if (_config?.origin.isEmpty ?? true) {
       return (
         success: false,

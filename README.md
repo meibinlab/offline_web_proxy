@@ -393,3 +393,29 @@ Timer.periodic(Duration(minutes: 5), (timer) async {
   print('Queue length: ${stats.queueLength}');
 });
 ```
+
+### Git Hooks
+
+Use the Git native pre-commit hook to catch formatting and analyzer issues before creating a commit.
+
+Set it up after the Flutter SDK is available and `flutter pub get` has completed.
+
+Set it up once after cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+If needed on macOS or Linux, grant execute permission:
+
+```bash
+chmod +x .githooks/pre-commit
+```
+
+The pre-commit hook performs the following steps:
+
+- `dart format .`
+- Stop the commit if any Dart file was reformatted, so you can review and stage the result
+- `dart analyze --fatal-warnings`
+
+If the commit is blocked, review the diff, run `git add` for the updated files, and fix analyzer warnings before trying again.

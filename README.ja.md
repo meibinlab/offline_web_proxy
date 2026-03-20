@@ -393,3 +393,29 @@ Timer.periodic(Duration(minutes: 5), (timer) async {
   print('キュー長: ${stats.queueLength}');
 });
 ```
+
+### Git Hooks
+
+コミット前に整形崩れや analyzer の warning を検知するため、Git ネイティブの pre-commit hook を利用できます。
+
+Flutter SDK を利用可能にし、`flutter pub get` 実行後に設定してください。
+
+clone 後に 1 回だけ以下を実行してください。
+
+```bash
+git config core.hooksPath .githooks
+```
+
+macOS または Linux では、必要に応じて実行権限を付与してください。
+
+```bash
+chmod +x .githooks/pre-commit
+```
+
+pre-commit hook では次を実行します。
+
+- `dart format .`
+- Dart ファイルが再整形された場合は、差分確認と再 stage のためにコミットを停止
+- `dart analyze --fatal-warnings`
+
+コミットが止まった場合は、差分を確認して `git add` で再 stage し、analyzer の warning を解消してから再実行してください。

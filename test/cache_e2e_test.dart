@@ -36,7 +36,8 @@ void main() {
 
     setUp(() async {
       FlutterSecureStorage.setMockInitialValues(<String, String>{});
-      tempDir = await Directory.systemTemp.createTemp('offline_web_proxy_test_');
+      tempDir =
+          await Directory.systemTemp.createTemp('offline_web_proxy_test_');
       FlutterSecureStorage.setMockInitialValues(<String, String>{});
       proxy = OfflineWebProxy();
     });
