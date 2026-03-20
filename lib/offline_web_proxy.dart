@@ -103,6 +103,7 @@ const String _legacyCookieBoxName = 'proxy_cookies';
 const String _cookieEncryptionKeyStorageKey =
   'offline_web_proxy.cookie_box_encryption_key';
 const int _cookieEncryptionKeyLength = 32;
+const String _droppedRequestBoxName = 'proxy_dropped_requests';
 
 /// Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
 /// WebViewからのリクエストを横取りし、ネットワーク接続状態に基づいて
@@ -220,6 +221,9 @@ class OfflineWebProxy {
   /// べき等性キーの永続化ボックス。
   Box? _idempotencyBox;
 
+  /// ドロップされたリクエスト履歴の永続化ボックス。
+  Box? _droppedRequestBox;
+
   /// 静的リソースの存在確認結果キャッシュ。
   final Map<String, bool> _staticResourceCache = {};
 
@@ -318,6 +322,7 @@ class OfflineWebProxy {
       await _queueBox?.close();
       await _cookieBox?.close();
       await _idempotencyBox?.close();
+      await _droppedRequestBox?.close();
 
       // HTTPクライアントを閉じる
       _httpClient?.close(force: true);
@@ -820,10 +825,29 @@ class OfflineWebProxy {
   ///   * [QueueOperationException] 履歴情報の取得に失敗した場合。
   Future<List<DroppedRequest>> getDroppedRequests({int? limit}) async {
     try {
+      if (limit != null && limit <= 0) {
+        return const <DroppedRequest>[];
+      }
+
       final requests = <DroppedRequest>[];
 
-      // ドロップされたリクエストは現在の実装ではメモリに保存されないため空を返却
-      // 将来的には特別なストレージやログファイルから読み込むことを想定
+      if (_droppedRequestBox != null) {
+        int idx = 0;
+        for (final key in _droppedRequestBox!.keys) {
+          final data = _droppedRequestBox!.get(key) as Map?;
+          if (data != null) {
+            requests.add(_mapToDroppedRequest(data));
+            if (limit != null && requests.length >= limit) {
+              break;
+            }
+          }
+
+          idx++;
+          if (idx % 50 == 0) {
+            await Future.delayed(Duration.zero);
+          }
+        }
+      }
 
       return requests;
     } catch (e) {
@@ -838,8 +862,7 @@ class OfflineWebProxy {
   ///   * [QueueOperationException] 履歴の削除に失敗した場合。
   Future<void> clearDroppedRequests() async {
     try {
-      // ドロップされたリクエストは現在の実装ではメモリに保存されないため操作なし
-      // 将来的には特別なストレージやログファイルをクリアすることを想定
+      await _droppedRequestBox?.clear();
     } catch (e) {
       throw QueueOperationException('clearDropped',
           'ドロップされたリクエスト履歴の削除に失敗しました: $e', e is Exception ? e : null);
@@ -855,6 +878,7 @@ class OfflineWebProxy {
   Future<ProxyStats> getStats() async {
     try {
       final queueLength = _queueBox?.length ?? 0;
+      final droppedRequestsCount = _droppedRequestBox?.length ?? 0;
       final uptime = _startedAt != null
           ? DateTime.now().difference(_startedAt!)
           : Duration.zero;
@@ -865,7 +889,7 @@ class OfflineWebProxy {
         cacheMisses: _cacheMisses,
         cacheHitRate: _totalRequests > 0 ? _cacheHits / _totalRequests : 0.0,
         queueLength: queueLength,
-        droppedRequestsCount: 0, // 現在の実装ではドロップ機能は未実装
+        droppedRequestsCount: droppedRequestsCount,
         startedAt: _startedAt ?? DateTime.now(),
         uptime: uptime,
       );
@@ -922,6 +946,7 @@ class OfflineWebProxy {
     _queueBox = await Hive.openBox('proxy_queue');
     await _ensureCookieStorageInitialized();
     _idempotencyBox = await Hive.openBox('proxy_idempotency');
+    _droppedRequestBox = await Hive.openBox(_droppedRequestBoxName);
   }
 
   /// Cookie 用ストレージを必要時に初期化します。
@@ -2189,12 +2214,31 @@ class OfflineWebProxy {
     if (data == null) return;
 
     final itemUrl = data['url'] as String? ?? '';
+    final nextRetryAtValue = data['nextRetryAt'] as String?;
+    if (nextRetryAtValue != null) {
+      final nextRetryAt = DateTime.tryParse(nextRetryAtValue);
+      if (nextRetryAt != null && DateTime.now().isBefore(nextRetryAt)) {
+        return;
+      }
+    }
 
     try {
-      final success = await _sendQueuedRequest(data);
-      if (success) {
+      final result = await _sendQueuedRequest(data);
+      if (result.success) {
         await _queueBox!.delete(key);
         _emitEvent(ProxyEventType.queueDrained, itemUrl, {});
+      } else if (result.shouldDrop) {
+        await _queueBox!.delete(key);
+        await _recordDroppedRequest(
+          data,
+          statusCode: result.statusCode,
+          dropReason: result.dropReason ?? 'dropped',
+          errorMessage: result.errorMessage ?? 'HTTP ${result.statusCode}',
+        );
+        _emitEvent(ProxyEventType.requestDropped, itemUrl, {
+          'statusCode': result.statusCode,
+          'dropReason': result.dropReason,
+        });
       } else {
         _updateRetrySchedule(data);
         await _queueBox!.put(key, data);
@@ -2213,9 +2257,21 @@ class OfflineWebProxy {
   /// [data] キューデータ。
   ///
   /// Returns: 送信成功時は `true`。
-  Future<bool> _sendQueuedRequest(Map data) async {
+  Future<({
+    bool success,
+    bool shouldDrop,
+    int statusCode,
+    String? dropReason,
+    String? errorMessage,
+  })> _sendQueuedRequest(Map data) async {
     if (_config?.origin.isEmpty ?? true) {
-      return false;
+      return (
+        success: false,
+        shouldDrop: false,
+        statusCode: 0,
+        dropReason: null,
+        errorMessage: 'No upstream origin configured',
+      );
     }
 
     final url = data['url'] as String;
@@ -2232,7 +2288,13 @@ class OfflineWebProxy {
       if (!uri.isAbsolute) {
         final origin = _config?.origin ?? '';
         if (origin.isEmpty) {
-          return false;
+          return (
+            success: false,
+            shouldDrop: false,
+            statusCode: 0,
+            dropReason: null,
+            errorMessage: 'No upstream origin configured',
+          );
         }
 
         final normalizedPath = url.startsWith('/') ? url : '/$url';
@@ -2257,9 +2319,42 @@ class OfflineWebProxy {
             .timeout(_config?.requestTimeout ?? const Duration(seconds: 60));
 
         // 2xxステータスコードを成功とみなす
-        return response.statusCode >= 200 && response.statusCode < 300;
+        final statusCode = response.statusCode;
+        if (statusCode >= 200 && statusCode < 300) {
+          return (
+            success: true,
+            shouldDrop: false,
+            statusCode: statusCode,
+            dropReason: null,
+            errorMessage: null,
+          );
+        }
+
+        if (statusCode >= 400 && statusCode < 500) {
+          return (
+            success: false,
+            shouldDrop: true,
+            statusCode: statusCode,
+            dropReason: '4xx_error',
+            errorMessage: 'HTTP $statusCode',
+          );
+        }
+
+        return (
+          success: false,
+          shouldDrop: false,
+          statusCode: statusCode,
+          dropReason: null,
+          errorMessage: 'HTTP $statusCode',
+        );
       } catch (e) {
-        return false;
+        return (
+          success: false,
+          shouldDrop: false,
+          statusCode: 0,
+          dropReason: null,
+          errorMessage: e.toString(),
+        );
       }
     } finally {
       // 共有クライアントをここで閉じない
@@ -2423,6 +2518,49 @@ class OfflineWebProxy {
       nextRetryAt: DateTime.parse(
           data['nextRetryAt'] as String? ?? DateTime.now().toIso8601String()),
     );
+  }
+
+  /// Hive のマップデータを DroppedRequest オブジェクトに変換します。
+  ///
+  /// [data] Hive から読み込んだドロップ履歴データです。
+  /// 戻り値は変換された [DroppedRequest] オブジェクトです。
+  DroppedRequest _mapToDroppedRequest(Map data) {
+    return DroppedRequest(
+      url: data['url'] as String? ?? '',
+      method: data['method'] as String? ?? 'GET',
+      droppedAt: DateTime.parse(
+        data['droppedAt'] as String? ?? DateTime.now().toIso8601String(),
+      ),
+      dropReason: data['dropReason'] as String? ?? 'dropped',
+      statusCode: data['statusCode'] as int? ?? 0,
+      errorMessage: data['errorMessage'] as String? ?? '',
+    );
+  }
+
+  /// ドロップされたリクエスト履歴を保存します。
+  ///
+  /// [data] は元のキューデータです。
+  /// [statusCode] はドロップ時の HTTP ステータスです。
+  /// [dropReason] はドロップ理由です。
+  /// [errorMessage] は記録する詳細メッセージです。
+  Future<void> _recordDroppedRequest(
+    Map data, {
+    required int statusCode,
+    required String dropReason,
+    required String errorMessage,
+  }) async {
+    final droppedAt = DateTime.now();
+    final droppedData = {
+      'url': data['url'] as String? ?? '',
+      'method': data['method'] as String? ?? 'GET',
+      'droppedAt': droppedAt.toIso8601String(),
+      'dropReason': dropReason,
+      'statusCode': statusCode,
+      'errorMessage': errorMessage,
+    };
+
+    final key = droppedAt.microsecondsSinceEpoch.toString();
+    await _droppedRequestBox?.put(key, droppedData);
   }
 
   /// ファイルパスからMIMEタイプを取得します。

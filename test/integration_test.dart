@@ -416,6 +416,76 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
+    /// 4xx 再送時にドロップ履歴へ記録されることの統合テスト
+    test('should record dropped requests for 4xx responses and clear history',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        late HttpServer upstreamServer;
+        var upstreamStatus = HttpStatus.internalServerError;
+        final eventTypes = <ProxyEventType>[];
+        final subscription = proxy.events.listen((event) {
+          eventTypes.add(event.type);
+        });
+
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer.listen((HttpRequest request) async {
+          await request.drain<void>();
+          request.response
+            ..statusCode = upstreamStatus
+            ..write('done');
+          await request.response.close();
+        });
+
+        try {
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstreamServer.port}',
+            ),
+          );
+
+          await _sendProxyRequest(
+            proxyPort,
+            method: 'POST',
+            path: '/drop-me',
+            body: 'payload',
+          );
+
+          expect(await proxy.getQueuedRequests(), hasLength(1));
+
+          upstreamStatus = HttpStatus.badRequest;
+
+          await _waitUntil(
+            () async => (await proxy.getQueuedRequests()).isEmpty,
+            timeout: const Duration(seconds: 8),
+          );
+
+          final droppedRequests = await proxy.getDroppedRequests();
+          expect(droppedRequests, hasLength(1));
+          expect(droppedRequests.single.method, equals('POST'));
+          expect(droppedRequests.single.statusCode, equals(HttpStatus.badRequest));
+          expect(droppedRequests.single.dropReason, equals('4xx_error'));
+          expect(droppedRequests.single.url, contains('/drop-me'));
+
+          final limitedDroppedRequests = await proxy.getDroppedRequests(limit: 1);
+          expect(limitedDroppedRequests, hasLength(1));
+
+          final stats = await proxy.getStats();
+          expect(stats.queueLength, equals(0));
+          expect(stats.droppedRequestsCount, equals(1));
+          expect(eventTypes, contains(ProxyEventType.requestDropped));
+
+          await proxy.clearDroppedRequests();
+
+          expect(await proxy.getDroppedRequests(), isEmpty);
+          expect((await proxy.getStats()).droppedRequestsCount, equals(0));
+
+          await subscription.cancel();
+        } finally {
+          await upstreamServer.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
   });
 
   group('Configuration Integration Tests', () {
