@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'dart:io';
+
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
-import 'dart:io';
 import 'package:offline_web_proxy/src/models/cookie_record.dart';
 
 const String _encryptedCookieBoxName = 'proxy_cookies_secure';
@@ -13,8 +14,12 @@ const String _legacyCookieBoxName = 'proxy_cookies';
 const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 
-HttpClient _createRealHttpClient(SecurityContext? context) {
-  return HttpClient(context: context);
+class _RealHttpOverrides extends HttpOverrides {
+  @override
+  // ignore: unnecessary_overrides
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context);
+  }
 }
 
 void main() {
@@ -219,7 +224,7 @@ void main() {
 
         expect(receivedCookies, hasLength(1));
         expect(receivedCookies.single, equals('NATIVE=native-token'));
-      }, createHttpClient: _createRealHttpClient);
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
     /// 停止前に serverStopped イベントが購読側へ届くことのテスト
@@ -307,7 +312,7 @@ void main() {
         expect(upstreamRequestCount, equals(2));
 
         await restartedSubscription.cancel();
-      }, createHttpClient: _createRealHttpClient);
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
     /// 上流の Set-Cookie を保存し次回上流転送へ適用することのテスト
@@ -343,7 +348,7 @@ void main() {
         expect(receivedCookies, hasLength(2));
         expect(receivedCookies.first, isNull);
         expect(receivedCookies.last, equals('SESSION=server-token'));
-      }, createHttpClient: _createRealHttpClient);
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
     /// Cookie 暗号化鍵をセキュアストレージに保存することのテスト
@@ -481,7 +486,7 @@ void main() {
           receivedCookies.single,
           equals('SESSION=app; SESSION=root; CLIENT=1'),
         );
-      }, createHttpClient: _createRealHttpClient);
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
     /// start 前に復元した Cookie を一覧取得できることのテスト

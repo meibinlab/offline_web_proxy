@@ -414,8 +414,19 @@ chmod +x .githooks/pre-commit
 
 pre-commit hook では次を実行します。
 
+- `dart fix --apply`
 - `dart format .`
-- Dart ファイルが再整形された場合は、差分確認と再 stage のためにコミットを停止
+- Dart ファイルが自動修正または再整形された場合は、差分確認と再 stage のためにコミットを停止
 - `dart analyze --fatal-warnings`
 
 コミットが止まった場合は、差分を確認して `git add` で再 stage し、analyzer の warning を解消してから再実行してください。
+
+### VS Code ワークスペース設定
+
+このリポジトリには、VS Code で Dart ファイルを扱うためのワークスペース設定を含めています。
+
+- Dart ファイルでは保存時整形を有効化
+- `source.fixAll` を明示的な保存時に実行
+- `source.organizeImports` を明示的な保存時に実行
+
+VS Code と Dart 拡張を使っていれば、軽微な lint はコミット前に自動で減らせます。

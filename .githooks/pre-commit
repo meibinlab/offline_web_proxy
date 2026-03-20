@@ -12,6 +12,9 @@ trap cleanup EXIT
 
 git diff --name-only -- '*.dart' | sort > "$before_diff_file"
 
+echo "[pre-commit] apply safe fixes"
+dart fix --apply
+
 echo "[pre-commit] verify formatting"
 dart format .
 
@@ -20,7 +23,7 @@ git diff --name-only -- '*.dart' | sort > "$after_diff_file"
 new_diff_files="$(comm -13 "$before_diff_file" "$after_diff_file")"
 
 if [ -n "$new_diff_files" ]; then
-	echo "[pre-commit] Dart files were reformatted. Review and stage the changes, then commit again."
+	echo "[pre-commit] Dart files were auto-fixed or reformatted. Review and stage the changes, then commit again."
 	printf '%s\n' "$new_diff_files"
 	exit 1
 fi

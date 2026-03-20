@@ -414,8 +414,19 @@ chmod +x .githooks/pre-commit
 
 The pre-commit hook performs the following steps:
 
+- `dart fix --apply`
 - `dart format .`
-- Stop the commit if any Dart file was reformatted, so you can review and stage the result
+- Stop the commit if any Dart file was auto-fixed or reformatted, so you can review and stage the result
 - `dart analyze --fatal-warnings`
 
 If the commit is blocked, review the diff, run `git add` for the updated files, and fix analyzer warnings before trying again.
+
+### VS Code Workspace Settings
+
+This repository includes workspace settings for Dart files in VS Code.
+
+- Format on save is enabled for Dart files
+- `source.fixAll` runs on explicit save for fixable warnings
+- `source.organizeImports` runs on explicit save
+
+If you use VS Code with the Dart extension, many trivial lint issues will be fixed before commit.

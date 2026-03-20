@@ -1,14 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 
-HttpClient _createRealHttpClient(SecurityContext? context) {
-  return HttpClient(context: context);
+class _RealHttpOverrides extends HttpOverrides {
+  @override
+  // ignore: unnecessary_overrides
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context);
+  }
 }
 
 void main() {
@@ -340,7 +345,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _createRealHttpClient);
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
     /// キュー状態が再起動後も保持され再送を再開できることの統合テスト
@@ -410,7 +415,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _createRealHttpClient);
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
     /// バックオフに応じて retryCount と nextRetryAt が進むことの統合テスト
@@ -488,7 +493,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _createRealHttpClient);
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
     /// 4xx 再送時にドロップ履歴へ記録されることの統合テスト
@@ -560,7 +565,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _createRealHttpClient);
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
   });
 
