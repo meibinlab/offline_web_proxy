@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -7,18 +9,31 @@ import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'dart:io';
 import 'package:offline_web_proxy/src/models/cookie_record.dart';
 
+const String _encryptedCookieBoxName = 'proxy_cookies_secure';
+const String _legacyCookieBoxName = 'proxy_cookies';
+const String _cookieEncryptionKeyStorageKey =
+    'offline_web_proxy.cookie_box_encryption_key';
+
+class _RealHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context);
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  FlutterSecureStorage.setMockInitialValues(<String, String>{});
+  late String hiveTestDirectory;
 
   setUpAll(() {
     const channel = MethodChannel('plugins.flutter.io/path_provider');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
       if (methodCall.method == 'getApplicationDocumentsDirectory') {
-        // テスト用の一時ディレクトリパスのみ返す
-        final tempDir =
-            Directory.systemTemp.createTempSync('offline_web_proxy_test');
-        return tempDir.path;
+        // テスト実行中は同一ディレクトリを返して Hive の保存先を安定化する
+        return hiveTestDirectory;
       }
       return null;
     });
@@ -26,8 +41,13 @@ void main() {
 
   group('OfflineWebProxy Basic Tests', () {
     late OfflineWebProxy proxy;
+    HttpServer? upstreamServer;
 
-    setUp(() {
+    setUp(() async {
+      hiveTestDirectory =
+          Directory.systemTemp.createTempSync('offline_web_proxy_test').path;
+      FlutterSecureStorage.setMockInitialValues(<String, String>{});
+      await _resetHiveTestBoxes();
       proxy = OfflineWebProxy();
     });
 
@@ -35,6 +55,7 @@ void main() {
       if (proxy.isRunning) {
         await proxy.stop();
       }
+      await upstreamServer?.close(force: true);
     });
 
     /// プロキシインスタンスのテスト
@@ -99,7 +120,7 @@ void main() {
       await proxy.start(
           config: const ProxyConfig(origin: 'https://example.com'));
 
-      final cookieBox = Hive.box('proxy_cookies');
+      final cookieBox = await _openEncryptedCookieBox();
       final createdAt = DateTime.utc(2026, 3, 19, 10);
       final rootCookie = CookieRecord.fromSetCookieHeader(
         setCookieHeader: 'ROOT=root; Path=/',
@@ -136,6 +157,271 @@ void main() {
           .getCookieHeaderForUrl('https://example.com/app/dashboard');
 
       expect(cookieHeader, isNull);
+    });
+
+    /// start 前に復元した Cookie を起動後に送信できることのテスト
+    test('should restore cookies before start and use them after start',
+        () async {
+      await proxy.restoreCookies([
+        const CookieRestoreEntry(
+          name: 'NATIVE',
+          value: 'native-token',
+          domain: 'example.com',
+          path: '/app',
+          secure: true,
+          hostOnly: true,
+        ),
+      ]);
+
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final cookieHeader = await proxy
+          .getCookieHeaderForUrl('https://example.com/app/dashboard');
+
+      expect(cookieHeader, equals('NATIVE=native-token'));
+    });
+
+    /// start 前に復元した Cookie が上流転送へ適用されることのテスト
+    test('should forward restored cookies to upstream after start', () async {
+      await HttpOverrides.runZoned(() async {
+        final receivedCookies = <String?>[];
+        upstreamServer =
+            await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          receivedCookies.add(request.headers.value('cookie'));
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..write('ok');
+          await request.response.close();
+        });
+
+        await proxy.restoreCookies([
+          const CookieRestoreEntry(
+            name: 'NATIVE',
+            value: 'native-token',
+            domain: '127.0.0.1',
+            path: '/',
+            hostOnly: true,
+          ),
+        ]);
+
+        final upstreamOrigin = 'http://127.0.0.1:${upstreamServer!.port}';
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(origin: upstreamOrigin),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .getUrl(Uri.parse('http://127.0.0.1:$proxyPort/app/dashboard'));
+          final response = await request.close();
+          await response.drain<void>();
+        } finally {
+          client.close(force: true);
+        }
+
+        expect(receivedCookies, hasLength(1));
+        expect(receivedCookies.single, equals('NATIVE=native-token'));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 上流の Set-Cookie を保存し次回上流転送へ適用することのテスト
+    test('should capture upstream set-cookie and forward it later', () async {
+      await HttpOverrides.runZoned(() async {
+        final receivedCookies = <String?>[];
+        upstreamServer =
+            await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          receivedCookies.add(request.headers.value('cookie'));
+
+          if (request.uri.path == '/login') {
+            request.response.headers.add(
+              'set-cookie',
+              'SESSION=server-token; Path=/; HttpOnly',
+            );
+          }
+
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..write('ok');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+          ),
+        );
+
+        await _performProxyGet(proxyPort, '/login');
+        await _performProxyGet(proxyPort, '/app/dashboard');
+
+        expect(receivedCookies, hasLength(2));
+        expect(receivedCookies.first, isNull);
+        expect(receivedCookies.last, equals('SESSION=server-token'));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// Cookie 暗号化鍵をセキュアストレージに保存することのテスト
+    test('should persist cookie encryption key in secure storage', () async {
+      await proxy.restoreCookies([
+        const CookieRestoreEntry(
+          name: 'SECURE',
+          value: 'value',
+          domain: 'example.com',
+          hostOnly: true,
+        ),
+      ]);
+
+      final secureStorage = const FlutterSecureStorage();
+      final storedKey = await secureStorage.read(
+        key: _cookieEncryptionKeyStorageKey,
+      );
+
+      expect(storedKey, isNotNull);
+      expect(base64Decode(storedKey!), hasLength(32));
+    });
+
+    /// 既存の平文 Cookie Box を暗号化 Box へ移行することのテスト
+    test('should migrate legacy plain cookie box into encrypted box',
+        () async {
+      await Hive.initFlutter();
+      final legacyBox = await Hive.openBox(_legacyCookieBoxName);
+      final legacyCookie = CookieRecord.fromSetCookieHeader(
+        setCookieHeader: 'LEGACY=token; Path=/; Secure',
+        requestUri: Uri.parse('https://example.com/login'),
+        receivedAt: DateTime.utc(2026, 3, 19, 10),
+      );
+      await legacyBox.put(legacyCookie.storageKey, legacyCookie.toMap());
+      await legacyBox.close();
+
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final cookieHeader =
+          await proxy.getCookieHeaderForUrl('https://example.com/app');
+
+      expect(cookieHeader, equals('LEGACY=token'));
+      expect(await Hive.boxExists(_legacyCookieBoxName), isFalse);
+    });
+
+    /// 不正な暗号化鍵では平文 Box にフォールバックしないことのテスト
+    test('should fail without fallback when secure storage key is invalid',
+        () async {
+      FlutterSecureStorage.setMockInitialValues(<String, String>{
+        _cookieEncryptionKeyStorageKey: base64Encode(Uint8List(8)),
+      });
+      proxy = OfflineWebProxy();
+
+      expect(
+        () => proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'),
+        ),
+        throwsA(isA<ProxyStartException>()),
+      );
+    });
+
+    /// 暗号化 Box が残っていても鍵喪失時は復号できず失敗することのテスト
+    test('should fail and require re-login when encryption key is missing',
+        () async {
+      await proxy.restoreCookies([
+        const CookieRestoreEntry(
+          name: 'SESSION',
+          value: 'token',
+          domain: 'example.com',
+          hostOnly: true,
+        ),
+      ]);
+
+      await Hive.close();
+      FlutterSecureStorage.setMockInitialValues(<String, String>{});
+      proxy = OfflineWebProxy();
+
+      expect(
+        () => proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'),
+        ),
+        throwsA(isA<ProxyStartException>()),
+      );
+    });
+
+    /// Jar の同名 Cookie を保持しつつクライアント Cookie を補完するテスト
+    test('should preserve duplicate jar cookies and append client-only cookies',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final receivedCookies = <String?>[];
+        upstreamServer =
+            await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          receivedCookies.add(request.headers.value('cookie'));
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..write('ok');
+          await request.response.close();
+        });
+
+        await proxy.restoreCookies([
+          const CookieRestoreEntry(
+            name: 'SESSION',
+            value: 'root',
+            domain: '127.0.0.1',
+            path: '/',
+            hostOnly: true,
+          ),
+          const CookieRestoreEntry(
+            name: 'SESSION',
+            value: 'app',
+            domain: '127.0.0.1',
+            path: '/app',
+            hostOnly: true,
+          ),
+        ]);
+
+        final upstreamOrigin = 'http://127.0.0.1:${upstreamServer!.port}';
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(origin: upstreamOrigin),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .getUrl(Uri.parse('http://127.0.0.1:$proxyPort/app/dashboard'));
+          request.headers.set('cookie', 'SESSION=client; CLIENT=1');
+          final response = await request.close();
+          await response.drain<void>();
+        } finally {
+          client.close(force: true);
+        }
+
+        expect(receivedCookies, hasLength(1));
+        expect(
+          receivedCookies.single,
+          equals('SESSION=app; SESSION=root; CLIENT=1'),
+        );
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// start 前に復元した Cookie を一覧取得できることのテスト
+    test('should expose restored cookies before start', () async {
+      await proxy.restoreCookies([
+        CookieRestoreEntry.fromSetCookieHeader(
+          setCookieHeader: 'SESSION=abc123; Path=/; Secure; SameSite=Lax',
+          requestUrl: 'https://example.com/login',
+        ),
+      ]);
+
+      final cookies = await proxy.getCookies();
+
+      expect(cookies, hasLength(1));
+      expect(cookies.first.name, equals('SESSION'));
+      expect(cookies.first.value, equals('***'));
+      expect(cookies.first.domain, equals('example.com'));
+      expect(cookies.first.path, equals('/'));
+      expect(cookies.first.secure, isTrue);
+      expect(cookies.first.sameSite, equals('Lax'));
     });
 
     /// 不正URLのCookieヘッダ取得エラーテスト
@@ -185,13 +471,13 @@ void main() {
 
     /// Cookieクリア操作のテスト
     test('should handle cookie clear operation', () async {
-      expect(() => proxy.clearCookies(), returnsNormally);
+      await expectLater(proxy.clearCookies(), completes);
     });
 
     /// 特定ドメインのCookieクリア操作のテスト
     test('should handle cookie clear for specific domain', () async {
       const testDomain = 'example.com';
-      expect(() => proxy.clearCookies(domain: testDomain), returnsNormally);
+      await expectLater(proxy.clearCookies(domain: testDomain), completes);
     });
 
     /// ドロップされたリクエストのクリア操作テスト
@@ -571,4 +857,40 @@ void main() {
       expect(entries, isA<List<CacheEntry>>());
     });
   });
+}
+
+Future<Box> _openEncryptedCookieBox() async {
+  if (Hive.isBoxOpen(_encryptedCookieBoxName)) {
+    return Hive.box(_encryptedCookieBoxName);
+  }
+
+  await Hive.initFlutter();
+  final secureStorage = const FlutterSecureStorage();
+  final encodedKey = await secureStorage.read(
+    key: _cookieEncryptionKeyStorageKey,
+  );
+  if (encodedKey == null) {
+    throw StateError('Cookie encryption key is not initialized');
+  }
+
+  return Hive.openBox(
+    _encryptedCookieBoxName,
+    encryptionCipher: HiveAesCipher(base64Decode(encodedKey)),
+  );
+}
+
+Future<void> _resetHiveTestBoxes() async {
+  await Hive.close();
+}
+
+Future<void> _performProxyGet(int proxyPort, String path) async {
+  final client = HttpClient();
+  try {
+    final request =
+        await client.getUrl(Uri.parse('http://127.0.0.1:$proxyPort$path'));
+    final response = await request.close();
+    await response.drain<void>();
+  } finally {
+    client.close(force: true);
+  }
 }

@@ -1,12 +1,35 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late String hiveTestDirectory;
+
+  setUpAll(() {
+    const channel = MethodChannel('plugins.flutter.io/path_provider');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
+      if (methodCall.method == 'getApplicationDocumentsDirectory') {
+        return hiveTestDirectory;
+      }
+      return null;
+    });
+  });
+
   group('Integration Tests', () {
     late OfflineWebProxy proxy;
 
-    setUp(() {
+    setUp(() async {
+      hiveTestDirectory =
+          Directory.systemTemp.createTempSync('offline_web_proxy_test').path;
+      FlutterSecureStorage.setMockInitialValues(<String, String>{});
+      await Hive.close();
       proxy = OfflineWebProxy();
     });
 
@@ -14,6 +37,7 @@ void main() {
       if (proxy.isRunning) {
         await proxy.stop();
       }
+      await Hive.close();
     });
 
     /// 複数操作の統合テスト

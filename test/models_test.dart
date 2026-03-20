@@ -142,6 +142,55 @@ void main() {
       );
     });
 
+    /// CookieRestoreEntry の Set-Cookie 復元テスト
+    test('CookieRestoreEntry should parse set-cookie strings', () {
+      final receivedAt = DateTime.utc(2026, 3, 19, 10);
+      final entry = CookieRestoreEntry.fromSetCookieHeader(
+        setCookieHeader:
+            'SESSION=abc; Path=/app; Secure; HttpOnly; SameSite=Lax',
+        requestUrl: 'https://example.com/app/login',
+        receivedAt: receivedAt,
+      );
+
+      final cookieRecord = entry.toCookieRecord();
+
+      expect(cookieRecord.name, equals('SESSION'));
+      expect(cookieRecord.value, equals('abc'));
+      expect(cookieRecord.domain, equals('example.com'));
+      expect(cookieRecord.path, equals('/app'));
+      expect(cookieRecord.secure, isTrue);
+      expect(cookieRecord.httpOnly, isTrue);
+      expect(cookieRecord.sameSite, equals('Lax'));
+      expect(cookieRecord.hostOnly, isTrue);
+      expect(cookieRecord.createdAt, equals(receivedAt));
+    });
+
+    /// CookieRestoreEntry の構造化データ変換テスト
+    test('CookieRestoreEntry should preserve structured attributes', () {
+      final createdAt = DateTime.utc(2026, 3, 19, 11);
+      final entry = CookieRestoreEntry(
+        name: 'NATIVE',
+        value: 'token',
+        domain: 'Example.COM',
+        path: 'app',
+        secure: true,
+        httpOnly: true,
+        sameSite: 'Strict',
+        hostOnly: true,
+        createdAt: createdAt,
+      );
+
+      final cookieRecord = entry.toCookieRecord();
+
+      expect(cookieRecord.domain, equals('example.com'));
+      expect(cookieRecord.path, equals('/app'));
+      expect(cookieRecord.secure, isTrue);
+      expect(cookieRecord.httpOnly, isTrue);
+      expect(cookieRecord.sameSite, equals('Strict'));
+      expect(cookieRecord.hostOnly, isTrue);
+      expect(cookieRecord.createdAt, equals(createdAt));
+    });
+
     /// Cookieヘッダ生成テスト
     test('buildCookieHeaderForUri should filter and sort matching cookies', () {
       final now = DateTime.utc(2026, 3, 19, 10);

@@ -52,9 +52,11 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:shelf/shelf.dart' as shelf;
@@ -67,6 +69,7 @@ import 'src/models/cache_stats.dart';
 import 'src/models/cookie_header_builder.dart';
 import 'src/models/cookie_info.dart';
 import 'src/models/cookie_record.dart';
+import 'src/models/cookie_restore_entry.dart';
 import 'src/models/dropped_request.dart';
 import 'src/models/proxy_config.dart';
 import 'src/models/proxy_event.dart';
@@ -80,6 +83,7 @@ import 'src/exceptions/exceptions.dart';
 export 'src/models/cache_entry.dart';
 export 'src/models/cache_stats.dart';
 export 'src/models/cookie_info.dart';
+export 'src/models/cookie_restore_entry.dart';
 export 'src/models/dropped_request.dart';
 export 'src/models/proxy_config.dart';
 export 'src/models/proxy_event.dart';
@@ -93,6 +97,12 @@ typedef WarmupProgressCallback = void Function(int completed, int total);
 
 /// キャッシュ事前更新でエラーが発生した際に呼ばれるコールバック関数。
 typedef WarmupErrorCallback = void Function(String path, String error);
+
+const String _encryptedCookieBoxName = 'proxy_cookies_secure';
+const String _legacyCookieBoxName = 'proxy_cookies';
+const String _cookieEncryptionKeyStorageKey =
+  'offline_web_proxy.cookie_box_encryption_key';
+const int _cookieEncryptionKeyLength = 32;
 
 /// Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
 /// WebViewからのリクエストを横取りし、ネットワーク接続状態に基づいて
@@ -203,6 +213,9 @@ class OfflineWebProxy {
 
   /// Cookieデータの永続化ボックス。
   Box? _cookieBox;
+
+  /// Cookie 暗号化鍵の永続化に利用するセキュアストレージ。
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
 
   /// べき等性キーの永続化ボックス。
   Box? _idempotencyBox;
@@ -605,6 +618,7 @@ class OfflineWebProxy {
   ///   * [CookieOperationException] Cookieの取得に失敗した場合。
   Future<List<CookieInfo>> getCookies({String? domain}) async {
     try {
+      await _ensureCookieStorageInitialized();
       final cookies = <CookieInfo>[];
 
       if (_cookieBox != null) {
@@ -668,6 +682,32 @@ class OfflineWebProxy {
     }
   }
 
+  /// 外部から取得した Cookie を復元します。
+  ///
+  /// [entries] は復元対象の Cookie 一覧です。
+  /// start 前でも呼び出せ、復元済み Cookie は起動後の上流リクエストに利用されます。
+  ///
+  /// Throws:
+  ///   * [CookieOperationException] Cookie の復元に失敗した場合。
+  Future<void> restoreCookies(Iterable<CookieRestoreEntry> entries) async {
+    try {
+      await _ensureCookieStorageInitialized();
+
+      final restoredAt = DateTime.now();
+      final cookieRecords = entries
+          .map((entry) => entry.toCookieRecord(restoredAt: restoredAt))
+          .toList(growable: false);
+
+      await _persistCookieRecords(cookieRecords, now: restoredAt.toUtc());
+    } catch (e) {
+      throw CookieOperationException(
+        'restore',
+        'Cookie の復元に失敗しました: $e',
+        e is Exception ? e : null,
+      );
+    }
+  }
+
   /// 指定 URI が設定済み origin と同一 origin かどうかを返します。
   ///
   /// [targetUri] は検証対象の URI です。
@@ -708,6 +748,7 @@ class OfflineWebProxy {
   ///   * [CookieOperationException] Cookieの削除に失敗した場合。
   Future<void> clearCookies({String? domain}) async {
     try {
+      await _ensureCookieStorageInitialized();
       if (_cookieBox != null) {
         if (domain == null) {
           // 全Cookieを削除
@@ -876,8 +917,128 @@ class OfflineWebProxy {
   Future<void> _initializeStorage() async {
     _cacheBox = await Hive.openBox('proxy_cache');
     _queueBox = await Hive.openBox('proxy_queue');
-    _cookieBox = await Hive.openBox('proxy_cookies');
+    await _ensureCookieStorageInitialized();
     _idempotencyBox = await Hive.openBox('proxy_idempotency');
+  }
+
+  /// Cookie 用ストレージを必要時に初期化します。
+  ///
+  /// 戻り値は利用可能な Cookie Box です。
+  Future<Box> _ensureCookieStorageInitialized() async {
+    if (!Hive.isAdapterRegistered(0)) {
+      await Hive.initFlutter();
+    }
+
+    if (_cookieBox != null && _cookieBox!.isOpen) {
+      return _cookieBox!;
+    }
+
+    if (Hive.isBoxOpen(_encryptedCookieBoxName)) {
+      _cookieBox = Hive.box(_encryptedCookieBoxName);
+      return _cookieBox!;
+    }
+
+    final encryptionKey = await _getOrCreateCookieEncryptionKey();
+    _cookieBox = await Hive.openBox(
+      _encryptedCookieBoxName,
+      encryptionCipher: HiveAesCipher(encryptionKey),
+    );
+    await _migrateLegacyCookieBoxIfNeeded(_cookieBox!);
+    return _cookieBox!;
+  }
+
+  /// Cookie Box 用の暗号化鍵を取得または生成します。
+  ///
+  /// セキュアストレージの取得失敗時はフォールバックせず例外を送出します。
+  Future<Uint8List> _getOrCreateCookieEncryptionKey() async {
+    final storedKey = await _secureStorage.read(
+      key: _cookieEncryptionKeyStorageKey,
+    );
+    if (storedKey != null && storedKey.isNotEmpty) {
+      return _decodeCookieEncryptionKey(storedKey);
+    }
+
+    if (await Hive.boxExists(_encryptedCookieBoxName)) {
+      throw StateError(
+        'Cookie encryption key is missing. Existing encrypted cookies cannot be recovered.',
+      );
+    }
+
+    final generatedKey = _generateCookieEncryptionKey();
+    await _secureStorage.write(
+      key: _cookieEncryptionKeyStorageKey,
+      value: base64Encode(generatedKey),
+    );
+    return generatedKey;
+  }
+
+  /// Base64 文字列として保存された Cookie 暗号化鍵を復元します。
+  Uint8List _decodeCookieEncryptionKey(String encodedKey) {
+    final decodedKey = base64Decode(encodedKey);
+    if (decodedKey.length != _cookieEncryptionKeyLength) {
+      throw StateError(
+        'Invalid cookie encryption key length: ${decodedKey.length}',
+      );
+    }
+
+    return Uint8List.fromList(decodedKey);
+  }
+
+  /// Cookie Box 用の新しい AES-256 鍵を生成します。
+  Uint8List _generateCookieEncryptionKey() {
+    final random = Random.secure();
+    return Uint8List.fromList(
+      List<int>.generate(
+        _cookieEncryptionKeyLength,
+        (_) => random.nextInt(256),
+        growable: false,
+      ),
+    );
+  }
+
+  /// 既存の平文 Cookie Box を暗号化 Box へ一度だけ移行します。
+  ///
+  /// 移行に失敗した場合は平文 Box を継続利用せず、例外を送出します。
+  Future<void> _migrateLegacyCookieBoxIfNeeded(Box encryptedCookieBox) async {
+    if (!await Hive.boxExists(_legacyCookieBoxName)) {
+      return;
+    }
+
+    Box? legacyCookieBox;
+    try {
+      legacyCookieBox = Hive.isBoxOpen(_legacyCookieBoxName)
+          ? Hive.box(_legacyCookieBoxName)
+          : await Hive.openBox(_legacyCookieBoxName);
+
+      final now = DateTime.now().toUtc();
+      final cookieRecords = <CookieRecord>[];
+      for (final key in legacyCookieBox.keys) {
+        final data = legacyCookieBox.get(key) as Map?;
+        if (data == null) {
+          continue;
+        }
+
+        final cookieRecord = CookieRecord.fromMap(data);
+        if (!cookieRecord.isExpiredAt(now)) {
+          cookieRecords.add(cookieRecord);
+        }
+      }
+
+      for (final cookieRecord in cookieRecords) {
+        await encryptedCookieBox.put(
+          cookieRecord.storageKey,
+          cookieRecord.toMap(),
+        );
+      }
+    } catch (e) {
+      throw StateError('Failed to migrate legacy cookie box: $e');
+    } finally {
+      if (legacyCookieBox != null && legacyCookieBox.isOpen) {
+        await legacyCookieBox.close();
+      }
+    }
+
+    await Hive.deleteBoxFromDisk(_legacyCookieBoxName);
   }
 
   /// ネットワーク接続状態の監視を開始します。
@@ -1484,7 +1645,7 @@ class OfflineWebProxy {
 
     try {
       final ioRequest = await client.openUrl(request.method, uri);
-      _copyRequestHeaders(request, ioRequest);
+      await _copyRequestHeaders(request, ioRequest, upstreamUri: uri);
 
       // GET以外のリクエストの場合はボディをコピー
       if (request.method != 'GET') {
@@ -1525,17 +1686,99 @@ class OfflineWebProxy {
   }
 
   /// リクエストヘッダを上流リクエストにコピーします。
-  void _copyRequestHeaders(shelf.Request request, HttpClientRequest ioRequest) {
+  Future<void> _copyRequestHeaders(
+    shelf.Request request,
+    HttpClientRequest ioRequest, {
+    required Uri upstreamUri,
+  }) async {
     request.headers.forEach((key, value) {
       final lowerKey = key.toLowerCase();
       if (!_isHopByHopHeader(key) &&
           lowerKey != 'accept-encoding' &&
-          lowerKey != 'host') {
+          lowerKey != 'host' &&
+          lowerKey != 'cookie') {
         ioRequest.headers.set(key, value);
       }
     });
+
+    final mergedCookieHeader = await _mergeCookieHeaderForUpstream(
+      upstreamUri,
+      request.headers['cookie'],
+    );
+    if (mergedCookieHeader != null && mergedCookieHeader.isNotEmpty) {
+      ioRequest.headers.set('cookie', mergedCookieHeader);
+    }
+
     // 非圧縮レスポンスを要求
     ioRequest.headers.set('accept-encoding', 'identity');
+  }
+
+  /// 上流送信用の Cookie ヘッダを構築します。
+  ///
+  /// Cookie Jar に保存された値を優先しつつ、Jar に存在しない Cookie は
+  /// クライアント由来ヘッダから引き継ぎます。
+  /// [upstreamUri] は送信先 URI です。
+  /// [requestCookieHeader] はクライアント由来の Cookie ヘッダです。
+  /// 戻り値は上流へ送る `Cookie` ヘッダ値です。送信対象が無い場合は `null` です。
+  Future<String?> _mergeCookieHeaderForUpstream(
+    Uri upstreamUri,
+    String? requestCookieHeader,
+  ) async {
+    final jarCookieHeader = await _buildCookieHeaderForUri(upstreamUri);
+    if (jarCookieHeader == null || jarCookieHeader.isEmpty) {
+      return requestCookieHeader;
+    }
+    if (requestCookieHeader == null || requestCookieHeader.isEmpty) {
+      return jarCookieHeader;
+    }
+
+    final jarCookies = _parseCookieHeaderPairs(jarCookieHeader);
+    final mergedCookies = <MapEntry<String, String>>[...jarCookies];
+    final jarCookieNames = jarCookies.map((entry) => entry.key).toSet();
+
+    for (final cookie in _parseCookieHeaderPairs(requestCookieHeader)) {
+      if (!jarCookieNames.contains(cookie.key)) {
+        mergedCookies.add(cookie);
+      }
+    }
+
+    if (mergedCookies.isEmpty) {
+      return null;
+    }
+
+    return mergedCookies
+        .map((entry) => '${entry.key}=${entry.value}')
+        .join('; ');
+  }
+
+  /// `Cookie` ヘッダ文字列を name/value の連想配列に変換します。
+  ///
+  /// [cookieHeader] は `Cookie` ヘッダ値です。
+  /// 戻り値は出現順を保持した Cookie 名と値の一覧です。
+  List<MapEntry<String, String>> _parseCookieHeaderPairs(String cookieHeader) {
+    final cookies = <MapEntry<String, String>>[];
+
+    for (final segment in cookieHeader.split(';')) {
+      final trimmedSegment = segment.trim();
+      if (trimmedSegment.isEmpty) {
+        continue;
+      }
+
+      final separatorIndex = trimmedSegment.indexOf('=');
+      if (separatorIndex <= 0) {
+        continue;
+      }
+
+      final name = trimmedSegment.substring(0, separatorIndex).trim();
+      final value = trimmedSegment.substring(separatorIndex + 1).trim();
+      if (name.isEmpty) {
+        continue;
+      }
+
+      cookies.add(MapEntry(name, value));
+    }
+
+    return cookies;
   }
 
   /// 指定したヘッダがHop-by-Hopヘッダかどうかを判定します。
@@ -1593,25 +1836,23 @@ class OfflineWebProxy {
     required Uri requestUri,
     required List<String> setCookieHeaders,
   }) async {
-    if (_cookieBox == null || setCookieHeaders.isEmpty) {
+    if (setCookieHeaders.isEmpty) {
       return;
     }
 
+    await _ensureCookieStorageInitialized();
     final now = DateTime.now();
     for (final setCookieHeader in setCookieHeaders) {
       try {
-        final cookieRecord = CookieRecord.fromSetCookieHeader(
+        final restoreEntry = CookieRestoreEntry.fromSetCookieHeader(
           setCookieHeader: setCookieHeader,
-          requestUri: requestUri,
+          requestUrl: requestUri.toString(),
           receivedAt: now,
         );
-
-        if (cookieRecord.isExpiredAt(now)) {
-          await _cookieBox!.delete(cookieRecord.storageKey);
-          continue;
-        }
-
-        await _cookieBox!.put(cookieRecord.storageKey, cookieRecord.toMap());
+        await _persistCookieRecord(
+          restoreEntry.toCookieRecord(restoredAt: now),
+          now: now,
+        );
       } catch (e) {
         _emitEvent(
           ProxyEventType.errorOccurred,
@@ -1630,9 +1871,7 @@ class OfflineWebProxy {
   /// [uri] は送信対象 URI です。
   /// 戻り値は送信順序に並んだ Cookie レコード一覧です。
   Future<List<CookieRecord>> _getCookieRecordsForUri(Uri uri) async {
-    if (_cookieBox == null) {
-      return const <CookieRecord>[];
-    }
+    await _ensureCookieStorageInitialized();
 
     final now = DateTime.now().toUtc();
     final expiredKeys = <dynamic>[];
@@ -1671,6 +1910,36 @@ class OfflineWebProxy {
     final cookieRecords = await _getCookieRecordsForUri(uri);
     return buildCookieHeaderForUri(cookieRecords, uri,
         at: DateTime.now().toUtc());
+  }
+
+  /// Cookie レコード一覧を永続化します。
+  ///
+  /// [cookieRecords] は保存対象の Cookie レコード一覧です。
+  /// [now] は期限切れ判定に使用する日時です。
+  Future<void> _persistCookieRecords(
+    Iterable<CookieRecord> cookieRecords, {
+    required DateTime now,
+  }) async {
+    for (final cookieRecord in cookieRecords) {
+      await _persistCookieRecord(cookieRecord, now: now);
+    }
+  }
+
+  /// Cookie レコードを 1 件永続化します。
+  ///
+  /// [cookieRecord] は保存対象の Cookie レコードです。
+  /// [now] は期限切れ判定に使用する日時です。
+  Future<void> _persistCookieRecord(
+    CookieRecord cookieRecord, {
+    required DateTime now,
+  }) async {
+    final cookieBox = await _ensureCookieStorageInitialized();
+    if (cookieRecord.isExpiredAt(now)) {
+      await cookieBox.delete(cookieRecord.storageKey);
+      return;
+    }
+
+    await cookieBox.put(cookieRecord.storageKey, cookieRecord.toMap());
   }
 
   /// レスポンスをキャッシュに保存します（バイト配列版）。

@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 
 void main() {
@@ -9,9 +11,6 @@ void main() {
   late Directory tempDir;
 
   setUpAll(() async {
-    // テスト用の一時ディレクトリを作成
-    tempDir = await Directory.systemTemp.createTemp('offline_web_proxy_test_');
-
     // path_providerのモック設定
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
@@ -31,24 +30,24 @@ void main() {
     );
   });
 
-  tearDownAll(() async {
-    // テスト終了後に一時ディレクトリを削除
-    if (await tempDir.exists()) {
-      await tempDir.delete(recursive: true);
-    }
-  });
-
   group('Cache End-to-End Tests', () {
     late OfflineWebProxy proxy;
     late int port;
 
     setUp(() async {
+      FlutterSecureStorage.setMockInitialValues(<String, String>{});
+      tempDir = await Directory.systemTemp.createTemp('offline_web_proxy_test_');
+      FlutterSecureStorage.setMockInitialValues(<String, String>{});
       proxy = OfflineWebProxy();
     });
 
     tearDown(() async {
       if (proxy.isRunning) {
         await proxy.stop();
+      }
+      await Hive.close();
+      if (await tempDir.exists()) {
+        await tempDir.delete(recursive: true);
       }
     });
 
