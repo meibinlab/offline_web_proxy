@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,11 +13,8 @@ const String _legacyCookieBoxName = 'proxy_cookies';
 const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
+HttpClient _createRealHttpClient(SecurityContext? context) {
+  return HttpClient(context: context);
 }
 
 void main() {
@@ -187,8 +183,7 @@ void main() {
     test('should forward restored cookies to upstream after start', () async {
       await HttpOverrides.runZoned(() async {
         final receivedCookies = <String?>[];
-        upstreamServer =
-            await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         upstreamServer!.listen((HttpRequest request) async {
           receivedCookies.add(request.headers.value('cookie'));
           request.response
@@ -224,7 +219,7 @@ void main() {
 
         expect(receivedCookies, hasLength(1));
         expect(receivedCookies.single, equals('NATIVE=native-token'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: _createRealHttpClient);
     });
 
     /// 停止前に serverStopped イベントが購読側へ届くことのテスト
@@ -260,8 +255,7 @@ void main() {
     test('should restart same instance and emit events again', () async {
       await HttpOverrides.runZoned(() async {
         var upstreamRequestCount = 0;
-        upstreamServer =
-            await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         upstreamServer!.listen((HttpRequest request) async {
           upstreamRequestCount++;
           request.response
@@ -313,15 +307,14 @@ void main() {
         expect(upstreamRequestCount, equals(2));
 
         await restartedSubscription.cancel();
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: _createRealHttpClient);
     });
 
     /// 上流の Set-Cookie を保存し次回上流転送へ適用することのテスト
     test('should capture upstream set-cookie and forward it later', () async {
       await HttpOverrides.runZoned(() async {
         final receivedCookies = <String?>[];
-        upstreamServer =
-            await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         upstreamServer!.listen((HttpRequest request) async {
           receivedCookies.add(request.headers.value('cookie'));
 
@@ -350,7 +343,7 @@ void main() {
         expect(receivedCookies, hasLength(2));
         expect(receivedCookies.first, isNull);
         expect(receivedCookies.last, equals('SESSION=server-token'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: _createRealHttpClient);
     });
 
     /// Cookie 暗号化鍵をセキュアストレージに保存することのテスト
@@ -374,8 +367,7 @@ void main() {
     });
 
     /// 既存の平文 Cookie Box を暗号化 Box へ移行することのテスト
-    test('should migrate legacy plain cookie box into encrypted box',
-        () async {
+    test('should migrate legacy plain cookie box into encrypted box', () async {
       await Hive.initFlutter();
       final legacyBox = await Hive.openBox(_legacyCookieBoxName);
       final legacyCookie = CookieRecord.fromSetCookieHeader(
@@ -442,8 +434,7 @@ void main() {
         () async {
       await HttpOverrides.runZoned(() async {
         final receivedCookies = <String?>[];
-        upstreamServer =
-            await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         upstreamServer!.listen((HttpRequest request) async {
           receivedCookies.add(request.headers.value('cookie'));
           request.response
@@ -490,7 +481,7 @@ void main() {
           receivedCookies.single,
           equals('SESSION=app; SESSION=root; CLIENT=1'),
         );
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: _createRealHttpClient);
     });
 
     /// start 前に復元した Cookie を一覧取得できることのテスト

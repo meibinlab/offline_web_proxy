@@ -7,11 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
+HttpClient _createRealHttpClient(SecurityContext? context) {
+  return HttpClient(context: context);
 }
 
 void main() {
@@ -343,7 +340,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: _createRealHttpClient);
     });
 
     /// キュー状態が再起動後も保持され再送を再開できることの統合テスト
@@ -385,7 +382,7 @@ void main() {
           expect(queuedBeforeRestart.single.retryCount, equals(0));
           expect(
             queuedBeforeRestart.single.nextRetryAt
-                .isAfter(queuedBeforeRestart.single.queuedAt) ||
+                    .isAfter(queuedBeforeRestart.single.queuedAt) ||
                 queuedBeforeRestart.single.nextRetryAt
                     .isAtSameMomentAs(queuedBeforeRestart.single.queuedAt),
             isTrue,
@@ -413,7 +410,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: _createRealHttpClient);
     });
 
     /// バックオフに応じて retryCount と nextRetryAt が進むことの統合テスト
@@ -471,7 +468,8 @@ void main() {
 
           await Future.delayed(const Duration(seconds: 6));
 
-          final queuedBeforeNextRetry = (await proxy.getQueuedRequests()).single;
+          final queuedBeforeNextRetry =
+              (await proxy.getQueuedRequests()).single;
           expect(queuedBeforeNextRetry.retryCount, equals(1));
           expect(upstreamRequestCount, equals(2));
 
@@ -485,11 +483,12 @@ void main() {
 
           final secondRetry = (await proxy.getQueuedRequests()).single;
           expect(upstreamRequestCount, equals(3));
-          expect(secondRetry.nextRetryAt.isAfter(firstRetry.nextRetryAt), isTrue);
+          expect(
+              secondRetry.nextRetryAt.isAfter(firstRetry.nextRetryAt), isTrue);
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: _createRealHttpClient);
     });
 
     /// 4xx 再送時にドロップ履歴へ記録されることの統合テスト
@@ -538,11 +537,13 @@ void main() {
           final droppedRequests = await proxy.getDroppedRequests();
           expect(droppedRequests, hasLength(1));
           expect(droppedRequests.single.method, equals('POST'));
-          expect(droppedRequests.single.statusCode, equals(HttpStatus.badRequest));
+          expect(
+              droppedRequests.single.statusCode, equals(HttpStatus.badRequest));
           expect(droppedRequests.single.dropReason, equals('4xx_error'));
           expect(droppedRequests.single.url, contains('/drop-me'));
 
-          final limitedDroppedRequests = await proxy.getDroppedRequests(limit: 1);
+          final limitedDroppedRequests =
+              await proxy.getDroppedRequests(limit: 1);
           expect(limitedDroppedRequests, hasLength(1));
 
           final stats = await proxy.getStats();
@@ -559,9 +560,8 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: _createRealHttpClient);
     });
-
   });
 
   group('Configuration Integration Tests', () {
