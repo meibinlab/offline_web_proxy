@@ -40,7 +40,7 @@ Add the following to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.3.0
+  offline_web_proxy: ^0.4.0
   # Add the following if using WebView
   # webview_flutter: ^4.4.2
 ```
