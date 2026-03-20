@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the clearCookies method from the OfflineWebProxy class, for the Dart programming language.">
-  <title>clearCookies method - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the toCookieRecord method from the CookieRestoreEntry class, for the Dart programming language.">
+  <title>toCookieRecord method - CookieRestoreEntry class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
-    <li class="self-crumb">clearCookies method</li>
+    <li><a href="../../offline_web_proxy/CookieRestoreEntry-class.html">CookieRestoreEntry</a></li>
+    <li class="self-crumb">toCookieRecord method</li>
   </ol>
-  <div class="self-name">clearCookies</div>
+  <div class="self-name">toCookieRecord</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,17 +54,17 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;CookieRestoreEntry-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-method">clearCookies</span> method 
+<h1><span class="kind-method">toCookieRecord</span> method 
 </h1></div>
 
     <section class="multi-line-signature">
       
 
-<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
-<span class="name ">clearCookies</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="clearCookies-param-domain"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">domain</span>, </span></li>
+<span class="returntype">CookieRecord</span>
+<span class="name ">toCookieRecord</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="toCookieRecord-param-restoredAt"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a>?</span> <span class="parameter-name">restoredAt</span>, </span></li>
 </ol>})
 
       
@@ -72,44 +72,28 @@
     </section>
     
 <section class="desc markdown">
-  <p>保存されているCookieを削除します。</p>
-<p><code>domain</code> 特定ドメインのCookieのみを削除したい場合に指定。省略時は全Cookieを削除。</p>
-<p>Throws:</p>
-<ul>
-<li><a href="../../offline_web_proxy/CookieOperationException-class.html">CookieOperationException</a> Cookieの削除に失敗した場合。</li>
-</ul>
+  <p>内部 Cookie レコードへ変換します。</p>
+<p><code>restoredAt</code> は <a href="../../offline_web_proxy/CookieRestoreEntry/createdAt.html">createdAt</a> が未指定の場合に補完する日時です。
+戻り値は変換後の <code>CookieRecord</code> です。</p>
 </section>
 
 
     
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearCookies({String? domain}) async {
-  try {
-    await _ensureCookieStorageInitialized();
-    if (_cookieBox != null) {
-      if (domain == null) {
-        &#47;&#47; 全Cookieを削除
-        await _cookieBox!.clear();
-      } else {
-        &#47;&#47; 特定ドメインのCookieを削除
-        final keysToDelete = &lt;String&gt;[];
-        for (final key in _cookieBox!.keys) {
-          final data = _cookieBox!.get(key) as Map?;
-          if (data != null &amp;&amp; data[&#39;domain&#39;] == domain) {
-            keysToDelete.add(key as String);
-          }
-        }
-
-        for (final key in keysToDelete) {
-          await _cookieBox!.delete(key);
-        }
-      }
-    }
-  } catch (e) {
-    throw CookieOperationException(
-        &#39;clear&#39;, &#39;Cookieの削除に失敗しました: $e&#39;, e is Exception ? e : null);
-  }
+  <pre class="language-dart"><code class="language-dart">CookieRecord toCookieRecord({DateTime? restoredAt}) {
+  return CookieRecord(
+    name: name,
+    value: value,
+    domain: domain.toLowerCase(),
+    path: path.isEmpty ? &#39;&#47;&#39; : (path.startsWith(&#39;&#47;&#39;) ? path : &#39;&#47;$path&#39;),
+    expires: expires,
+    secure: secure,
+    httpOnly: httpOnly,
+    sameSite: sameSite,
+    hostOnly: hostOnly,
+    createdAt: createdAt ?? restoredAt ?? DateTime.now(),
+  );
 }</code></pre>
 </section>
 
@@ -127,12 +111,12 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
-    <li class="self-crumb">clearCookies method</li>
+    <li><a href="../../offline_web_proxy/CookieRestoreEntry-class.html">CookieRestoreEntry</a></li>
+    <li class="self-crumb">toCookieRecord method</li>
 </ol>
 
 
-    <h5>OfflineWebProxy class</h5>
+    <h5>CookieRestoreEntry class</h5>
     <div id="dartdoc-sidebar-left-content"></div>
   </div><!--/.sidebar-offcanvas-->
 

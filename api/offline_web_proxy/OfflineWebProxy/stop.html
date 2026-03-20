@@ -95,13 +95,13 @@
 
     await _server?.close();
     await _connectivitySubscription.cancel();
-    await _eventController.close();
 
     &#47;&#47; Hiveボックスを閉じる
     await _cacheBox?.close();
     await _queueBox?.close();
     await _cookieBox?.close();
     await _idempotencyBox?.close();
+    await _droppedRequestBox?.close();
 
     &#47;&#47; HTTPクライアントを閉じる
     _httpClient?.close(force: true);

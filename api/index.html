@@ -83,6 +83,8 @@
 <ul>
 <li>RFC-compliant cookie evaluation and management</li>
 <li>AES-256 encrypted persistence</li>
+<li>Encryption key storage in secure storage, with one-time migration from legacy plain cookie storage when available</li>
+<li>If the secure-storage key is lost, existing encrypted cookies can no longer be decrypted and users must sign in again</li>
 <li>High-speed access through memory caching</li>
 </ul>
 <h2 id="installation">Installation</h2>
@@ -238,6 +240,14 @@ if (cookieHeader != null) {
 
 // Note: getCookieHeaderForUrl only allows URLs in the same origin as the configured origin
 
+// Restore cookies before starting the proxy
+await proxy.restoreCookies([
+  CookieRestoreEntry.fromSetCookieHeader(
+    setCookieHeader: 'SESSION=abc123; Path=/; Secure; HttpOnly',
+    requestUrl: 'https://api.example.com/login',
+  ),
+]);
+
 // Clear all cookies
 await proxy.clearCookies();
 
@@ -318,6 +328,7 @@ print('Uptime: ${stats.uptime}');
 <ul>
 <li><strong>Local Binding</strong>: Bind only to 127.0.0.1 to prevent external access</li>
 <li><strong>Cookie Encryption</strong>: Persist cookies with AES-256 encryption</li>
+<li><strong>Key Loss Behavior</strong>: If the secure-storage key is lost, existing encrypted cookies become unreadable and re-authentication is required</li>
 <li><strong>Path Traversal Prevention</strong>: Restrict access to <code>assets/static/</code> subdirectory</li>
 <li><strong>Log Masking</strong>: Mask sensitive information like Authorization and Cookie headers</li>
 </ul>
@@ -378,6 +389,31 @@ Timer.periodic(Duration(minutes: 5), (timer) async {
   print('Queue length: ${stats.queueLength}');
 });
 </code></pre>
+<h3 id="git-hooks">Git Hooks</h3>
+<p>Use the Git native pre-commit hook to catch formatting and analyzer issues before creating a commit.</p>
+<p>Set it up after the Flutter SDK is available and <code>flutter pub get</code> has completed.</p>
+<p>Set it up once after cloning:</p>
+<pre class="language-bash"><code class="language-bash">git config core.hooksPath .githooks
+</code></pre>
+<p>If needed on macOS or Linux, grant execute permission:</p>
+<pre class="language-bash"><code class="language-bash">chmod +x .githooks/pre-commit
+</code></pre>
+<p>The pre-commit hook performs the following steps:</p>
+<ul>
+<li><code>dart fix --apply</code></li>
+<li><code>dart format .</code></li>
+<li>Stop the commit if any Dart file was auto-fixed or reformatted, so you can review and stage the result</li>
+<li><code>dart analyze --fatal-warnings</code></li>
+</ul>
+<p>If the commit is blocked, review the diff, run <code>git add</code> for the updated files, and fix analyzer warnings before trying again.</p>
+<h3 id="vs-code-workspace-settings">VS Code Workspace Settings</h3>
+<p>This repository includes workspace settings for Dart files in VS Code.</p>
+<ul>
+<li>Format on save is enabled for Dart files</li>
+<li><code>source.fixAll</code> runs on explicit save for fixable warnings</li>
+<li><code>source.organizeImports</code> runs on explicit save</li>
+</ul>
+<p>If you use VS Code with the Dart extension, many trivial lint issues will be fixed before commit.</p>
 </section>
 
 

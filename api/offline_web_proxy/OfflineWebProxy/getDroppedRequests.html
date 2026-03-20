@@ -87,10 +87,29 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;List&lt;DroppedRequest&gt;&gt; getDroppedRequests({int? limit}) async {
   try {
+    if (limit != null &amp;&amp; limit &lt;= 0) {
+      return const &lt;DroppedRequest&gt;[];
+    }
+
     final requests = &lt;DroppedRequest&gt;[];
 
-    &#47;&#47; ドロップされたリクエストは現在の実装ではメモリに保存されないため空を返却
-    &#47;&#47; 将来的には特別なストレージやログファイルから読み込むことを想定
+    if (_droppedRequestBox != null) {
+      int idx = 0;
+      for (final key in _droppedRequestBox!.keys) {
+        final data = _droppedRequestBox!.get(key) as Map?;
+        if (data != null) {
+          requests.add(_mapToDroppedRequest(data));
+          if (limit != null &amp;&amp; requests.length &gt;= limit) {
+            break;
+          }
+        }
+
+        idx++;
+        if (idx % 50 == 0) {
+          await Future.delayed(Duration.zero);
+        }
+      }
+    }
 
     return requests;
   } catch (e) {

@@ -86,6 +86,7 @@
   <pre class="language-dart"><code class="language-dart">Future&lt;ProxyStats&gt; getStats() async {
   try {
     final queueLength = _queueBox?.length ?? 0;
+    final droppedRequestsCount = _droppedRequestBox?.length ?? 0;
     final uptime = _startedAt != null
         ? DateTime.now().difference(_startedAt!)
         : Duration.zero;
@@ -96,7 +97,7 @@
       cacheMisses: _cacheMisses,
       cacheHitRate: _totalRequests &gt; 0 ? _cacheHits &#47; _totalRequests : 0.0,
       queueLength: queueLength,
-      droppedRequestsCount: 0, &#47;&#47; 現在の実装ではドロップ機能は未実装
+      droppedRequestsCount: droppedRequestsCount,
       startedAt: _startedAt ?? DateTime.now(),
       uptime: uptime,
     );

@@ -92,6 +92,10 @@
   }
 
   try {
+    if (_eventController.isClosed) {
+      _eventController = StreamController&lt;ProxyEvent&gt;.broadcast();
+    }
+
     &#47;&#47; Hiveが初期化されていない場合は初期化
     if (!Hive.isAdapterRegistered(0)) {
       await Hive.initFlutter();

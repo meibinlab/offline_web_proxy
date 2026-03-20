@@ -87,6 +87,7 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;List&lt;CookieInfo&gt;&gt; getCookies({String? domain}) async {
   try {
+    await _ensureCookieStorageInitialized();
     final cookies = &lt;CookieInfo&gt;[];
 
     if (_cookieBox != null) {
