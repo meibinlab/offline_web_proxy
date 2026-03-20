@@ -30,6 +30,8 @@ An offline-compatible local proxy server that operates within Flutter WebView. I
 ### Cookie Management
 - RFC-compliant cookie evaluation and management
 - AES-256 encrypted persistence
+- Encryption key storage in secure storage, with one-time migration from legacy plain cookie storage when available
+- If the secure-storage key is lost, existing encrypted cookies can no longer be decrypted and users must sign in again
 - High-speed access through memory caching
 
 ## Installation
@@ -206,6 +208,14 @@ if (cookieHeader != null) {
 
 // Note: getCookieHeaderForUrl only allows URLs in the same origin as the configured origin
 
+// Restore cookies before starting the proxy
+await proxy.restoreCookies([
+  CookieRestoreEntry.fromSetCookieHeader(
+    setCookieHeader: 'SESSION=abc123; Path=/; Secure; HttpOnly',
+    requestUrl: 'https://api.example.com/login',
+  ),
+]);
+
 // Clear all cookies
 await proxy.clearCookies();
 
@@ -294,6 +304,7 @@ WebView → http://127.0.0.1:<port> → OfflineWebProxy
 
 - **Local Binding**: Bind only to 127.0.0.1 to prevent external access
 - **Cookie Encryption**: Persist cookies with AES-256 encryption
+- **Key Loss Behavior**: If the secure-storage key is lost, existing encrypted cookies become unreadable and re-authentication is required
 - **Path Traversal Prevention**: Restrict access to `assets/static/` subdirectory
 - **Log Masking**: Mask sensitive information like Authorization and Cookie headers
 

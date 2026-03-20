@@ -107,6 +107,8 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 - **永続化必須**: 全ての Cookie をファイルベースで永続化。アプリ再起動後も保持
 - **暗号化**: AES-256 を使用して Cookie データを暗号化してから保存
+- **鍵管理**: 暗号化鍵は secure storage に保存し、既存の平文 `proxy_cookies` は可能な場合に 1 回だけ移行
+- **鍵喪失時**: secure storage 上の鍵が失われた場合、既存の暗号化 Cookie は復号できず再ログインが必要
 - **メモリキャッシュ**: ファイルから読み込んだ Cookie を高速アクセスのためメモリ上にキャッシュ
 
 ### Cookie 評価基準
@@ -124,6 +126,7 @@ RFC 準拠の Cookie 評価を実装：
 Cookie 管理のためのメソッドを提供します。詳細は【20】API リファレンスを参照してください。
 
 - **`getCookies()`**: 現在保存されている Cookie の一覧取得（値はマスクして返却）
+- **`restoreCookies()`**: proxy 起動前を含めて外部取得 Cookie を復元
 - **`clearCookies()`**: 全 Cookie の削除
 
 ## 【5】キュー再送ポリシー
@@ -466,7 +469,7 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **passthrough**: そのまま転送
 - **remove**: ヘッダを削除
 
-### Accept-Enccoding ヘッダ
+### Accept-Encoding ヘッダ
 
 - **managed**: プロキシが圧縮を管理
 - **passthrough**: クライアントの設定をそのまま転送
@@ -947,6 +950,27 @@ final cookies = await proxy.getCookies(domain: 'example.com');
 for (final cookie in cookies) {
   print('Name: ${cookie.name}, Domain: ${cookie.domain}');
 }
+```
+
+#### `Future<void> restoreCookies(Iterable<CookieRestoreEntry> entries)`
+
+ネイティブ実装など外部で取得した Cookie を復元します。proxy 起動前でも呼び出せ、復元済み Cookie は起動後の上流リクエスト送信時に利用されます。
+
+- **パラメータ**:
+  - `entries`: 復元対象の Cookie 一覧
+- **戻り値**: なし
+- **例外**:
+  - `CookieOperationException`: Cookie 復元に失敗した場合
+
+`CookieRestoreEntry` は、構造化データのコンストラクタと `Set-Cookie` 文字列から生成する factory の両方を提供します。
+
+```dart
+await proxy.restoreCookies([
+  CookieRestoreEntry.fromSetCookieHeader(
+    setCookieHeader: 'SESSION=abc123; Path=/; Secure; HttpOnly',
+    requestUrl: 'https://api.example.com/login',
+  ),
+]);
 ```
 
 #### `Future<String?> getCookieHeaderForUrl(String url)`

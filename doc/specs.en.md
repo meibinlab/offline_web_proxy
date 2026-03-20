@@ -107,6 +107,8 @@ Automatic Content-Type setting based on extensions:
 
 - **Persistence Required**: Persist all cookies in file-based storage. Retain even after app restart
 - **Encryption**: Encrypt and save cookie data using AES-256
+- **Key Management**: Store the encryption key in secure storage and migrate the legacy plain `proxy_cookies` box once when possible
+- **Key Loss Handling**: If the secure storage key is lost, existing encrypted cookies cannot be decrypted and re-authentication is required
 - **Memory Cache**: Cache cookies loaded from files in memory for fast access
 
 ### Cookie Evaluation Criteria
@@ -124,6 +126,7 @@ Implement RFC-compliant cookie evaluation:
 Provides methods for cookie management. See [20] API Reference for details.
 
 - **`getCookies()`**: Get list of currently stored cookies (values returned masked)
+- **`restoreCookies()`**: Restore externally obtained cookies, including before proxy startup
 - **`clearCookies()`**: Delete all cookies
 
 ## [5] Queue Resend Policy
@@ -947,6 +950,27 @@ final cookies = await proxy.getCookies(domain: 'example.com');
 for (final cookie in cookies) {
   print('Name: ${cookie.name}, Domain: ${cookie.domain}');
 }
+```
+
+#### `Future<void> restoreCookies(Iterable<CookieRestoreEntry> entries)`
+
+Restores cookies obtained outside the proxy, such as from native implementations. This method can be called before proxy startup, and restored cookies are used for upstream requests after startup.
+
+- **Parameters**:
+  - `entries`: List of cookies to restore
+- **Return Value**: None
+- **Exceptions**:
+  - `CookieOperationException`: When cookie restoration fails
+
+`CookieRestoreEntry` provides both a structured constructor and a factory that parses a `Set-Cookie` string.
+
+```dart
+await proxy.restoreCookies([
+  CookieRestoreEntry.fromSetCookieHeader(
+    setCookieHeader: 'SESSION=abc123; Path=/; Secure; HttpOnly',
+    requestUrl: 'https://api.example.com/login',
+  ),
+]);
 ```
 
 #### `Future<String?> getCookieHeaderForUrl(String url)`
