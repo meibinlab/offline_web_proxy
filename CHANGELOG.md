@@ -1,3 +1,28 @@
+## 0.5.0
+
+### 機能追加
+
+- **URL 解決 API を追加**: `tryResolveUpstreamUrl(String url)` と `resolveNavigationTarget(...)` を追加し、proxy URL、同一 origin URL、相対 URL を WebView 遷移前に判定可能に
+- **遷移判定モデルを追加**: `ProxyNavigationResolution`、`ProxyNavigationDisposition`、`ProxyNavigationReason` を公開し、外部委譲や local-only 判定に必要なメタ情報を取得可能に
+- **requestReceived メタ情報を拡張**: `resolvedUpstreamUrl`、`resolvedProxyUrl`、`navigationDisposition` などの URL 解決結果をイベントから参照可能に
+
+### 改善
+
+- **上流 URL 解決の共通化**: proxy 内部の上流転送、キャッシュ更新、キュー再送でも同じ URL 解決ルールを利用するよう整理
+- **loopback alias 判定を明確化**: `localhost` と `127.0.0.1` の吸収は proxy URL 判定時の HTTP のみに限定
+- **静的リソース URL マッピングを調整**: `/app.css` や `/images/...` を `assets/static/` 配下へ対応付ける前提に統一
+- **example アプリを刷新**: `NavigationDelegate` と URL 解決 API を使った WebView 連携サンプルを追加
+
+### ドキュメント
+
+- **README / 仕様書 / example を更新**: URL 解決 API、requestReceived メタ情報、静的リソースのルートパスマッピング例を追記
+
+### テスト
+
+- **URL 解決とイベント通知のテストを追加**: loopback alias、relative URL、outside proxy scope、requestReceived メタ情報、静的リソース判定の検証を追加
+
+---
+
 ## 0.4.0
 
 ### 機能追加
