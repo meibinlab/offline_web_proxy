@@ -54,6 +54,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -63,7 +64,7 @@ import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
 
-// モデルクラスと例外をインポート
+import 'src/exceptions/exceptions.dart';
 import 'src/models/cache_entry.dart';
 import 'src/models/cache_stats.dart';
 import 'src/models/cookie_header_builder.dart';
@@ -78,9 +79,8 @@ import 'src/models/proxy_stats.dart';
 import 'src/models/queued_request.dart';
 import 'src/models/response_header_snapshot.dart';
 import 'src/models/warmup_result.dart';
-import 'src/exceptions/exceptions.dart';
 
-// パブリックAPI用にクラスをエクスポート
+export 'src/exceptions/exceptions.dart';
 export 'src/models/cache_entry.dart';
 export 'src/models/cache_stats.dart';
 export 'src/models/cookie_info.dart';
@@ -92,7 +92,6 @@ export 'src/models/proxy_navigation_resolution.dart';
 export 'src/models/proxy_stats.dart';
 export 'src/models/queued_request.dart';
 export 'src/models/warmup_result.dart';
-export 'src/exceptions/exceptions.dart';
 
 /// キャッシュ事前更新の進捗を通知するコールバック関数。
 typedef WarmupProgressCallback = void Function(int completed, int total);
