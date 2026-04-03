@@ -208,6 +208,20 @@ if (cookieHeader != null) {
 
 // Note: getCookieHeaderForUrl only allows URLs in the same origin as the configured origin
 
+// Resolve a proxy URL or same-origin upstream URL before WebView navigation
+final upstreamUrl = proxy.tryResolveUpstreamUrl(
+  'http://127.0.0.1:$proxyPort/app/map?mode=car',
+);
+
+// Resolve relative links, redirects, and new-window targets with metadata
+final navigation = proxy.resolveNavigationTarget(
+  targetUrl: 'tel:+81012345678',
+  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+);
+if (navigation.disposition == ProxyNavigationDisposition.external) {
+  print('Delegate externally: ${navigation.normalizedTargetUri}');
+}
+
 // Restore cookies before starting the proxy
 await proxy.restoreCookies([
   CookieRestoreEntry.fromSetCookieHeader(

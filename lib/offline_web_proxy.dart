@@ -73,6 +73,7 @@ import 'src/models/cookie_restore_entry.dart';
 import 'src/models/dropped_request.dart';
 import 'src/models/proxy_config.dart';
 import 'src/models/proxy_event.dart';
+import 'src/models/proxy_navigation_resolution.dart';
 import 'src/models/proxy_stats.dart';
 import 'src/models/queued_request.dart';
 import 'src/models/response_header_snapshot.dart';
@@ -87,6 +88,7 @@ export 'src/models/cookie_restore_entry.dart';
 export 'src/models/dropped_request.dart';
 export 'src/models/proxy_config.dart';
 export 'src/models/proxy_event.dart';
+export 'src/models/proxy_navigation_resolution.dart';
 export 'src/models/proxy_stats.dart';
 export 'src/models/queued_request.dart';
 export 'src/models/warmup_result.dart';
@@ -104,6 +106,22 @@ const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 const int _cookieEncryptionKeyLength = 32;
 const String _droppedRequestBoxName = 'proxy_dropped_requests';
+const Set<String> _loopbackHosts = {'127.0.0.1', 'localhost'};
+const Set<String> _staticResourceExtensions = {
+  '.html',
+  '.css',
+  '.js',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.svg',
+  '.ico',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.eot',
+};
 
 /// Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
 /// WebViewからのリクエストを横取りし、ネットワーク接続状態に基づいて
@@ -690,6 +708,36 @@ class OfflineWebProxy {
     }
   }
 
+  /// 指定 URL を upstream URL として解決します。
+  ///
+  /// [url] は解決対象の絶対 URL です。
+  /// proxy URL または設定済み origin と同一 origin の URL を受け付けます。
+  ///
+  /// Returns: 解決できた upstream URL。解決不能な場合は `null`。
+  Uri? tryResolveUpstreamUrl(String url) {
+    final resolution = resolveNavigationTarget(targetUrl: url);
+    return switch (resolution.disposition) {
+      ProxyNavigationDisposition.inWebView => resolution.upstreamUri,
+      _ => null,
+    };
+  }
+
+  /// WebView 遷移前に target URL を解決します。
+  ///
+  /// [targetUrl] は遷移先候補の URL です。
+  /// [sourceUrl] は相対 URL を解決するための基準 URL です。
+  ///
+  /// Returns: upstream URL、proxy URL、判定理由を含む解決結果。
+  ProxyNavigationResolution resolveNavigationTarget({
+    required String targetUrl,
+    String? sourceUrl,
+  }) {
+    return _resolveNavigationTargetInternal(
+      targetUrl: targetUrl,
+      sourceUrl: sourceUrl,
+    );
+  }
+
   /// 外部から取得した Cookie を復元します。
   ///
   /// [entries] は復元対象の Cookie 一覧です。
@@ -721,19 +769,28 @@ class OfflineWebProxy {
   /// [targetUri] は検証対象の URI です。
   /// 戻り値は同一 origin の場合に `true` です。
   bool _isSameOriginAsConfiguredOrigin(Uri targetUri) {
-    final configuredOrigin = _config?.origin ?? '';
-    if (configuredOrigin.isEmpty) {
-      return false;
-    }
-
-    final originUri = Uri.tryParse(configuredOrigin);
-    if (originUri == null || !originUri.hasScheme || originUri.host.isEmpty) {
+    final originUri = _configuredOriginUri;
+    if (originUri == null) {
       return false;
     }
 
     return originUri.scheme.toLowerCase() == targetUri.scheme.toLowerCase() &&
         originUri.host.toLowerCase() == targetUri.host.toLowerCase() &&
         _effectivePort(originUri) == _effectivePort(targetUri);
+  }
+
+  /// 設定済み origin を URI として返します。
+  Uri? get _configuredOriginUri {
+    final configuredOrigin = _config?.origin ?? '';
+    if (configuredOrigin.isEmpty) {
+      return null;
+    }
+
+    final originUri = Uri.tryParse(configuredOrigin);
+    if (originUri == null || !originUri.hasScheme || originUri.host.isEmpty) {
+      return null;
+    }
+    return originUri;
   }
 
   /// URI の実効ポート番号を返します。
@@ -1175,9 +1232,22 @@ class OfflineWebProxy {
       return (shelf.Request request) async {
         _totalRequests++;
 
+        final proxyRequestUrl = request.requestedUri.toString();
+        final resolution = _resolveNavigationTargetInternal(
+          targetUrl: proxyRequestUrl,
+        );
+
         _emitEvent(ProxyEventType.requestReceived, request.url.toString(), {
           'method': request.method,
           'userAgent': request.headers['user-agent'],
+          'proxyRequestUrl': proxyRequestUrl,
+          'resolvedUpstreamUrl': resolution.upstreamUri?.toString(),
+          'resolvedProxyUrl': resolution.proxyUri?.toString(),
+          'navigationDisposition': resolution.disposition.name,
+          'navigationReason': resolution.reason.name,
+          'usedLoopbackAlias': resolution.usedLoopbackAlias,
+          'usedSourceUrl': resolution.usedSourceUrl,
+          'isStaticResource': resolution.isStaticResource,
         });
 
         return await innerHandler(request);
@@ -1222,30 +1292,7 @@ class OfflineWebProxy {
       return _staticResourceCache[path]!;
     }
 
-    // assets/static/フォルダにファイルが存在するかチェック
-    // 一般的な静的リソースの拡張子をチェック
-    final staticExtensions = {
-      '.html',
-      '.css',
-      '.js',
-      '.png',
-      '.jpg',
-      '.jpeg',
-      '.gif',
-      '.svg',
-      '.ico',
-      '.woff',
-      '.woff2',
-      '.ttf',
-      '.eot'
-    };
-    // pathに拡張子が無い場合にsubstring(-1)でクラッシュしないようガード
-    final lower = path.toLowerCase();
-    final dotIndex = lower.lastIndexOf('.');
-    final extension = dotIndex >= 0 ? lower.substring(dotIndex) : '';
-    final exists = extension.isNotEmpty &&
-        staticExtensions.contains(extension) &&
-        (path.startsWith('/static/') || path.startsWith('static/'));
+    final exists = _looksLikeStaticResourcePath(path);
 
     _staticResourceCache[path] = exists;
     return exists;
@@ -1281,11 +1328,10 @@ class OfflineWebProxy {
 
   /// リクエストから上流サーバのURLを構築します。
   String _buildUpstreamUrl(shelf.Request request) {
-    final path = request.url.path.startsWith('/')
-        ? request.url.path
-        : '/${request.url.path}';
-    final query = request.url.query.isNotEmpty ? '?${request.url.query}' : '';
-    return '${_config!.origin}$path$query';
+    return _buildUpstreamUriFromParts(
+      path: request.url.path,
+      query: request.url.query,
+    ).toString();
   }
 
   /// オンライン時のHTTPリクエストを処理します。
@@ -1656,13 +1702,10 @@ class OfflineWebProxy {
       throw Exception('No upstream origin configured');
     }
 
-    // パスとクエリパラメータを正規化して上流URLを構築
-    final path = request.url.path.startsWith('/')
-        ? request.url.path
-        : '/${request.url.path}';
-    final query = request.url.query.isNotEmpty ? '?${request.url.query}' : '';
-    final upstreamUrl = '${_config!.origin}$path$query';
-    final uri = Uri.parse(upstreamUrl);
+    final uri = _buildUpstreamUriFromParts(
+      path: request.url.path,
+      query: request.url.query,
+    );
 
     // HttpClientを再利用する（大量リクエストでの生成コストを削減）
     final client = _getOrCreateHttpClient();
@@ -2118,8 +2161,7 @@ class OfflineWebProxy {
       throw Exception('上流サーバのオリジンが設定されていません');
     }
 
-    final url = '${_config!.origin}$path';
-    final uri = Uri.parse(url);
+    final uri = _buildUpstreamUriFromParts(path: path);
     final client = _getOrCreateHttpClient();
     client.autoUncompress = true;
     try {
@@ -2287,8 +2329,7 @@ class OfflineWebProxy {
 
       // 互換性: 旧キューデータが相対URLだった場合は origin を付与
       if (!uri.isAbsolute) {
-        final origin = _config?.origin ?? '';
-        if (origin.isEmpty) {
+        if (_config?.origin.isEmpty ?? true) {
           return (
             success: false,
             shouldDrop: false,
@@ -2298,8 +2339,7 @@ class OfflineWebProxy {
           );
         }
 
-        final normalizedPath = url.startsWith('/') ? url : '/$url';
-        uri = Uri.parse('$origin$normalizedPath');
+        uri = _buildUpstreamUriFromParts(path: url);
       }
       final request = await client.openUrl(method, uri);
 
@@ -2536,6 +2576,371 @@ class OfflineWebProxy {
       statusCode: data['statusCode'] as int? ?? 0,
       errorMessage: data['errorMessage'] as String? ?? '',
     );
+  }
+
+  /// 遷移先 URL を proxy / upstream / 外部のいずれかへ解決します。
+  ProxyNavigationResolution _resolveNavigationTargetInternal({
+    required String targetUrl,
+    String? sourceUrl,
+  }) {
+    final trimmedTargetUrl = targetUrl.trim();
+    if (trimmedTargetUrl.isEmpty) {
+      return _buildNavigationResolution(
+        inputUrl: targetUrl,
+        disposition: ProxyNavigationDisposition.invalid,
+        reason: ProxyNavigationReason.invalidUrl,
+      );
+    }
+
+    final parsedTargetUri = Uri.tryParse(trimmedTargetUrl);
+    if (parsedTargetUri == null) {
+      return _buildNavigationResolution(
+        inputUrl: targetUrl,
+        disposition: ProxyNavigationDisposition.invalid,
+        reason: ProxyNavigationReason.invalidUrl,
+      );
+    }
+
+    final needsSourceUrl = !parsedTargetUri.hasScheme;
+    Uri? resolvedSourceUri;
+    var usedSourceUrl = false;
+    Uri normalizedTargetUri;
+
+    if (needsSourceUrl) {
+      final trimmedSourceUrl = sourceUrl?.trim();
+      if (trimmedSourceUrl == null || trimmedSourceUrl.isEmpty) {
+        return _buildNavigationResolution(
+          inputUrl: targetUrl,
+          disposition: ProxyNavigationDisposition.unresolved,
+          reason: ProxyNavigationReason.relativeUrlWithoutSource,
+        );
+      }
+
+      resolvedSourceUri = _tryParseAbsoluteHttpUrl(trimmedSourceUrl);
+      if (resolvedSourceUri == null) {
+        return _buildNavigationResolution(
+          inputUrl: targetUrl,
+          disposition: ProxyNavigationDisposition.unresolved,
+          reason: ProxyNavigationReason.invalidSourceUrl,
+        );
+      }
+
+      normalizedTargetUri = resolvedSourceUri.resolveUri(parsedTargetUri);
+      usedSourceUrl = true;
+    } else {
+      normalizedTargetUri = parsedTargetUri;
+    }
+
+    final scheme = normalizedTargetUri.scheme.toLowerCase();
+    if (!_isHttpScheme(scheme)) {
+      return _buildNavigationResolution(
+        inputUrl: targetUrl,
+        sourceUri: resolvedSourceUri,
+        normalizedTargetUri: normalizedTargetUri,
+        disposition: ProxyNavigationDisposition.external,
+        reason: ProxyNavigationReason.nonHttpScheme,
+        usedSourceUrl: usedSourceUrl,
+      );
+    }
+
+    final targetIsProxyUrl = _isProxyEndpointUri(normalizedTargetUri);
+    final usedLoopbackAlias = targetIsProxyUrl &&
+        _config != null &&
+        normalizedTargetUri.host.toLowerCase() != _config!.host.toLowerCase() &&
+        _isLoopbackHost(normalizedTargetUri.host) &&
+        _isLoopbackHost(_config!.host);
+
+    if (targetIsProxyUrl) {
+      final isStaticResource =
+          _looksLikeStaticResourcePath(normalizedTargetUri.path);
+      if (isStaticResource) {
+        return _buildNavigationResolution(
+          inputUrl: targetUrl,
+          sourceUri: resolvedSourceUri,
+          normalizedTargetUri: normalizedTargetUri,
+          proxyUri: normalizedTargetUri,
+          disposition: ProxyNavigationDisposition.localOnly,
+          reason: ProxyNavigationReason.staticResource,
+          usedSourceUrl: usedSourceUrl,
+          usedLoopbackAlias: usedLoopbackAlias,
+          isStaticResource: true,
+        );
+      }
+
+      final upstreamUri = _tryBuildUpstreamUriFromPathAndQuery(
+        path: normalizedTargetUri.path,
+        query: normalizedTargetUri.query,
+        fragment: normalizedTargetUri.fragment,
+      );
+      if (upstreamUri == null) {
+        return _buildNavigationResolution(
+          inputUrl: targetUrl,
+          sourceUri: resolvedSourceUri,
+          normalizedTargetUri: normalizedTargetUri,
+          proxyUri: normalizedTargetUri,
+          disposition: ProxyNavigationDisposition.unresolved,
+          reason: ProxyNavigationReason.missingConfiguredOrigin,
+          usedSourceUrl: usedSourceUrl,
+          usedLoopbackAlias: usedLoopbackAlias,
+        );
+      }
+
+      return _buildNavigationResolution(
+        inputUrl: targetUrl,
+        sourceUri: resolvedSourceUri,
+        normalizedTargetUri: normalizedTargetUri,
+        upstreamUri: upstreamUri,
+        proxyUri: normalizedTargetUri,
+        disposition: ProxyNavigationDisposition.inWebView,
+        reason: ProxyNavigationReason.proxyUrl,
+        usedSourceUrl: usedSourceUrl,
+        usedLoopbackAlias: usedLoopbackAlias,
+      );
+    }
+
+    if (_isSameOriginAsConfiguredOrigin(normalizedTargetUri)) {
+      final proxyUri = _buildProxyUriFromUpstreamUri(normalizedTargetUri);
+      if (proxyUri == null) {
+        return _buildNavigationResolution(
+          inputUrl: targetUrl,
+          sourceUri: resolvedSourceUri,
+          normalizedTargetUri: normalizedTargetUri,
+          upstreamUri: normalizedTargetUri,
+          disposition: ProxyNavigationDisposition.unresolved,
+          reason: ProxyNavigationReason.outsideProxyScope,
+          usedSourceUrl: usedSourceUrl,
+        );
+      }
+
+      return _buildNavigationResolution(
+        inputUrl: targetUrl,
+        sourceUri: resolvedSourceUri,
+        normalizedTargetUri: normalizedTargetUri,
+        upstreamUri: normalizedTargetUri,
+        proxyUri: proxyUri,
+        disposition: ProxyNavigationDisposition.inWebView,
+        reason: ProxyNavigationReason.configuredOriginUrl,
+        usedSourceUrl: usedSourceUrl,
+      );
+    }
+
+    if (_isLoopbackHttpUri(normalizedTargetUri)) {
+      return _buildNavigationResolution(
+        inputUrl: targetUrl,
+        sourceUri: resolvedSourceUri,
+        normalizedTargetUri: normalizedTargetUri,
+        disposition: ProxyNavigationDisposition.unresolved,
+        reason: ProxyNavigationReason.unknownLoopbackUrl,
+        usedSourceUrl: usedSourceUrl,
+      );
+    }
+
+    return _buildNavigationResolution(
+      inputUrl: targetUrl,
+      sourceUri: resolvedSourceUri,
+      normalizedTargetUri: normalizedTargetUri,
+      disposition: ProxyNavigationDisposition.external,
+      reason: ProxyNavigationReason.externalOrigin,
+      usedSourceUrl: usedSourceUrl,
+    );
+  }
+
+  /// 解決結果オブジェクトを構築します。
+  ProxyNavigationResolution _buildNavigationResolution({
+    required String inputUrl,
+    required ProxyNavigationDisposition disposition,
+    required ProxyNavigationReason reason,
+    Uri? sourceUri,
+    Uri? normalizedTargetUri,
+    Uri? upstreamUri,
+    Uri? proxyUri,
+    bool usedSourceUrl = false,
+    bool usedLoopbackAlias = false,
+    bool isStaticResource = false,
+  }) {
+    return ProxyNavigationResolution(
+      inputUrl: inputUrl,
+      sourceUri: sourceUri,
+      normalizedTargetUri: normalizedTargetUri,
+      upstreamUri: upstreamUri,
+      proxyUri: proxyUri,
+      disposition: disposition,
+      reason: reason,
+      usedSourceUrl: usedSourceUrl,
+      usedLoopbackAlias: usedLoopbackAlias,
+      isStaticResource: isStaticResource,
+    );
+  }
+
+  /// 現在稼働中の proxy ポートを返します。
+  int? get _activeProxyPort => _server?.port;
+
+  /// HTTP または HTTPS スキームかどうかを返します。
+  bool _isHttpScheme(String scheme) {
+    return scheme == 'http' || scheme == 'https';
+  }
+
+  /// URL 文字列を絶対 HTTP(S) URI として解釈します。
+  Uri? _tryParseAbsoluteHttpUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme) {
+      return null;
+    }
+    if (!_isHttpScheme(uri.scheme.toLowerCase()) || uri.host.isEmpty) {
+      return null;
+    }
+    return uri;
+  }
+
+  /// proxy の loopback エンドポイント URL かどうかを返します。
+  bool _isProxyEndpointUri(Uri uri) {
+    if (uri.scheme.toLowerCase() != 'http' || uri.host.isEmpty) {
+      return false;
+    }
+
+    final proxyPort = _activeProxyPort;
+    if (proxyPort == null || _effectivePort(uri) != proxyPort) {
+      return false;
+    }
+
+    final configuredHost = _config?.host ?? '';
+    if (configuredHost.isNotEmpty &&
+        uri.host.toLowerCase() == configuredHost.toLowerCase()) {
+      return true;
+    }
+
+    return configuredHost.isNotEmpty &&
+        _isLoopbackHost(uri.host) &&
+        _isLoopbackHost(configuredHost);
+  }
+
+  /// loopback ホスト名かどうかを返します。
+  bool _isLoopbackHost(String host) {
+    return _loopbackHosts.contains(host.toLowerCase());
+  }
+
+  /// loopback の HTTP(S) URL かどうかを返します。
+  bool _isLoopbackHttpUri(Uri uri) {
+    return uri.scheme.toLowerCase() == 'http' && _isLoopbackHost(uri.host);
+  }
+
+  /// 静的リソースらしいパスかどうかを返します。
+  bool _looksLikeStaticResourcePath(String path) {
+    final lower = path.toLowerCase();
+    final dotIndex = lower.lastIndexOf('.');
+    final extension = dotIndex >= 0 ? lower.substring(dotIndex) : '';
+    return extension.isNotEmpty &&
+        _staticResourceExtensions.contains(extension);
+  }
+
+  /// path と query から upstream URI を構築します。
+  Uri _buildUpstreamUriFromParts({
+    required String path,
+    String query = '',
+    String fragment = '',
+  }) {
+    final upstreamUri = _tryBuildUpstreamUriFromPathAndQuery(
+      path: path,
+      query: query,
+      fragment: fragment,
+    );
+    if (upstreamUri == null) {
+      throw StateError('No upstream origin configured');
+    }
+    return upstreamUri;
+  }
+
+  /// path と query から upstream URI を構築します。
+  Uri? _tryBuildUpstreamUriFromPathAndQuery({
+    required String path,
+    String query = '',
+    String fragment = '',
+  }) {
+    final originUri = _configuredOriginUri;
+    if (originUri == null) {
+      return null;
+    }
+
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    final originBase =
+        originUri.replace(query: null, fragment: null).toString();
+    final baseWithoutTrailingSlash = originBase.endsWith('/')
+        ? originBase.substring(0, originBase.length - 1)
+        : originBase;
+    final querySuffix = query.isNotEmpty ? '?$query' : '';
+    final fragmentSuffix = fragment.isNotEmpty ? '#$fragment' : '';
+    return Uri.parse(
+      '$baseWithoutTrailingSlash$normalizedPath$querySuffix$fragmentSuffix',
+    );
+  }
+
+  /// upstream URI から対応する proxy URI を構築します。
+  Uri? _buildProxyUriFromUpstreamUri(Uri upstreamUri) {
+    if (!_isSameOriginAsConfiguredOrigin(upstreamUri)) {
+      return null;
+    }
+
+    final proxyPort = _activeProxyPort;
+    if (proxyPort == null) {
+      return null;
+    }
+
+    final originUri = _configuredOriginUri;
+    if (originUri == null) {
+      return null;
+    }
+
+    final proxyPath =
+        _stripConfiguredOriginPathPrefix(upstreamUri.path, originUri.path);
+    if (proxyPath == null) {
+      return null;
+    }
+
+    final configuredHost =
+        (_config?.host.isNotEmpty ?? false) ? _config!.host : '127.0.0.1';
+    final querySuffix =
+        upstreamUri.query.isNotEmpty ? '?${upstreamUri.query}' : '';
+    final fragmentSuffix =
+        upstreamUri.fragment.isNotEmpty ? '#${upstreamUri.fragment}' : '';
+    return Uri.parse(
+      'http://$configuredHost:$proxyPort$proxyPath$querySuffix$fragmentSuffix',
+    );
+  }
+
+  /// origin の base path を upstream path から取り除き proxy path を返します。
+  String? _stripConfiguredOriginPathPrefix(
+      String upstreamPath, String originPath) {
+    final normalizedUpstreamPath = upstreamPath.isEmpty ? '/' : upstreamPath;
+    final normalizedOriginPath = _normalizeOriginBasePath(originPath);
+    if (normalizedOriginPath == '/') {
+      return normalizedUpstreamPath.startsWith('/')
+          ? normalizedUpstreamPath
+          : '/$normalizedUpstreamPath';
+    }
+
+    if (normalizedUpstreamPath == normalizedOriginPath ||
+        normalizedUpstreamPath == '$normalizedOriginPath/') {
+      return '/';
+    }
+
+    if (!normalizedUpstreamPath.startsWith('$normalizedOriginPath/')) {
+      return null;
+    }
+
+    final strippedPath =
+        normalizedUpstreamPath.substring(normalizedOriginPath.length);
+    return strippedPath.startsWith('/') ? strippedPath : '/$strippedPath';
+  }
+
+  /// origin の base path を比較用に正規化します。
+  String _normalizeOriginBasePath(String originPath) {
+    if (originPath.isEmpty || originPath == '/') {
+      return '/';
+    }
+
+    return originPath.endsWith('/') && originPath.length > 1
+        ? originPath.substring(0, originPath.length - 1)
+        : originPath;
   }
 
   /// ドロップされたリクエスト履歴を保存します。

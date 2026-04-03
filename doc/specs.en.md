@@ -672,7 +672,8 @@ proxy:
       ignoreNoStore: true # Ignore no-store
       ignoreMustRevalidate: true # Ignore must-revalidate when offline
       forceCache: # Force cache targets
-        - "/static/*"
+        - "/app.css"
+        - "/images/*"
         - "*.woff2"
         - "*.ttf"
 
@@ -994,6 +995,51 @@ if (cookieHeader != null) {
 }
 ```
 
+#### `Uri? tryResolveUpstreamUrl(String url)`
+
+Resolves a proxy URL or a URL in the configured `origin` to the canonical upstream URL that can be used for external delegation decisions.
+
+- **Parameters**:
+  - `url`: Absolute URL to resolve
+- **Return Value**: Resolved upstream URL, or `null` when it cannot be resolved
+- **Notes**:
+  - Returns `null` for proxy static-resource URLs
+  - Treats `localhost` and `127.0.0.1` as the same loopback alias only when identifying proxy URLs
+  - Returns `null` for same-origin URLs that cannot be mapped back into the proxy path when `origin` has a base path
+
+```dart
+final upstreamUrl = proxy.tryResolveUpstreamUrl(
+  'http://127.0.0.1:$proxyPort/app/map?mode=car',
+);
+```
+
+#### `ProxyNavigationResolution resolveNavigationTarget({required String targetUrl, String? sourceUrl})`
+
+Resolves a navigation target before WebView navigation and returns the upstream URL, proxy URL, and delegation metadata together.
+
+- **Parameters**:
+  - `targetUrl`: Candidate navigation target URL
+  - `sourceUrl`: Base URL used to resolve relative, query-only, and fragment-only targets
+- **Return Value**: `ProxyNavigationResolution`
+- **Notes**:
+  - `disposition` returns `inWebView`, `localOnly`, `external`, `unresolved`, or `invalid`
+  - `reason` returns the classification reason such as `proxyUrl`, `configuredOriginUrl`, `staticResource`, or `outsideProxyScope`
+  - Non-HTTP(S) schemes return `external`
+  - Relative targets without `sourceUrl` return `unresolved`
+  - Same-origin URLs outside the proxy-mappable base path return `unresolved`
+
+```dart
+final resolution = proxy.resolveNavigationTarget(
+  targetUrl: '../map?mode=car',
+  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+);
+
+if (resolution.disposition == ProxyNavigationDisposition.inWebView) {
+  print('Upstream: ${resolution.upstreamUri}');
+  print('Proxy: ${resolution.proxyUri}');
+}
+```
+
 #### `Future<void> clearCookies({String? domain})`
 
 Deletes cookies.
@@ -1270,6 +1316,17 @@ enum ProxyEventType {
   errorOccurred // Error occurred
 }
 ```
+
+For `requestReceived`, `data` may include the following metadata:
+
+- `proxyRequestUrl`: Absolute URL received by the proxy
+- `resolvedUpstreamUrl`: Upstream URL restored by the resolver API
+- `resolvedProxyUrl`: Proxy URL that should be loaded in WebView
+- `navigationDisposition`: Name of `ProxyNavigationDisposition`
+- `navigationReason`: Name of `ProxyNavigationReason`
+- `usedLoopbackAlias`: Whether `localhost` and `127.0.0.1` alias handling was used
+- `usedSourceUrl`: Whether a relative target was resolved using `sourceUrl`
+- `isStaticResource`: Whether the request was classified as a proxy-local static resource
 
 #### Exception Classes
 

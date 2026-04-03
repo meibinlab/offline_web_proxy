@@ -70,6 +70,67 @@ void main() {
       expect(proxy.events, isA<Stream<ProxyEvent>>());
     });
 
+    /// requestReceived イベントに URL 解決メタ情報が入ることのテスト
+    test('should include resolved navigation metadata in requestReceived event',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..write('ok');
+          await request.response.close();
+        });
+
+        final receivedEvent = Completer<ProxyEvent>();
+        final subscription = proxy.events.listen((ProxyEvent event) {
+          if (event.type == ProxyEventType.requestReceived &&
+              !receivedEvent.isCompleted) {
+            receivedEvent.complete(event);
+          }
+        });
+
+        final upstreamOrigin = 'http://127.0.0.1:${upstreamServer!.port}';
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(origin: upstreamOrigin),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .getUrl(Uri.parse('http://localhost:$proxyPort/app/dashboard'));
+          final response = await request.close();
+          await response.drain<void>();
+        } finally {
+          client.close(force: true);
+        }
+
+        final event = await receivedEvent.future.timeout(
+          const Duration(seconds: 1),
+        );
+
+        expect(
+          event.data['proxyRequestUrl'],
+          equals('http://localhost:$proxyPort/app/dashboard'),
+        );
+        expect(
+          event.data['resolvedUpstreamUrl'],
+          equals('$upstreamOrigin/app/dashboard'),
+        );
+        expect(
+          event.data['resolvedProxyUrl'],
+          equals('http://localhost:$proxyPort/app/dashboard'),
+        );
+        expect(event.data['navigationDisposition'], equals('inWebView'));
+        expect(event.data['navigationReason'], equals('proxyUrl'));
+        expect(event.data['usedLoopbackAlias'], isTrue);
+        expect(event.data['usedSourceUrl'], isFalse);
+        expect(event.data['isStaticResource'], isFalse);
+
+        await subscription.cancel();
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
     /// 初期状態のテスト
     test('should have correct initial state', () {
       expect(proxy.isRunning, isFalse);
@@ -527,6 +588,208 @@ void main() {
       );
     });
 
+    /// proxy URL から upstream URL を復元できることのテスト
+    test('should resolve proxy url to upstream url', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final upstreamUri = proxy.tryResolveUpstreamUrl(
+        'http://127.0.0.1:$proxyPort/app/dashboard?tab=info#summary',
+      );
+
+      expect(
+        upstreamUri,
+        equals(Uri.parse('https://example.com/app/dashboard?tab=info#summary')),
+      );
+    });
+
+    /// localhost と 127.0.0.1 を loopback alias として扱うことのテスト
+    test('should resolve localhost proxy url as loopback alias', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: 'http://localhost:$proxyPort/app/dashboard',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.inWebView),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.proxyUrl));
+      expect(resolution.usedLoopbackAlias, isTrue);
+      expect(
+        resolution.upstreamUri,
+        equals(Uri.parse('https://example.com/app/dashboard')),
+      );
+    });
+
+    /// 相対 URL を source URL 基準で同じ upstream に解決することのテスト
+    test('should resolve relative target by source url', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com/base'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: '../map?mode=car',
+        sourceUrl: 'http://127.0.0.1:$proxyPort/app/page/index.html',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.inWebView),
+      );
+      expect(resolution.usedSourceUrl, isTrue);
+      expect(
+        resolution.upstreamUri,
+        equals(Uri.parse('https://example.com/base/app/map?mode=car')),
+      );
+      expect(
+        resolution.proxyUri,
+        equals(Uri.parse('http://127.0.0.1:$proxyPort/app/map?mode=car')),
+      );
+    });
+
+    /// origin の base path 外 URL は unresolved になることのテスト
+    test('should return unresolved for same-origin url outside proxy scope',
+        () async {
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com/base'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: 'https://example.com/logout',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.unresolved),
+      );
+      expect(
+        resolution.reason,
+        equals(ProxyNavigationReason.outsideProxyScope),
+      );
+      expect(resolution.proxyUri, isNull);
+      expect(
+        proxy.tryResolveUpstreamUrl('https://example.com/logout'),
+        isNull,
+      );
+    });
+
+    /// 静的リソースは localOnly として扱うことのテスト
+    test('should classify proxy static resource as local only', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: 'http://127.0.0.1:$proxyPort/app.js',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.localOnly),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.staticResource));
+      expect(resolution.isStaticResource, isTrue);
+      expect(resolution.upstreamUri, isNull);
+    });
+
+    /// source URL が無い相対 URL は unresolved になることのテスト
+    test('should return unresolved for relative target without source url', () {
+      final resolution = proxy.resolveNavigationTarget(targetUrl: '../map');
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.unresolved),
+      );
+      expect(
+        resolution.reason,
+        equals(ProxyNavigationReason.relativeUrlWithoutSource),
+      );
+    });
+
+    /// 非 HTTP スキームは external として扱うことのテスト
+    test('should classify non http scheme as external', () {
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: 'tel:+81012345678',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.external),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.nonHttpScheme));
+      expect(
+        resolution.normalizedTargetUri,
+        equals(Uri.parse('tel:+81012345678')),
+      );
+    });
+
+    /// HTTPS の loopback URL を proxy URL と誤判定しないことのテスト
+    test('should not treat https loopback url as proxy endpoint', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: 'https://localhost:$proxyPort/app/dashboard',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.external),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.externalOrigin));
+      expect(resolution.upstreamUri, isNull);
+    });
+
+    /// scheme-relative URL を source URL から解決できることのテスト
+    test('should resolve scheme relative url by source url', () async {
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: '//maps.example.com/route',
+        sourceUrl: 'http://127.0.0.1:8080/app/index.html',
+      );
+
+      expect(
+        resolution.normalizedTargetUri,
+        equals(Uri.parse('http://maps.example.com/route')),
+      );
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.external),
+      );
+      expect(resolution.usedSourceUrl, isTrue);
+    });
+
+    /// 上流 origin の base path を含めて実リクエストへ反映することのテスト
+    test('should forward requests using the same upstream resolver rules',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final requestedPaths = <String>[];
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          requestedPaths.add(request.uri.path);
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..write('ok');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}/base',
+          ),
+        );
+
+        await _performProxyGet(proxyPort, '/app/dashboard');
+
+        expect(requestedPaths, equals(['/base/app/dashboard']));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
     /// キャッシュリストの初期状態テスト
     test('should have empty cache list initially', () async {
       final cacheList = await proxy.getCacheList();
@@ -756,6 +1019,34 @@ void main() {
       expect(event.type, equals(ProxyEventType.cacheHit));
       expect(event.url, equals('https://example.com/page'));
       expect(event.data['cached'], isTrue);
+    });
+
+    /// ProxyNavigationResolution のテスト
+    test('should create ProxyNavigationResolution correctly', () {
+      final resolution = ProxyNavigationResolution(
+        inputUrl: 'http://127.0.0.1:8080/app',
+        sourceUri: Uri.parse('http://127.0.0.1:8080/home'),
+        normalizedTargetUri: Uri.parse('http://127.0.0.1:8080/app'),
+        upstreamUri: Uri.parse('https://example.com/app'),
+        proxyUri: Uri.parse('http://127.0.0.1:8080/app'),
+        disposition: ProxyNavigationDisposition.inWebView,
+        reason: ProxyNavigationReason.proxyUrl,
+        usedSourceUrl: true,
+        usedLoopbackAlias: false,
+        isStaticResource: false,
+      );
+
+      expect(resolution.inputUrl, equals('http://127.0.0.1:8080/app'));
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.inWebView),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.proxyUrl));
+      expect(
+        resolution.upstreamUri,
+        equals(Uri.parse('https://example.com/app')),
+      );
+      expect(resolution.usedSourceUrl, isTrue);
     });
 
     /// ProxyStatsのテスト

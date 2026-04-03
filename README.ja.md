@@ -208,6 +208,20 @@ if (cookieHeader != null) {
 
 // 注意: getCookieHeaderForUrl は start() で設定した origin と同一 origin の URL のみ取得可能
 
+// WebView 遷移前に proxy URL または同一 origin の URL を upstream URL に解決
+final upstreamUrl = proxy.tryResolveUpstreamUrl(
+  'http://127.0.0.1:$proxyPort/app/map?mode=car',
+);
+
+// 相対リンク、redirect、新規 window の target をメタ情報付きで解決
+final navigation = proxy.resolveNavigationTarget(
+  targetUrl: 'tel:+81012345678',
+  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+);
+if (navigation.disposition == ProxyNavigationDisposition.external) {
+  print('外部委譲: ${navigation.normalizedTargetUri}');
+}
+
 // proxy 起動前に Cookie を復元
 await proxy.restoreCookies([
   CookieRestoreEntry.fromSetCookieHeader(

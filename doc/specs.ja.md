@@ -672,7 +672,8 @@ proxy:
       ignoreNoStore: true # no-storeを無視
       ignoreMustRevalidate: true # オフライン時はmust-revalidateを無視
       forceCache: # 強制キャッシュ対象
-        - "/static/*"
+        - "/app.css"
+        - "/images/*"
         - "*.woff2"
         - "*.ttf"
 
@@ -994,6 +995,51 @@ if (cookieHeader != null) {
 }
 ```
 
+#### `Uri? tryResolveUpstreamUrl(String url)`
+
+proxy URL または設定済み `origin` と同一 origin の URL を、外部委譲判定に使える upstream URL へ解決します。
+
+- **パラメータ**:
+  - `url`: 解決対象の絶対 URL
+- **戻り値**: 解決できた upstream URL。解決不能な場合は `null`
+- **注意**:
+  - proxy の静的リソース URL は `null` を返す
+  - `localhost` と `127.0.0.1` は proxy URL 判定時のみ同一 loopback alias として扱う
+  - `origin` に base path があり、その配下へ逆変換できない同一 origin URL は `null` を返す
+
+```dart
+final upstreamUrl = proxy.tryResolveUpstreamUrl(
+  'http://127.0.0.1:$proxyPort/app/map?mode=car',
+);
+```
+
+#### `ProxyNavigationResolution resolveNavigationTarget({required String targetUrl, String? sourceUrl})`
+
+WebView の遷移前に target URL を解決し、upstream URL、proxy URL、外部委譲可否をまとめて返します。
+
+- **パラメータ**:
+  - `targetUrl`: 遷移先候補 URL
+  - `sourceUrl`: 相対 URL を解決する基準 URL。relative、query-only、fragment-only の場合に必要
+- **戻り値**: `ProxyNavigationResolution`
+- **注意**:
+  - `disposition` は `inWebView`、`localOnly`、`external`、`unresolved`、`invalid` を返す
+  - `reason` は `proxyUrl`、`configuredOriginUrl`、`staticResource`、`outsideProxyScope` など判定理由を返す
+  - 非 HTTP(S) スキームは `external` を返す
+  - `sourceUrl` が無い相対 URL は `unresolved` を返す
+  - `origin` の base path 配下へ戻せない同一 origin URL は `unresolved` を返す
+
+```dart
+final resolution = proxy.resolveNavigationTarget(
+  targetUrl: '../map?mode=car',
+  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+);
+
+if (resolution.disposition == ProxyNavigationDisposition.inWebView) {
+  print('Upstream: ${resolution.upstreamUri}');
+  print('Proxy: ${resolution.proxyUri}');
+}
+```
+
 #### `Future<void> clearCookies({String? domain})`
 
 Cookie を削除します。
@@ -1270,6 +1316,17 @@ enum ProxyEventType {
   errorOccurred // エラー発生
 }
 ```
+
+`requestReceived` の `data` には、次のメタ情報が入る場合があります。
+
+- `proxyRequestUrl`: proxy が受けた絶対 URL
+- `resolvedUpstreamUrl`: URL 解決 API で復元した upstream URL
+- `resolvedProxyUrl`: WebView にロードさせる proxy URL
+- `navigationDisposition`: `ProxyNavigationDisposition` の名前
+- `navigationReason`: `ProxyNavigationReason` の名前
+- `usedLoopbackAlias`: `localhost` と `127.0.0.1` の alias を吸収したか
+- `usedSourceUrl`: `sourceUrl` を使って相対 URL を解決したか
+- `isStaticResource`: proxy 内の静的リソースとして扱ったか
 
 #### 例外クラス
 

@@ -1,122 +1,408 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:io';
 
+import 'package:flutter/material.dart';
+import 'package:offline_web_proxy/offline_web_proxy.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+/// offline_web_proxy の URL 解決 API を体験するサンプルアプリです。
 void main() {
-  runApp(const MyApp());
+  runApp(const ProxyExampleApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+/// offline_web_proxy のデモアプリです。
+class ProxyExampleApp extends StatelessWidget {
+  /// デモアプリを生成します。
+  const ProxyExampleApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'offline_web_proxy demo',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0A6C74),
+          brightness: Brightness.light,
+        ),
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const ProxyExampleHomePage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+/// URL 解決 API と WebView 連携を表示するホーム画面です。
+class ProxyExampleHomePage extends StatefulWidget {
+  /// ホーム画面を生成します。
+  const ProxyExampleHomePage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<ProxyExampleHomePage> createState() => _ProxyExampleHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
+  final OfflineWebProxy _proxy = OfflineWebProxy();
+  final List<String> _eventLogs = <String>[];
 
-  void _incrementCounter() {
+  StreamSubscription<ProxyEvent>? _eventSubscription;
+  HttpServer? _upstreamServer;
+  WebViewController? _controller;
+
+  int? _proxyPort;
+  String? _upstreamOrigin;
+  String? _homeProxyUrl;
+  String? _currentPageUrl;
+  String? _statusText;
+  bool _isReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_initializeDemo());
+  }
+
+  @override
+  void dispose() {
+    unawaited(_eventSubscription?.cancel());
+    if (_proxy.isRunning) {
+      unawaited(_proxy.stop());
+    }
+    unawaited(_upstreamServer?.close(force: true));
+    super.dispose();
+  }
+
+  Future<void> _initializeDemo() async {
+    try {
+      _upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      _upstreamOrigin = 'http://127.0.0.1:${_upstreamServer!.port}';
+      _startMockUpstream(_upstreamServer!, _upstreamOrigin!);
+
+      _proxyPort = await _proxy.start(
+        config: ProxyConfig(origin: _upstreamOrigin!),
+      );
+      _homeProxyUrl = 'http://127.0.0.1:$_proxyPort/app';
+      _currentPageUrl = _homeProxyUrl;
+
+      _eventSubscription = _proxy.events.listen(_handleProxyEvent);
+      _controller = _createController();
+      await _controller!.loadRequest(Uri.parse(_homeProxyUrl!));
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isReady = true;
+        _statusText = 'proxy 起動完了: $_homeProxyUrl';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _statusText = '初期化に失敗しました: $error';
+      });
+    }
+  }
+
+  void _startMockUpstream(HttpServer server, String upstreamOrigin) {
+    unawaited(() async {
+      await for (final HttpRequest request in server) {
+        try {
+          final html = _buildHtmlResponse(request.uri.path, upstreamOrigin);
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType.html
+            ..write(html);
+          await request.response.close();
+        } catch (_) {
+          try {
+            request.response
+              ..statusCode = HttpStatus.internalServerError
+              ..write('error');
+            await request.response.close();
+          } catch (_) {
+            // ignore
+          }
+        }
+      }
+    }());
+  }
+
+  WebViewController _createController() {
+    return WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onNavigationRequest: _handleNavigationRequest,
+          onPageStarted: (String url) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _currentPageUrl = url;
+              _statusText = '読込中: $url';
+            });
+          },
+          onPageFinished: (String url) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _currentPageUrl = url;
+              _statusText = '表示中: $url';
+            });
+          },
+          onWebResourceError: (WebResourceError error) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _statusText = 'WebView エラー: ${error.description}';
+            });
+          },
+        ),
+      );
+  }
+
+  NavigationDecision _handleNavigationRequest(NavigationRequest request) {
+    final resolution = _proxy.resolveNavigationTarget(
+      targetUrl: request.url,
+      sourceUrl: _currentPageUrl,
+    );
+    _appendLog(
+      'nav ${resolution.disposition.name} ${resolution.reason.name} -> ${resolution.normalizedTargetUri}',
+    );
+
+    if (resolution.disposition == ProxyNavigationDisposition.external) {
+      _showMessage('外部委譲候補: ${resolution.normalizedTargetUri}');
+      return NavigationDecision.prevent;
+    }
+
+    if (resolution.disposition == ProxyNavigationDisposition.unresolved ||
+        resolution.disposition == ProxyNavigationDisposition.invalid) {
+      _showMessage('解決不能: ${resolution.reason.name}');
+      return NavigationDecision.prevent;
+    }
+
+    final proxyUri = resolution.proxyUri;
+    if (proxyUri != null && proxyUri.toString() != request.url) {
+      unawaited(_controller?.loadRequest(proxyUri));
+      return NavigationDecision.prevent;
+    }
+
+    return NavigationDecision.navigate;
+  }
+
+  void _handleProxyEvent(ProxyEvent event) {
+    if (event.type != ProxyEventType.requestReceived) {
+      return;
+    }
+
+    final resolvedUpstreamUrl = event.data['resolvedUpstreamUrl'] as String?;
+    final disposition = event.data['navigationDisposition'];
+    final reason = event.data['navigationReason'];
+    _appendLog(
+      'event requestReceived $disposition/$reason upstream=${resolvedUpstreamUrl ?? '-'}',
+    );
+  }
+
+  Future<void> _reloadHome() async {
+    final homeProxyUrl = _homeProxyUrl;
+    final controller = _controller;
+    if (homeProxyUrl == null || controller == null) {
+      return;
+    }
+
+    await controller.loadRequest(Uri.parse(homeProxyUrl));
+  }
+
+  void _simulateExternalTarget() {
+    final resolution = _proxy.resolveNavigationTarget(
+      targetUrl: 'tel:+81012345678',
+      sourceUrl: _currentPageUrl,
+    );
+    _appendLog(
+      'simulate external ${resolution.disposition.name} ${resolution.reason.name} ${resolution.normalizedTargetUri}',
+    );
+    _showMessage('外部委譲候補: ${resolution.normalizedTargetUri}');
+  }
+
+  void _simulateNewWindowTarget() {
+    final resolution = _proxy.resolveNavigationTarget(
+      targetUrl:
+          'https://www.google.com/maps/search/?api=1&query=Tokyo+Station',
+      sourceUrl: _currentPageUrl,
+    );
+    _appendLog(
+      'simulate new-window ${resolution.disposition.name} ${resolution.reason.name} ${resolution.normalizedTargetUri}',
+    );
+    _showMessage('target=_blank 相当の判定: ${resolution.disposition.name}');
+  }
+
+  void _appendLog(String message) {
+    if (!mounted) {
+      return;
+    }
+
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _eventLogs.insert(0, message);
+      if (_eventLogs.length > 12) {
+        _eventLogs.removeRange(12, _eventLogs.length);
+      }
     });
+  }
+
+  void _showMessage(String text) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
+  String _buildHtmlResponse(String path, String upstreamOrigin) {
+    final title = switch (path) {
+      '/app/orders/detail' => 'Order Detail',
+      '/app/absolute' => 'Absolute Same-Origin',
+      _ => 'Proxy Demo Home',
+    };
+    final body = switch (path) {
+      '/app/orders/detail' => '''
+<p>相対リンクと外部委譲の判定を試せます。</p>
+<p><a href="../absolute">same-origin absolute page</a></p>
+<p><a href="tel:+81012345678">phone link</a></p>
+<p><a href="https://www.google.com/maps/search/?api=1&query=Kyoto" target="_blank">maps target blank</a></p>
+''',
+      '/app/absolute' => '''
+<p>絶対 URL を proxy URL に戻す例です。</p>
+<p><a href="$upstreamOrigin/app">back home by absolute upstream url</a></p>
+''',
+      _ => '''
+<p>offline_web_proxy の URL 解決 API を使った WebView サンプルです。</p>
+<ul>
+  <li><a href="/app/orders/detail">relative same-origin link</a></li>
+  <li><a href="$upstreamOrigin/app/absolute">absolute same-origin link</a></li>
+  <li><a href="tel:+81012345678">phone link</a></li>
+  <li><a href="https://www.google.com/maps/search/?api=1&query=Tokyo+Station">maps link</a></li>
+  <li><a href="https://www.google.com/maps/search/?api=1&query=Osaka+Station" target="_blank">maps target blank</a></li>
+</ul>
+''',
+    };
+
+    return '''
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>$title</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; padding: 24px; background: #f4f8f8; color: #163133; }
+      main { max-width: 720px; margin: 0 auto; background: white; border-radius: 16px; padding: 24px; box-shadow: 0 12px 30px rgba(10, 108, 116, 0.12); }
+      a { color: #0a6c74; display: inline-block; margin: 8px 0; }
+      code { background: #e8f3f4; padding: 2px 6px; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>$title</h1>
+      <p>現在の upstream origin: <code>$upstreamOrigin</code></p>
+      $body
+    </main>
+  </body>
+</html>
+''';
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    final controller = _controller;
+
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('offline_web_proxy demo'),
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
+      body: SafeArea(
+        child: !_isReady || controller == null
+            ? Center(
+                child: Text(_statusText ?? 'proxy を起動しています...'),
+              )
+            : Column(
+                children: <Widget>[
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          'URL 解決デモ',
+                          style: Theme.of(context).textTheme.headlineSmall,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(_statusText ?? ''),
+                        const SizedBox(height: 8),
+                        Text('current: ${_currentPageUrl ?? '-'}'),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          children: <Widget>[
+                            FilledButton(
+                              onPressed: _reloadHome,
+                              child: const Text('Home を再読込'),
+                            ),
+                            OutlinedButton(
+                              onPressed: _simulateExternalTarget,
+                              child: const Text('電話リンク判定'),
+                            ),
+                            OutlinedButton(
+                              onPressed: _simulateNewWindowTarget,
+                              child: const Text('target=_blank 判定'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: WebViewWidget(controller: controller),
+                  ),
+                  Container(
+                    color: const Color(0xFFF0F7F8),
+                    height: 220,
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          'Proxy event log',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 8),
+                        Expanded(
+                          child: ListView.builder(
+                            itemCount: _eventLogs.length,
+                            itemBuilder: (BuildContext context, int index) {
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 6),
+                                child: Text(
+                                  _eventLogs[index],
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall
+                                      ?.copyWith(fontFamily: 'monospace'),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
