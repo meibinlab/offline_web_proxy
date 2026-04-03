@@ -364,6 +364,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 
 </dd>
 
+        <dt id="resolveNavigationTarget" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/resolveNavigationTarget.html">resolveNavigationTarget</a></span><span class="signature">(<wbr>{<span class="parameter" id="resolveNavigationTarget-param-targetUrl"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">targetUrl</span>, </span><span class="parameter" id="resolveNavigationTarget-param-sourceUrl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">sourceUrl</span></span>})
+    <span class="returntype parameter">&#8594; <a href="../offline_web_proxy/ProxyNavigationResolution-class.html">ProxyNavigationResolution</a></span>
+  </span>
+  
+
+</dt>
+<dd>
+  WebView 遷移前に target URL を解決します。
+  
+
+</dd>
+
         <dt id="restoreCookies" class="callable">
   <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/restoreCookies.html">restoreCookies</a></span><span class="signature">(<wbr><span class="parameter" id="restoreCookies-param-entries"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Iterable-class.html">Iterable</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/CookieRestoreEntry-class.html">CookieRestoreEntry</a></span>&gt;</span></span> <span class="parameter-name">entries</span></span>)
     <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
@@ -413,6 +426,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 <dd class="inherited">
   A string representation of this object.
   <div class="features"><span class="feature">inherited</span></div>
+
+</dd>
+
+        <dt id="tryResolveUpstreamUrl" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/tryResolveUpstreamUrl.html">tryResolveUpstreamUrl</a></span><span class="signature">(<wbr><span class="parameter" id="tryResolveUpstreamUrl-param-url"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span></span>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Uri-class.html">Uri</a>?</span>
+  </span>
+  
+
+</dt>
+<dd>
+  指定 URL を upstream URL として解決します。
+  
 
 </dd>
 
