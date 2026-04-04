@@ -345,6 +345,12 @@ The hook runs:
 
 If a Dart file is reformatted or auto-fixed, the hook stops the commit so you can review and stage the changes.
 
+## Release Process
+
+- Update `pubspec.yaml` and `CHANGELOG.md` first, then commit those changes to `main`.
+- Do not run `dart pub publish` manually for releases. This repository publishes via the GitHub Actions `release` job.
+- Create and push a version tag such as `v0.6.1`. The `v*` tag push triggers GitHub Actions to run validation, publish to pub.dev, and create the GitHub Release.
+
 ## License
 
 MIT License

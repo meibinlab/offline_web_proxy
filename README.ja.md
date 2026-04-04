@@ -345,6 +345,12 @@ hook では以下を実行します。
 
 Dart ファイルが自動修正または再整形された場合は、内容確認と再 stage のためにコミットを停止します。
 
+## リリース手順
+
+- 先に `pubspec.yaml` と `CHANGELOG.md` を更新し、その変更を `main` へコミットします。
+- リリース時にローカルで `dart pub publish` を直接実行しません。このリポジトリは GitHub Actions の `release` job 経由で公開します。
+- `v0.6.1` のようなバージョンタグを作成して push します。`v*` タグ push を契機に GitHub Actions が検証、pub.dev 公開、GitHub Release 作成を実行します。
+
 ## ライセンス
 
 MIT License
