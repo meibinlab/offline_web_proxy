@@ -56,328 +56,262 @@
 <a href="https://pub.dev/packages/offline_web_proxy"><img src="https://img.shields.io/pub/v/offline_web_proxy.svg" alt="Pub Version"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
 <a href="https://codecov.io/gh/meibinlab/offline_web_proxy"><img src="https://codecov.io/gh/meibinlab/offline_web_proxy/branch/main/graph/badge.svg" alt="Coverage"></a></p>
-<p>An offline-compatible local proxy server that operates within Flutter WebView. It aims to enable existing web systems to function seamlessly in mobile apps without requiring awareness of online/offline states.</p>
-<h2 id="features">Features</h2>
-<h3 id="core-functions">Core Functions</h3>
+<p>offline_web_proxy is a local HTTP proxy for Flutter WebView that keeps existing web applications usable inside a mobile app even when connectivity becomes unstable or temporarily unavailable.</p>
+<p>It runs on 127.0.0.1, forwards requests to one configured upstream origin while online, serves cached responses while offline, queues mutating requests, and provides helper APIs for WebView navigation, cookie reuse, and runtime monitoring.</p>
+<h2 id="highlights">Highlights</h2>
 <ul>
-<li>Intercepts HTTP requests from WebView through a local proxy server</li>
-<li>Forwards requests to upstream server when online, serves responses from cache when offline</li>
-<li>Queues update requests (POST/PUT/DELETE) when offline</li>
-<li>Automatically sends queued requests upon online recovery for seamless offline support</li>
-<li>Local serving of static resources</li>
+<li>Local proxy server for Flutter WebView</li>
+<li>RFC-aware cache handling with offline stale fallback</li>
+<li>Offline queue for POST, PUT, and DELETE requests</li>
+<li>AES-256 encrypted cookie persistence with restore support</li>
+<li>WebView navigation helper APIs for same-origin, external, and new-window flows</li>
+<li>Runtime stats and event stream for monitoring and debugging</li>
 </ul>
-<h3 id="offline-support">Offline Support</h3>
+<h2 id="requirements">Requirements</h2>
 <ul>
-<li>Combines RFC-compliant cache control with offline compatibility</li>
-<li>Intelligent cache management based on Cache-Control and Expires headers</li>
-<li>Ignores no-cache directives and uses stale cache when offline</li>
-<li>Prevents duplicate execution through idempotency guarantees</li>
-</ul>
-<h3 id="queuing-system">Queuing System</h3>
-<ul>
-<li>Guarantees request order through FIFO (First In, First Out)</li>
-<li>Automatic retry with exponential backoff</li>
-<li>Persistence for continued processing after restarts</li>
-</ul>
-<h3 id="cookie-management">Cookie Management</h3>
-<ul>
-<li>RFC-compliant cookie evaluation and management</li>
-<li>AES-256 encrypted persistence</li>
-<li>Encryption key storage in secure storage, with one-time migration from legacy plain cookie storage when available</li>
-<li>If the secure-storage key is lost, existing encrypted cookies can no longer be decrypted and users must sign in again</li>
-<li>High-speed access through memory caching</li>
+<li>Flutter 3.22.0 or later</li>
+<li>Dart 3.4.0 or later</li>
+<li>One configured upstream origin per proxy instance</li>
 </ul>
 <h2 id="installation">Installation</h2>
-<p>Add the following to your <code>pubspec.yaml</code>:</p>
+<p>Add the package to your app:</p>
 <pre class="language-yaml"><code class="language-yaml">dependencies:
-  offline_web_proxy: ^0.4.0
-  # Add the following if using WebView
-  # webview_flutter: ^4.4.2
+  offline_web_proxy: ^0.6.0
+  # Example app and CI currently use this WebView version range.
+  webview_flutter: ^4.8.0
 </code></pre>
-<h2 id="usage">Usage</h2>
-<h3 id="basic-setup">Basic Setup</h3>
-<pre class="language-dart"><code class="language-dart">import 'package:offline_web_proxy/offline_web_proxy.dart';
-// Note: Add the following dependency if using WebView
-// import 'package:webview_flutter/webview_flutter.dart';
+<p>Then run:</p>
+<pre class="language-bash"><code class="language-bash">flutter pub get
+</code></pre>
+<p>If you want the proxy to recognize bundled static files, declare them in your app's <code>pubspec.yaml</code> so they are included in <code>AssetManifest.json</code>. Files that are only placed on disk and not registered as Flutter assets are not classified as proxy-local static resources.</p>
+<h2 id="quick-start">Quick Start</h2>
+<p>The current WebView integration pattern is based on <code>WebViewController</code>, <code>WebViewWidget</code>, and the navigation helper APIs added in 0.5.0 and 0.6.0.</p>
+<pre class="language-dart"><code class="language-dart">import 'dart:async';
 
-class MyApp extends StatefulWidget {
+import 'package:flutter/material.dart';
+import 'package:offline_web_proxy/offline_web_proxy.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+class ProxyPage extends StatefulWidget {
+  const ProxyPage({super.key});
+
   @override
-  _MyAppState createState() =&gt; _MyAppState();
+  State&lt;ProxyPage&gt; createState() =&gt; _ProxyPageState();
 }
 
-class _MyAppState extends State&lt;MyApp&gt; {
-  late OfflineWebProxy proxy;
-  int? proxyPort;
-  
+class _ProxyPageState extends State&lt;ProxyPage&gt; {
+  final OfflineWebProxy _proxy = OfflineWebProxy();
+
+  WebViewController? _controller;
+  String? _currentUrl;
+
   @override
   void initState() {
     super.initState();
-    _startProxy();
+    unawaited(_initialize());
   }
-  
-  Future&lt;void&gt; _startProxy() async {
-    proxy = OfflineWebProxy();
-    
-    // Configuration object (optional)
-    final config = ProxyConfig(
-      origin: 'https://api.example.com', // Upstream server URL
-      cacheMaxSize: 200 * 1024 * 1024,   // Maximum cache size (200MB)
+
+  Future&lt;void&gt; _initialize() async {
+    final port = await _proxy.start(
+      config: const ProxyConfig(
+        origin: 'https://api.example.com',
+        startupPaths: ['/app/config', '/app/bootstrap'],
+      ),
     );
-    
-    // Start proxy server
-    proxyPort = await proxy.start(config: config);
-    print('Proxy server started: http://127.0.0.1:$proxyPort');
-    
-    setState(() {});
+
+    final homeUrl = Uri.parse('http://127.0.0.1:$port/app');
+    final controller = WebViewController();
+
+    controller
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (String url) {
+            _currentUrl = url;
+          },
+          onNavigationRequest: (NavigationRequest request) {
+            final recommendation = _proxy.recommendMainFrameNavigation(
+              targetUrl: request.url,
+              sourceUrl: _currentUrl,
+            );
+
+            switch (recommendation.action) {
+              case ProxyWebViewNavigationAction.allow:
+                return NavigationDecision.navigate;
+              case ProxyWebViewNavigationAction.loadProxyUrl:
+                unawaited(controller.loadRequest(recommendation.webViewUri!));
+                return NavigationDecision.prevent;
+              case ProxyWebViewNavigationAction.launchExternal:
+                // Hand off recommendation.externalUri to url_launcher or native code.
+                return NavigationDecision.prevent;
+              case ProxyWebViewNavigationAction.cancel:
+                return NavigationDecision.prevent;
+            }
+          },
+        ),
+      );
+
+    await controller.loadRequest(homeUrl);
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _controller = controller;
+      _currentUrl = homeUrl.toString();
+    });
   }
-  
+
   @override
   void dispose() {
-    proxy.stop();
+    unawaited(_proxy.stop());
     super.dispose();
   }
-  
+
   @override
   Widget build(BuildContext context) {
-    if (proxyPort == null) {
-      return Scaffold(
+    final controller = _controller;
+    if (controller == null) {
+      return const Scaffold(
         body: Center(child: CircularProgressIndicator()),
       );
     }
-    
+
     return Scaffold(
-      appBar: AppBar(title: Text('Offline-Ready WebView')),
-      body: WebView(
-        initialUrl: 'http://127.0.0.1:$proxyPort/app',
-        javascriptMode: JavascriptMode.unrestricted,
-      ), // Note: webview_flutter dependency required
+      appBar: AppBar(title: const Text('offline_web_proxy demo')),
+      body: WebViewWidget(controller: controller),
     );
   }
 }
 </code></pre>
-<h3 id="advanced-configuration-with-configuration-file">Advanced Configuration with Configuration File</h3>
-<p>Create <code>assets/config/config.yaml</code> for detailed configuration:</p>
-<pre class="language-yaml"><code class="language-yaml">proxy:
-  server:
-    origin: "https://api.example.com"
-    
-  cache:
-    maxSizeBytes: 209715200 # 200MB
-    ttl:
-      "text/html": 3600      # HTML: 1 hour
-      "text/css": 86400      # CSS: 24 hours
-      "image/*": 604800      # Images: 7 days
-      "default": 86400       # Others: 24 hours
-    
-    # Startup cache update
-    startup:
-      enabled: true
-      paths:
-        - "/config"
-        - "/user/profile"
-        - "/assets/app.css"
-      
-  queue:
-    drainIntervalSeconds: 3  # Queue processing interval
-    retryBackoffSeconds: [1, 2, 5, 10, 20, 30] # Retry intervals
-    
-  timeouts:
-    connect: 10   # Connection timeout
-    request: 60   # Request timeout
-</code></pre>
-<h3 id="static-resource-serving">Static Resource Serving</h3>
-<p>Place files in the app's <code>assets/static/</code> folder for local serving:</p>
-<pre class="language-dart"><code>assets/
-├── static/
-│   ├── app.css      # Served at http://127.0.0.1:port/app.css
-│   ├── app.js       # Served at http://127.0.0.1:port/app.js
-│   └── images/
-│       └── logo.png # Served at http://127.0.0.1:port/images/logo.png
-└── config/
-    └── config.yaml
-</code></pre>
-<h3 id="cache-management">Cache Management</h3>
-<pre class="language-dart"><code class="language-dart">// Clear all cache
-await proxy.clearCache();
-
-// Clear only expired cache
-await proxy.clearExpiredCache();
-
-// Clear cache for specific URL
-await proxy.clearCacheForUrl('https://api.example.com/data');
-
-// Get cache statistics
-final stats = await proxy.getCacheStats();
-print('Cache hit rate: ${stats.hitRate}%');
-
-// Get cache list
-final cacheList = await proxy.getCacheList();
-for (final entry in cacheList) {
-  print('URL: ${entry.url}, Status: ${entry.status}');
-}
-
-// Pre-warm cache
-final result = await proxy.warmupCache(
-  paths: ['/config', '/user/profile'],
-  onProgress: (completed, total) {
-    print('Progress: $completed/$total');
+<h2 id="configure-the-proxy">Configure the Proxy</h2>
+<p>Pass configuration through <code>ProxyConfig</code> when calling <code>start()</code>.</p>
+<pre class="language-dart"><code class="language-dart">const config = ProxyConfig(
+  origin: 'https://api.example.com',
+  host: '127.0.0.1',
+  port: 0,
+  cacheMaxSize: 200 * 1024 * 1024,
+  cacheTtl: {
+    'text/html': 3600,
+    'text/css': 86400,
+    'application/javascript': 86400,
+    'image/*': 604800,
+    'default': 86400,
   },
+  cacheStale: {
+    'text/html': 86400,
+    'text/css': 604800,
+    'image/*': 2592000,
+    'default': 259200,
+  },
+  connectTimeout: Duration(seconds: 10),
+  requestTimeout: Duration(seconds: 60),
+  retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
+  enableAdminApi: false,
+  logLevel: 'info',
+  startupPaths: ['/app/config'],
 );
 </code></pre>
-<h3 id="cookie-management-2">Cookie Management</h3>
-<pre class="language-dart"><code class="language-dart">// Get cookie list (values are masked)
-final cookies = await proxy.getCookies();
-for (final cookie in cookies) {
-  print('${cookie.name}: ${cookie.value} (${cookie.domain})');
-}
-
-// Get the Cookie header value for a target URL
-final cookieHeader =
-    await proxy.getCookieHeaderForUrl('https://api.example.com/app/api');
-if (cookieHeader != null) {
-  print('Cookie: $cookieHeader');
-}
-
-// Note: getCookieHeaderForUrl only allows URLs in the same origin as the configured origin
-
-// Resolve a proxy URL or same-origin upstream URL before WebView navigation
-final upstreamUrl = proxy.tryResolveUpstreamUrl(
-  'http://127.0.0.1:$proxyPort/app/map?mode=car',
-);
-
-// Resolve relative links, redirects, and new-window targets with metadata
-final navigation = proxy.resolveNavigationTarget(
+<p>Notes:</p>
+<ul>
+<li><code>origin</code> is required and must be an absolute HTTP or HTTPS URL.</li>
+<li><code>port: 0</code> lets the OS assign a free local port.</li>
+<li><code>startupPaths</code> is used by <code>warmupCache()</code> and the startup warmup flow.</li>
+<li>The supported configuration entry point is <code>ProxyConfig</code>. The package does not currently load an external YAML file automatically.</li>
+</ul>
+<h2 id="webview-navigation-helper-apis">WebView Navigation Helper APIs</h2>
+<p>Use the URL resolution APIs when your WebView needs to decide whether a target should stay inside the proxy, be rewritten to a proxy URL, or be delegated outside the app.</p>
+<pre class="language-dart"><code class="language-dart">final resolution = proxy.resolveNavigationTarget(
   targetUrl: 'tel:+81012345678',
-  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+  sourceUrl: 'http://127.0.0.1:$port/app/orders/detail',
 );
-if (navigation.disposition == ProxyNavigationDisposition.external) {
-  print('Delegate externally: ${navigation.normalizedTargetUri}');
+
+if (resolution.disposition == ProxyNavigationDisposition.external) {
+  print('Open externally: ${resolution.normalizedTargetUri}');
 }
 
-// Available in offline_web_proxy 0.6.0 and later.
-// sourceUrl is also required for scheme-relative targets such as //example.com.
-
-// Get a recommended action for a main-frame WebView delegate
-final recommendation = proxy.recommendMainFrameNavigation(
-  targetUrl: 'https://api.example.com/app/map?mode=car',
-  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+final upstreamUri = proxy.tryResolveUpstreamUrl(
+  'http://127.0.0.1:$port/app/orders/42',
 );
-switch (recommendation.action) {
-  case ProxyWebViewNavigationAction.allow:
-    break;
-  case ProxyWebViewNavigationAction.loadProxyUrl:
-    await controller.loadRequest(recommendation.webViewUri!);
-    break;
-  case ProxyWebViewNavigationAction.launchExternal:
-    print('Launch externally: ${recommendation.externalUri}');
-    break;
-  case ProxyWebViewNavigationAction.cancel:
-    print('Cancel: ${recommendation.resolution.reason}');
-    break;
-}
 
-// Restore cookies before starting the proxy
-await proxy.restoreCookies([
+final newWindowRecommendation = proxy.recommendNewWindowNavigation(
+  targetUrl: 'https://www.google.com/maps/search/?api=1&amp;query=Tokyo+Station',
+  sourceUrl: 'http://127.0.0.1:$port/app',
+);
+</code></pre>
+<p>Use cases:</p>
+<ul>
+<li><code>tryResolveUpstreamUrl(String url)</code> for converting a proxy URL or same-origin URL into the upstream URL</li>
+<li><code>resolveNavigationTarget(...)</code> for detailed metadata including reason, normalized target URI, and proxy/upstream URIs</li>
+<li><code>recommendMainFrameNavigation(...)</code> for standard WebView main-frame delegate handling</li>
+<li><code>recommendNewWindowNavigation(...)</code> for target=_blank or equivalent new-window flows</li>
+</ul>
+<p>Relative URLs and scheme-relative URLs depend on <code>sourceUrl</code>. If <code>sourceUrl</code> is missing, some targets remain unresolved by design.
+At startup, the proxy scans <code>AssetManifest.json</code> for files under <code>assets/static/</code> and exposes only those entries as proxy-local static resources. For example, <code>assets/static/app.css</code> is matched by the proxy URL <code>/app.css</code>, while an unlisted <code>/test.css</code> still resolves upstream.
+If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.</p>
+<h2 id="cookie-apis">Cookie APIs</h2>
+<p>Cookies are persisted in encrypted storage and can be restored before the proxy starts.</p>
+<pre class="language-dart"><code class="language-dart">await proxy.restoreCookies([
   CookieRestoreEntry.fromSetCookieHeader(
-    setCookieHeader: 'SESSION=abc123; Path=/; Secure; HttpOnly',
+    setCookieHeader: 'SESSION=abc123; Path=/app; Secure; HttpOnly',
     requestUrl: 'https://api.example.com/login',
   ),
 ]);
 
-// Clear all cookies
-await proxy.clearCookies();
+final cookies = await proxy.getCookies();
+final cookieHeader =
+    await proxy.getCookieHeaderForUrl('https://api.example.com/app/dashboard');
 
-// Clear cookies for specific domain
+await proxy.clearCookies();
 await proxy.clearCookies(domain: 'example.com');
 </code></pre>
-<h3 id="queue-management">Queue Management</h3>
-<pre class="language-dart"><code class="language-dart">// Check queued requests
+<p>Notes:</p>
+<ul>
+<li><code>getCookies()</code> returns masked values for inspection.</li>
+<li><code>getCookieHeaderForUrl()</code> only accepts URLs that match the configured origin.</li>
+<li>If the secure-storage encryption key is lost, previously encrypted cookies can no longer be decrypted and the user must sign in again.</li>
+</ul>
+<h2 id="cache-queue-and-monitoring-apis">Cache, Queue, and Monitoring APIs</h2>
+<pre class="language-dart"><code class="language-dart">await proxy.clearCache();
+await proxy.clearExpiredCache();
+await proxy.clearCacheForUrl('https://api.example.com/app/dashboard');
+
+final cacheEntries = await proxy.getCacheList(limit: 20);
+final cacheStats = await proxy.getCacheStats();
+final warmupResult = await proxy.warmupCache(
+  paths: ['/app/config', '/app/bootstrap'],
+  onProgress: (completed, total) {
+    print('warmup: $completed/$total');
+  },
+);
+
 final queued = await proxy.getQueuedRequests();
-print('Queued: ${queued.length} requests');
-
-// Get dropped request history
-final dropped = await proxy.getDroppedRequests();
-for (final request in dropped) {
-  print('${request.url}: ${request.dropReason}');
-}
-
-// Clear drop history
+final dropped = await proxy.getDroppedRequests(limit: 50);
 await proxy.clearDroppedRequests();
-</code></pre>
-<h3 id="real-time-monitoring">Real-time Monitoring</h3>
-<pre class="language-dart"><code class="language-dart">// Monitor proxy events
+
+final stats = await proxy.getStats();
+print('requests=${stats.totalRequests} hitRate=${stats.cacheHitRate}');
+
 proxy.events.listen((event) {
-  switch (event.type) {
-    case ProxyEventType.cacheHit:
-      print('Cache hit: ${event.url}');
-      break;
-    case ProxyEventType.requestQueued:
-      print('Queued: ${event.url}');
-      break;
-    case ProxyEventType.queueDrained:
-      print('Queue drained: ${event.url}');
-      break;
+  if (event.type == ProxyEventType.requestReceived) {
+    print(event.data['resolvedUpstreamUrl']);
+    print(event.data['navigationDisposition']);
   }
 });
-
-// Get statistics
-final stats = await proxy.getStats();
-print('Total requests: ${stats.totalRequests}');
-print('Cache hit rate: ${stats.cacheHitRate}%');
-print('Uptime: ${stats.uptime}');
 </code></pre>
-<h2 id="architecture">Architecture</h2>
-<h3 id="communication-flow">Communication Flow</h3>
-<pre class="language-dart"><code>WebView → http://127.0.0.1:&lt;port&gt; → OfflineWebProxy
-                                           ↓
-                                    [Online Check]
-                                           ↓
-                              ┌──────────────────────┐
-                              │                      │
-                         [Online]               [Offline]
-                              │                      │
-                              ↓                      ↓
-                      ┌─────────────┐        ┌─────────────┐
-                      │Forward to   │        │Serve from   │
-                      │upstream     │        │cache        │
-                      └─────────────┘        └─────────────┘
-                              │                      │
-                              ↓                      ↓
-                      ┌─────────────┐        ┌─────────────┐
-                      │Save response│        │Queue        │
-                      │to cache     │        │POST/PUT/    │
-                      └─────────────┘        │DELETE       │
-                                             └─────────────┘
-</code></pre>
-<h3 id="cache-strategy">Cache Strategy</h3>
-<ol>
-<li><strong>Fresh</strong>: Within TTL → Use directly</li>
-<li><strong>Stale</strong>: TTL expired but within stale period
-<ul>
-<li>Online: Validate with conditional requests</li>
-<li>Offline: Use stale cache</li>
-</ul>
-</li>
-<li><strong>Expired</strong>: Stale period also exceeded → Deletion target</li>
-</ol>
-<h3 id="security">Security</h3>
-<ul>
-<li><strong>Local Binding</strong>: Bind only to 127.0.0.1 to prevent external access</li>
-<li><strong>Cookie Encryption</strong>: Persist cookies with AES-256 encryption</li>
-<li><strong>Key Loss Behavior</strong>: If the secure-storage key is lost, existing encrypted cookies become unreadable and re-authentication is required</li>
-<li><strong>Path Traversal Prevention</strong>: Restrict access to <code>assets/static/</code> subdirectory</li>
-<li><strong>Log Masking</strong>: Mask sensitive information like Authorization and Cookie headers</li>
-</ul>
-<h2 id="platform-support">Platform Support</h2>
-<h3 id="ios-configuration">iOS Configuration</h3>
-<p>Add ATS exception to <code>ios/Runner/Info.plist</code>:</p>
+<p>The event stream is useful for observing cache hits, queue activity, and request-resolution metadata such as <code>resolvedUpstreamUrl</code>, <code>resolvedProxyUrl</code>, <code>navigationDisposition</code>, and <code>navigationReason</code>.</p>
+<h2 id="platform-setup">Platform Setup</h2>
+<h3 id="ios">iOS</h3>
+<p>Allow local networking in <code>ios/Runner/Info.plist</code>:</p>
 <pre class="language-xml"><code class="language-xml">&lt;key&gt;NSAppTransportSecurity&lt;/key&gt;
 &lt;dict&gt;
     &lt;key&gt;NSAllowsLocalNetworking&lt;/key&gt;
     &lt;true/&gt;
 &lt;/dict&gt;
 </code></pre>
-<h3 id="android-configuration">Android Configuration</h3>
+<h3 id="android">Android</h3>
+<p>Allow cleartext access to the local loopback proxy.</p>
 <p>Create <code>android/app/src/main/res/xml/network_security_config.xml</code>:</p>
 <pre class="language-xml"><code class="language-xml">&lt;network-security-config&gt;
     &lt;domain-config cleartextTrafficPermitted="true"&gt;
@@ -385,71 +319,36 @@ print('Uptime: ${stats.uptime}');
     &lt;/domain-config&gt;
 &lt;/network-security-config&gt;
 </code></pre>
-<p>Add to <code>android/app/src/main/AndroidManifest.xml</code>:</p>
+<p>Reference it from <code>android/app/src/main/AndroidManifest.xml</code>:</p>
 <pre class="language-xml"><code class="language-xml">&lt;application
     android:networkSecurityConfig="@xml/network_security_config"&gt;
 </code></pre>
-<h2 id="license">License</h2>
-<p>MIT License</p>
-<h2 id="dependencies">Dependencies</h2>
-<p>This plugin uses the following packages:</p>
+<h2 id="current-limitations">Current Limitations</h2>
 <ul>
-<li><a href="https://pub.dev/packages/shelf">shelf</a> - HTTP server framework</li>
-<li><a href="https://pub.dev/packages/shelf_proxy">shelf_proxy</a> - Proxy functionality</li>
-<li><a href="https://pub.dev/packages/shelf_router">shelf_router</a> - Routing</li>
-<li><a href="https://pub.dev/packages/connectivity_plus">connectivity_plus</a> - Network status monitoring</li>
-<li><a href="https://pub.dev/packages/hive">hive</a> - Database (SQLite alternative)</li>
-<li><a href="https://pub.dev/packages/path_provider">path_provider</a> - File path access</li>
+<li>One <code>OfflineWebProxy</code> instance supports one configured upstream origin.</li>
+<li><code>ProxyConfig</code> is the supported configuration path. External YAML configuration loading is not implemented.</li>
+<li>Static-resource serving from <code>assets/static/</code> is not implemented yet. Only files discovered from <code>AssetManifest.json</code> under <code>assets/static/</code> are classified as static resources, and the current server response is a 404 placeholder.</li>
+<li>If <code>AssetManifest.json</code> or its runtime equivalent cannot be loaded, the proxy continues with no indexed static resources and falls back to normal upstream resolution.</li>
 </ul>
-<h2 id="support">Support</h2>
-<p>Please report bugs and feature requests to <a href="https://github.com/meibinlab/offline_web_proxy/issues">GitHub Issues</a>.</p>
-<h2 id="developer-guide">Developer Guide</h2>
-<h3 id="debug-features">Debug Features</h3>
-<p>Debug features available during development:</p>
-<pre class="language-yaml"><code class="language-yaml">debug:
-  enableAdminApi: true        # Enable admin API
-  cacheInspection: true       # Cache content inspection
-  detailedHeaders: true       # Detailed header information
-</code></pre>
-<p><strong>Note</strong>: Always set to <code>false</code> in production environments.</p>
-<h3 id="log-level">Log Level</h3>
-<pre class="language-yaml"><code class="language-yaml">logging:
-  level: "debug"                    # debug/info/warn/error
-  maskSensitiveHeaders: true        # Mask sensitive information
-</code></pre>
-<h3 id="performance-monitoring">Performance Monitoring</h3>
-<pre class="language-dart"><code class="language-dart">// Periodic statistics collection
-Timer.periodic(Duration(minutes: 5), (timer) async {
-  final stats = await proxy.getStats();
-  print('Cache hit rate: ${stats.cacheHitRate}%');
-  print('Queue length: ${stats.queueLength}');
-});
-</code></pre>
-<h3 id="git-hooks">Git Hooks</h3>
-<p>Use the Git native pre-commit hook to catch formatting and analyzer issues before creating a commit.</p>
-<p>Set it up after the Flutter SDK is available and <code>flutter pub get</code> has completed.</p>
-<p>Set it up once after cloning:</p>
+<h2 id="example-and-reference">Example and Reference</h2>
+<ul>
+<li>See <code>example/</code> for a working WebView integration sample focused on navigation delegates.</li>
+<li>API reference is published under <code>doc/api/</code> in this repository.</li>
+<li>Release notes are tracked in <code>CHANGELOG.md</code>.</li>
+</ul>
+<h2 id="developer-setup">Developer Setup</h2>
+<p>This repository includes a native Git pre-commit hook.</p>
 <pre class="language-bash"><code class="language-bash">git config core.hooksPath .githooks
 </code></pre>
-<p>If needed on macOS or Linux, grant execute permission:</p>
-<pre class="language-bash"><code class="language-bash">chmod +x .githooks/pre-commit
-</code></pre>
-<p>The pre-commit hook performs the following steps:</p>
+<p>The hook runs:</p>
 <ul>
 <li><code>dart fix --apply</code></li>
 <li><code>dart format .</code></li>
-<li>Stop the commit if any Dart file was auto-fixed or reformatted, so you can review and stage the result</li>
 <li><code>dart analyze --fatal-warnings</code></li>
 </ul>
-<p>If the commit is blocked, review the diff, run <code>git add</code> for the updated files, and fix analyzer warnings before trying again.</p>
-<h3 id="vs-code-workspace-settings">VS Code Workspace Settings</h3>
-<p>This repository includes workspace settings for Dart files in VS Code.</p>
-<ul>
-<li>Format on save is enabled for Dart files</li>
-<li><code>source.fixAll</code> runs on explicit save for fixable warnings</li>
-<li><code>source.organizeImports</code> runs on explicit save</li>
-</ul>
-<p>If you use VS Code with the Dart extension, many trivial lint issues will be fixed before commit.</p>
+<p>If a Dart file is reformatted or auto-fixed, the hook stops the commit so you can review and stage the changes.</p>
+<h2 id="license">License</h2>
+<p>MIT License</p>
 </section>
 
 

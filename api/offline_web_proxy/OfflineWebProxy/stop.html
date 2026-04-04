@@ -106,6 +106,7 @@
     &#47;&#47; HTTPクライアントを閉じる
     _httpClient?.close(force: true);
     _httpClient = null;
+    _staticResourceAssetMap.clear();
 
     _isRunning = false;
     _server = null;

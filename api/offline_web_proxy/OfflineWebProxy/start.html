@@ -107,6 +107,9 @@
     &#47;&#47; ストレージを初期化
     await _initializeStorage();
 
+    &#47;&#47; 静的リソース一覧を初期化
+    await _initializeStaticResourceIndex();
+
     &#47;&#47; 接続状態の監視を開始
     _startConnectivityMonitoring();
 
