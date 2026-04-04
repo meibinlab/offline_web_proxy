@@ -5,350 +5,283 @@
 [![ライセンス](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![カバレッジ](https://codecov.io/gh/meibinlab/offline_web_proxy/branch/main/graph/badge.svg)](https://codecov.io/gh/meibinlab/offline_web_proxy)
 
-Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。既存のWebシステムをアプリ化する際に、オンライン／オフラインを意識せずに動作させることを目的とします。
+offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシです。既存の Web アプリをモバイルアプリ内で扱う際に、接続が不安定でも動作を継続しやすくすることを目的にしています。
 
-## 特徴
+127.0.0.1 上で動作し、オンライン時は設定済みの上流 origin へ転送し、オフライン時はキャッシュを返し、更新系リクエストはキューに保持します。加えて、WebView の遷移判定、Cookie 再利用、統計取得、イベント監視の API を提供します。
 
-### 主要機能
-- WebViewからのHTTPリクエストをローカルプロキシサーバで中継
-- オンライン時は上流サーバへ転送、オフライン時はキャッシュからレスポンス
-- 更新系リクエスト（POST/PUT/DELETE）のオフライン時キューイング
-- オンライン復帰時の自動送信によるシームレスなオフライン対応
-- 静的リソースのローカル配信機能
+## 主な機能
 
-### オフライン対応
-- RFC準拠のキャッシュ制御とオフライン対応の両立
-- Cache-Control、Expiresヘッダに基づくインテリジェントなキャッシュ管理
-- オフライン時のno-cache無視とstaleキャッシュ利用
-- べき等性保証による重複実行防止
+- Flutter WebView 向けローカルプロキシサーバ
+- RFC を踏まえたキャッシュ制御とオフライン時の stale 利用
+- POST、PUT、DELETE のオフラインキューイング
+- AES-256 による Cookie 永続化と復元 API
+- same-origin、外部委譲、新規 window 判定のための WebView 補助 API
+- 統計情報とイベントストリームによる監視
 
-### キューイングシステム
-- FIFO（先入先出）によるリクエスト順序保証
-- 指数バックオフによる自動再試行
-- 永続化による再起動後の継続処理
+## 動作要件
 
-### Cookie管理
-- RFC準拠のCookie評価・管理
-- AES-256による暗号化永続化
-- 暗号化鍵は secure storage に保存し、既存の平文 Cookie ストレージがある場合は 1 回だけ移行
-- secure storage 上の鍵が失われた場合、既存の暗号化 Cookie は復号できず再ログインが必要
-- メモリキャッシュによる高速アクセス
+- Flutter 3.22.0 以降
+- Dart 3.4.0 以降
+- 1 つの proxy インスタンスにつき 1 つの上流 origin
 
 ## インストール
 
-`pubspec.yaml`に以下を追加してください：
+アプリ側の `pubspec.yaml` に追加します。
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.4.0
-  # WebViewを使用する場合は以下も追加
-  # webview_flutter: ^4.4.2
+  offline_web_proxy: ^0.6.0
+  # example アプリと CI ではこの WebView 系を使用しています。
+  webview_flutter: ^4.8.0
 ```
 
-## 使用方法
+その後に以下を実行します。
 
-### 基本セットアップ
+```bash
+flutter pub get
+```
+
+## クイックスタート
+
+現在の WebView 連携は、`WebViewController`、`WebViewWidget`、および 0.5.0 / 0.6.0 で追加した遷移補助 API を前提にするのが扱いやすいです。
 
 ```dart
-import 'package:offline_web_proxy/offline_web_proxy.dart';
-// 注意: WebViewを使用する場合は以下の依存関係を追加してください
-// import 'package:webview_flutter/webview_flutter.dart';
+import 'dart:async';
 
-class MyApp extends StatefulWidget {
+import 'package:flutter/material.dart';
+import 'package:offline_web_proxy/offline_web_proxy.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+class ProxyPage extends StatefulWidget {
+  const ProxyPage({super.key});
+
   @override
-  _MyAppState createState() => _MyAppState();
+  State<ProxyPage> createState() => _ProxyPageState();
 }
 
-class _MyAppState extends State<MyApp> {
-  late OfflineWebProxy proxy;
-  int? proxyPort;
-  
+class _ProxyPageState extends State<ProxyPage> {
+  final OfflineWebProxy _proxy = OfflineWebProxy();
+
+  WebViewController? _controller;
+  String? _currentUrl;
+
   @override
   void initState() {
     super.initState();
-    _startProxy();
+    unawaited(_initialize());
   }
-  
-  Future<void> _startProxy() async {
-    proxy = OfflineWebProxy();
-    
-    // 設定オブジェクト（オプション）
-    final config = ProxyConfig(
-      origin: 'https://api.example.com', // 上流サーバのURL
-      cacheMaxSize: 200 * 1024 * 1024,   // キャッシュ最大容量（200MB）
+
+  Future<void> _initialize() async {
+    final port = await _proxy.start(
+      config: const ProxyConfig(
+        origin: 'https://api.example.com',
+        startupPaths: ['/app/config', '/app/bootstrap'],
+      ),
     );
-    
-    // プロキシサーバ開始
-    proxyPort = await proxy.start(config: config);
-    print('プロキシサーバが起動しました：http://127.0.0.1:$proxyPort');
-    
-    setState(() {});
+
+    final homeUrl = Uri.parse('http://127.0.0.1:$port/app');
+    final controller = WebViewController();
+
+    controller
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (String url) {
+            _currentUrl = url;
+          },
+          onNavigationRequest: (NavigationRequest request) {
+            final recommendation = _proxy.recommendMainFrameNavigation(
+              targetUrl: request.url,
+              sourceUrl: _currentUrl,
+            );
+
+            switch (recommendation.action) {
+              case ProxyWebViewNavigationAction.allow:
+                return NavigationDecision.navigate;
+              case ProxyWebViewNavigationAction.loadProxyUrl:
+                unawaited(controller.loadRequest(recommendation.webViewUri!));
+                return NavigationDecision.prevent;
+              case ProxyWebViewNavigationAction.launchExternal:
+                // recommendation.externalUri を url_launcher などへ渡します。
+                return NavigationDecision.prevent;
+              case ProxyWebViewNavigationAction.cancel:
+                return NavigationDecision.prevent;
+            }
+          },
+        ),
+      );
+
+    await controller.loadRequest(homeUrl);
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _controller = controller;
+      _currentUrl = homeUrl.toString();
+    });
   }
-  
+
   @override
   void dispose() {
-    proxy.stop();
+    unawaited(_proxy.stop());
     super.dispose();
   }
-  
+
   @override
   Widget build(BuildContext context) {
-    if (proxyPort == null) {
-      return Scaffold(
+    final controller = _controller;
+    if (controller == null) {
+      return const Scaffold(
         body: Center(child: CircularProgressIndicator()),
       );
     }
-    
+
     return Scaffold(
-      appBar: AppBar(title: Text('オフライン対応WebView')),
-      body: WebView(
-        initialUrl: 'http://127.0.0.1:$proxyPort/app',
-        javascriptMode: JavascriptMode.unrestricted,
-      ), // 注意: webview_flutter依存関係が必要です
+      appBar: AppBar(title: const Text('offline_web_proxy demo')),
+      body: WebViewWidget(controller: controller),
     );
   }
 }
 ```
 
-### 設定ファイルによる詳細設定
+## ProxyConfig による設定
 
-`assets/config/config.yaml` を作成して詳細設定が可能です：
-
-```yaml
-proxy:
-  server:
-    origin: "https://api.example.com"
-    
-  cache:
-    maxSizeBytes: 209715200 # 200MB
-    ttl:
-      "text/html": 3600      # HTML: 1時間
-      "text/css": 86400      # CSS: 24時間
-      "image/*": 604800      # 画像: 7日間
-      "default": 86400       # その他: 24時間
-    
-    # 起動時キャッシュ更新
-    startup:
-      enabled: true
-      paths:
-        - "/config"
-        - "/user/profile"
-        - "/assets/app.css"
-      
-  queue:
-    drainIntervalSeconds: 3  # キュー処理間隔
-    retryBackoffSeconds: [1, 2, 5, 10, 20, 30] # 再試行間隔
-    
-  timeouts:
-    connect: 10   # 接続タイムアウト
-    request: 60   # リクエストタイムアウト
-```
-
-### 静的リソースの配信
-
-アプリの `assets/static/` フォルダにファイルを配置することで、ローカル配信が可能：
-
-```
-assets/
-├── static/
-│   ├── app.css      # http://127.0.0.1:port/app.css で配信
-│   ├── app.js       # http://127.0.0.1:port/app.js で配信
-│   └── images/
-│       └── logo.png # http://127.0.0.1:port/images/logo.png で配信
-└── config/
-    └── config.yaml
-```
-
-### キャッシュ管理
+設定は `start()` に渡す `ProxyConfig` で行います。
 
 ```dart
-// 全キャッシュクリア
-await proxy.clearCache();
-
-// 期限切れキャッシュのみクリア
-await proxy.clearExpiredCache();
-
-// 特定URLのキャッシュクリア
-await proxy.clearCacheForUrl('https://api.example.com/data');
-
-// キャッシュ統計取得
-final stats = await proxy.getCacheStats();
-print('キャッシュヒット率: ${stats.hitRate}%');
-
-// キャッシュ一覧取得
-final cacheList = await proxy.getCacheList();
-for (final entry in cacheList) {
-  print('URL: ${entry.url}, ステータス: ${entry.status}');
-}
-
-// キャッシュの事前更新
-final result = await proxy.warmupCache(
-  paths: ['/config', '/user/profile'],
-  onProgress: (completed, total) {
-    print('進捗: $completed/$total');
+const config = ProxyConfig(
+  origin: 'https://api.example.com',
+  host: '127.0.0.1',
+  port: 0,
+  cacheMaxSize: 200 * 1024 * 1024,
+  cacheTtl: {
+    'text/html': 3600,
+    'text/css': 86400,
+    'application/javascript': 86400,
+    'image/*': 604800,
+    'default': 86400,
   },
+  cacheStale: {
+    'text/html': 86400,
+    'text/css': 604800,
+    'image/*': 2592000,
+    'default': 259200,
+  },
+  connectTimeout: Duration(seconds: 10),
+  requestTimeout: Duration(seconds: 60),
+  retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
+  enableAdminApi: false,
+  logLevel: 'info',
+  startupPaths: ['/app/config'],
 );
 ```
 
-### Cookie管理
+補足:
+
+- `origin` は必須で、絶対 HTTP URL または HTTPS URL である必要があります。
+- `port: 0` を指定すると、OS が空きポートを自動割り当てします。
+- `startupPaths` は `warmupCache()` と起動時の事前キャッシュ対象に使われます。
+- 現在サポートされる設定入口は `ProxyConfig` です。外部 YAML の自動読込は実装されていません。
+
+## WebView 遷移補助 API
+
+WebView 側で「proxy 内に残すか」「proxy URL に戻すか」「外部へ委譲するか」を判断したい場合は URL 解決 API を使います。
 
 ```dart
-// Cookie一覧取得（値はマスクされます）
-final cookies = await proxy.getCookies();
-for (final cookie in cookies) {
-  print('${cookie.name}: ${cookie.value} (${cookie.domain})');
-}
-
-// 対象URLへ送るCookieヘッダ値を取得
-final cookieHeader =
-    await proxy.getCookieHeaderForUrl('https://api.example.com/app/api');
-if (cookieHeader != null) {
-  print('Cookie: $cookieHeader');
-}
-
-// 注意: getCookieHeaderForUrl は start() で設定した origin と同一 origin の URL のみ取得可能
-
-// WebView 遷移前に proxy URL または同一 origin の URL を upstream URL に解決
-final upstreamUrl = proxy.tryResolveUpstreamUrl(
-  'http://127.0.0.1:$proxyPort/app/map?mode=car',
-);
-
-// 相対リンク、redirect、新規 window の target をメタ情報付きで解決
-final navigation = proxy.resolveNavigationTarget(
+final resolution = proxy.resolveNavigationTarget(
   targetUrl: 'tel:+81012345678',
-  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+  sourceUrl: 'http://127.0.0.1:$port/app/orders/detail',
 );
-if (navigation.disposition == ProxyNavigationDisposition.external) {
-  print('外部委譲: ${navigation.normalizedTargetUri}');
+
+if (resolution.disposition == ProxyNavigationDisposition.external) {
+  print('外部起動候補: ${resolution.normalizedTargetUri}');
 }
 
-// offline_web_proxy 0.6.0 以降で利用できます。
-// //example.com のような scheme-relative URL でも sourceUrl が必要です。
-
-// WebView の main frame delegate 向け推奨アクションを取得
-final recommendation = proxy.recommendMainFrameNavigation(
-  targetUrl: 'https://api.example.com/app/map?mode=car',
-  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+final upstreamUri = proxy.tryResolveUpstreamUrl(
+  'http://127.0.0.1:$port/app/orders/42',
 );
-switch (recommendation.action) {
-  case ProxyWebViewNavigationAction.allow:
-    break;
-  case ProxyWebViewNavigationAction.loadProxyUrl:
-    await controller.loadRequest(recommendation.webViewUri!);
-    break;
-  case ProxyWebViewNavigationAction.launchExternal:
-    print('外部起動: ${recommendation.externalUri}');
-    break;
-  case ProxyWebViewNavigationAction.cancel:
-    print('キャンセル: ${recommendation.resolution.reason}');
-    break;
-}
 
-// proxy 起動前に Cookie を復元
+final newWindowRecommendation = proxy.recommendNewWindowNavigation(
+  targetUrl: 'https://www.google.com/maps/search/?api=1&query=Tokyo+Station',
+  sourceUrl: 'http://127.0.0.1:$port/app',
+);
+```
+
+主な使い分け:
+
+- `tryResolveUpstreamUrl(String url)` は proxy URL または同一 origin URL を上流 URL に戻したいときに使います。
+- `resolveNavigationTarget(...)` は理由、正規化後 URL、proxy/upstream URL を含む詳細判定向けです。
+- `recommendMainFrameNavigation(...)` は通常の WebView main frame delegate 向けです。
+- `recommendNewWindowNavigation(...)` は target=_blank 相当の新規 window 判定向けです。
+
+相対 URL や scheme-relative URL の解決には `sourceUrl` が必要です。`sourceUrl` が無い場合、意図的に unresolved になるケースがあります。
+
+## Cookie API
+
+Cookie は暗号化して保存され、proxy 起動前に復元することもできます。
+
+```dart
 await proxy.restoreCookies([
   CookieRestoreEntry.fromSetCookieHeader(
-    setCookieHeader: 'SESSION=abc123; Path=/; Secure; HttpOnly',
+    setCookieHeader: 'SESSION=abc123; Path=/app; Secure; HttpOnly',
     requestUrl: 'https://api.example.com/login',
   ),
 ]);
 
-// 全Cookieクリア
-await proxy.clearCookies();
+final cookies = await proxy.getCookies();
+final cookieHeader =
+    await proxy.getCookieHeaderForUrl('https://api.example.com/app/dashboard');
 
-// 特定ドメインのCookieクリア
+await proxy.clearCookies();
 await proxy.clearCookies(domain: 'example.com');
 ```
 
-### キュー管理
+補足:
+
+- `getCookies()` の値は確認用にマスクされます。
+- `getCookieHeaderForUrl()` は設定済み origin と同一 origin の URL のみ受け付けます。
+- secure storage 上の暗号化鍵を失うと、既存 Cookie は復号できず再ログインが必要になります。
+
+## キャッシュ、キュー、監視 API
 
 ```dart
-// キューに保存されたリクエスト確認
+await proxy.clearCache();
+await proxy.clearExpiredCache();
+await proxy.clearCacheForUrl('https://api.example.com/app/dashboard');
+
+final cacheEntries = await proxy.getCacheList(limit: 20);
+final cacheStats = await proxy.getCacheStats();
+final warmupResult = await proxy.warmupCache(
+  paths: ['/app/config', '/app/bootstrap'],
+  onProgress: (completed, total) {
+    print('warmup: $completed/$total');
+  },
+);
+
 final queued = await proxy.getQueuedRequests();
-print('キューイング中: ${queued.length}件');
-
-// ドロップされたリクエスト履歴
-final dropped = await proxy.getDroppedRequests();
-for (final request in dropped) {
-  print('${request.url}: ${request.dropReason}');
-}
-
-// ドロップ履歴クリア
+final dropped = await proxy.getDroppedRequests(limit: 50);
 await proxy.clearDroppedRequests();
-```
 
-### リアルタイム監視
+final stats = await proxy.getStats();
+print('requests=${stats.totalRequests} hitRate=${stats.cacheHitRate}');
 
-```dart
-// プロキシイベントの監視
 proxy.events.listen((event) {
-  switch (event.type) {
-    case ProxyEventType.cacheHit:
-      print('キャッシュヒット: ${event.url}');
-      break;
-    case ProxyEventType.requestQueued:
-      print('キューに追加: ${event.url}');
-      break;
-    case ProxyEventType.queueDrained:
-      print('キュー送信完了: ${event.url}');
-      break;
+  if (event.type == ProxyEventType.requestReceived) {
+    print(event.data['resolvedUpstreamUrl']);
+    print(event.data['navigationDisposition']);
   }
 });
-
-// 統計情報取得
-final stats = await proxy.getStats();
-print('総リクエスト数: ${stats.totalRequests}');
-print('キャッシュヒット率: ${stats.cacheHitRate}%');
-print('アップタイム: ${stats.uptime}');
 ```
 
-## アーキテクチャ
+イベントストリームでは、キャッシュヒット、キュー処理、URL 解決メタ情報などを監視できます。`requestReceived` では `resolvedUpstreamUrl`、`resolvedProxyUrl`、`navigationDisposition`、`navigationReason` などを参照できます。
 
-### 通信フロー
+## プラットフォーム設定
 
-```
-WebView → http://127.0.0.1:<port> → OfflineWebProxy
-                                           ↓
-                                    [オンライン判定]
-                                           ↓
-                              ┌──────────────────────┐
-                              │                      │
-                        [オンライン]              [オフライン]
-                              │                      │
-                              ↓                      ↓
-                      ┌─────────────┐        ┌─────────────┐
-                      │上流サーバへ │        │キャッシュ   │
-                      │プロキシ転送 │        │から配信     │
-                      └─────────────┘        └─────────────┘
-                              │                      │
-                              ↓                      ↓
-                      ┌─────────────┐        ┌─────────────┐
-                      │レスポンスを │        │POST/PUT/    │
-                      │キャッシュ保存│        │DELETEは     │
-                      └─────────────┘        │キューに保存 │
-                                             └─────────────┘
-```
+### iOS
 
-### キャッシュ戦略
-
-1. **Fresh（新鮮）**: TTL期限内 → そのまま使用
-2. **Stale（期限切れ）**: TTL期限切れだがStale期間内
-   - オンライン時：条件付きリクエストで検証
-   - オフライン時：Staleキャッシュを使用
-3. **Expired（完全期限切れ）**: Stale期間も超過 → 削除対象
-
-### セキュリティ
-
-- **ローカルバインド**: 127.0.0.1のみにバインドし外部アクセスを防止
-- **Cookie暗号化**: AES-256による暗号化でCookieを永続化
-- **鍵喪失時の挙動**: secure storage 上の鍵が失われた場合、既存の暗号化 Cookie は復号できず再ログイン相当となる
-- **パストラバーサル防止**: `assets/static/`配下への制限を徹底
-- **ログマスキング**: Authorization、Cookie等の機密情報をマスク
-
-## プラットフォーム対応
-
-### iOS設定
-
-`ios/Runner/Info.plist`にATS例外を追加：
+`ios/Runner/Info.plist` でローカルネットワークを許可します。
 
 ```xml
 <key>NSAppTransportSecurity</key>
@@ -358,9 +291,11 @@ WebView → http://127.0.0.1:<port> → OfflineWebProxy
 </dict>
 ```
 
-### Android設定
+### Android
 
-`android/app/src/main/res/xml/network_security_config.xml`を作成：
+ローカル loopback proxy への cleartext 通信を許可します。
+
+`android/app/src/main/res/xml/network_security_config.xml` を作成します。
 
 ```xml
 <network-security-config>
@@ -370,99 +305,41 @@ WebView → http://127.0.0.1:<port> → OfflineWebProxy
 </network-security-config>
 ```
 
-`android/app/src/main/AndroidManifest.xml`に追加：
+`android/app/src/main/AndroidManifest.xml` から参照します。
 
 ```xml
 <application
     android:networkSecurityConfig="@xml/network_security_config">
 ```
 
-## ライセンス
+## 現在の制約
 
-MIT License
+- 1 つの `OfflineWebProxy` インスタンスが扱える上流 origin は 1 つです。
+- サポートされる設定経路は `ProxyConfig` です。外部 YAML の自動読込は未実装です。
+- `assets/static/` からの静的リソース実配信は未実装です。静的リソースらしいパスは遷移判定で分類されますが、現在のサーバ応答は 404 プレースホルダです。
 
-## 依存関係
+## サンプルと参照先
 
-このプラグインは以下のパッケージを使用しています：
+- `example/` に WebView delegate 連携のサンプルがあります。
+- API リファレンスはリポジトリ内の `doc/api/` にあります。
+- リリースノートは `CHANGELOG.md` にあります。
 
-- [shelf](https://pub.dev/packages/shelf) - HTTP サーバフレームワーク
-- [shelf_proxy](https://pub.dev/packages/shelf_proxy) - プロキシ機能
-- [shelf_router](https://pub.dev/packages/shelf_router) - ルーティング
-- [connectivity_plus](https://pub.dev/packages/connectivity_plus) - ネットワーク状態監視
-- [hive](https://pub.dev/packages/hive) - データベース（SQLite代替）
-- [path_provider](https://pub.dev/packages/path_provider) - ファイルパス取得
+## 開発者向けセットアップ
 
-## サポート
-
-バグ報告や機能要求は [GitHub Issues](https://github.com/meibinlab/offline_web_proxy/issues) までお願いします。
-
-## 開発者向け
-
-### デバッグ機能
-
-開発時に利用可能なデバッグ機能：
-
-```yaml
-debug:
-  enableAdminApi: true        # 管理API有効化
-  cacheInspection: true       # キャッシュ内容確認
-  detailedHeaders: true       # 詳細ヘッダ情報
-```
-
-**注意**: 本番環境では必ず`false`に設定してください。
-
-### ログレベル
-
-```yaml
-logging:
-  level: "debug"                    # debug/info/warn/error
-  maskSensitiveHeaders: true        # 機密情報マスク
-```
-
-### パフォーマンス監視
-
-```dart
-// 統計情報の定期取得
-Timer.periodic(Duration(minutes: 5), (timer) async {
-  final stats = await proxy.getStats();
-  print('キャッシュヒット率: ${stats.cacheHitRate}%');
-  print('キュー長: ${stats.queueLength}');
-});
-```
-
-### Git Hooks
-
-コミット前に整形崩れや analyzer の warning を検知するため、Git ネイティブの pre-commit hook を利用できます。
-
-Flutter SDK を利用可能にし、`flutter pub get` 実行後に設定してください。
-
-clone 後に 1 回だけ以下を実行してください。
+このリポジトリには Git ネイティブの pre-commit hook が含まれています。
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-macOS または Linux では、必要に応じて実行権限を付与してください。
-
-```bash
-chmod +x .githooks/pre-commit
-```
-
-pre-commit hook では次を実行します。
+hook では以下を実行します。
 
 - `dart fix --apply`
 - `dart format .`
-- Dart ファイルが自動修正または再整形された場合は、差分確認と再 stage のためにコミットを停止
 - `dart analyze --fatal-warnings`
 
-コミットが止まった場合は、差分を確認して `git add` で再 stage し、analyzer の warning を解消してから再実行してください。
+Dart ファイルが自動修正または再整形された場合は、内容確認と再 stage のためにコミットを停止します。
 
-### VS Code ワークスペース設定
+## ライセンス
 
-このリポジトリには、VS Code で Dart ファイルを扱うためのワークスペース設定を含めています。
-
-- Dart ファイルでは保存時整形を有効化
-- `source.fixAll` を明示的な保存時に実行
-- `source.organizeImports` を明示的な保存時に実行
-
-VS Code と Dart 拡張を使っていれば、軽微な lint はコミット前に自動で減らせます。
+MIT License
