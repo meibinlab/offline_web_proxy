@@ -1,11 +1,12 @@
 # example
 
-offline_web_proxy の URL 解決 API を確認するためのサンプルアプリです。
+offline_web_proxy の WebView delegate 向け推奨アクション API を確認するためのサンプルアプリです。
 
 ## できること
 
 - ローカル upstream と proxy をその場で起動し、WebView で proxy URL を表示
-- NavigationDelegate で resolveNavigationTarget を呼び、内部遷移と外部委譲候補を判定
+- NavigationDelegate で recommendMainFrameNavigation を呼び、内部遷移と外部委譲候補を判定
+- 擬似 new window 操作で recommendNewWindowNavigation を呼び、target=_blank 相当の推奨動作を確認
 - 同一 origin の絶対 URL を proxy URL へ戻す流れを確認
 - 電話リンクや地図リンクを遷移前にキャンセルする例を確認
 - requestReceived イベントの data に含まれる resolvedUpstreamUrl などを画面ログで確認

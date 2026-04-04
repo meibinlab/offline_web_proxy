@@ -764,6 +764,273 @@ void main() {
       expect(resolution.usedSourceUrl, isTrue);
     });
 
+    /// main frame の proxy URL は allow であることのテスト
+    test('should recommend allow for main frame proxy url', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final recommendation = proxy.recommendMainFrameNavigation(
+        targetUrl: 'http://127.0.0.1:$proxyPort/app/dashboard',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.allow),
+      );
+      expect(recommendation.shouldPreventDefault, isFalse);
+      expect(recommendation.webViewUri, isNull);
+      expect(recommendation.externalUri, isNull);
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.proxyUrl),
+      );
+    });
+
+    /// main frame の静的リソースは allow であることのテスト
+    test('should recommend allow for main frame proxy static resource',
+        () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final recommendation = proxy.recommendMainFrameNavigation(
+        targetUrl: 'http://127.0.0.1:$proxyPort/app.js',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.allow),
+      );
+      expect(recommendation.shouldPreventDefault, isFalse);
+      expect(recommendation.webViewUri, isNull);
+      expect(recommendation.externalUri, isNull);
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.staticResource),
+      );
+      expect(recommendation.resolution.isStaticResource, isTrue);
+    });
+
+    /// main frame の upstream URL は proxy へ載せ替えることのテスト
+    test('should recommend proxy load for main frame upstream url', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com/base'),
+      );
+
+      final recommendation = proxy.recommendMainFrameNavigation(
+        targetUrl: 'https://example.com/base/app/map?mode=car',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.loadProxyUrl),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(
+        recommendation.webViewUri,
+        equals(Uri.parse('http://127.0.0.1:$proxyPort/app/map?mode=car')),
+      );
+      expect(recommendation.externalUri, isNull);
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.configuredOriginUrl),
+      );
+    });
+
+    /// new window の proxy URL は loadProxyUrl であることのテスト
+    test('should recommend proxy load for new window proxy url', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final recommendation = proxy.recommendNewWindowNavigation(
+        targetUrl: 'http://127.0.0.1:$proxyPort/app/dashboard',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.loadProxyUrl),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(
+        recommendation.webViewUri,
+        equals(Uri.parse('http://127.0.0.1:$proxyPort/app/dashboard')),
+      );
+      expect(recommendation.externalUri, isNull);
+    });
+
+    /// new window の静的リソースは loadProxyUrl であることのテスト
+    test('should recommend proxy load for new window proxy static resource',
+        () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final recommendation = proxy.recommendNewWindowNavigation(
+        targetUrl: 'http://127.0.0.1:$proxyPort/app.js',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.loadProxyUrl),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(
+        recommendation.webViewUri,
+        equals(Uri.parse('http://127.0.0.1:$proxyPort/app.js')),
+      );
+      expect(recommendation.externalUri, isNull);
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.staticResource),
+      );
+      expect(recommendation.resolution.isStaticResource, isTrue);
+    });
+
+    /// new window の upstream URL も proxy へ載せ替えることのテスト
+    test('should recommend proxy load for new window upstream url', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com/base'),
+      );
+
+      final recommendation = proxy.recommendNewWindowNavigation(
+        targetUrl: 'https://example.com/base/app/map?mode=car',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.loadProxyUrl),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(
+        recommendation.webViewUri,
+        equals(Uri.parse('http://127.0.0.1:$proxyPort/app/map?mode=car')),
+      );
+    });
+
+    /// 外部 URL は外部委譲を推奨することのテスト
+    test('should recommend external launch for external url', () {
+      final recommendation = proxy.recommendMainFrameNavigation(
+        targetUrl: 'tel:+81012345678',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.launchExternal),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(recommendation.webViewUri, isNull);
+      expect(
+        recommendation.externalUri,
+        equals(Uri.parse('tel:+81012345678')),
+      );
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.nonHttpScheme),
+      );
+    });
+
+    /// new window の外部 URL は外部委譲を推奨することのテスト
+    test('should recommend external launch for new window external url', () {
+      final recommendation = proxy.recommendNewWindowNavigation(
+        targetUrl: 'tel:+81012345678',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.launchExternal),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(
+        recommendation.externalUri,
+        equals(Uri.parse('tel:+81012345678')),
+      );
+    });
+
+    /// 解決不能な URL は cancel を推奨することのテスト
+    test('should recommend cancel for unresolved upstream outside proxy scope',
+        () async {
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com/base'),
+      );
+
+      final recommendation = proxy.recommendMainFrameNavigation(
+        targetUrl: 'https://example.com/logout',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.cancel),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(recommendation.webViewUri, isNull);
+      expect(recommendation.externalUri, isNull);
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.outsideProxyScope),
+      );
+    });
+
+    /// 不正な URL は main frame で cancel を推奨することのテスト
+    test('should recommend cancel for invalid main frame target', () {
+      final recommendation = proxy.recommendMainFrameNavigation(
+        targetUrl: '   ',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.cancel),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(recommendation.webViewUri, isNull);
+      expect(recommendation.externalUri, isNull);
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.invalidUrl),
+      );
+    });
+
+    /// new window の解決不能 URL は cancel を推奨することのテスト
+    test('should recommend cancel for new window unresolved target', () async {
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com/base'),
+      );
+
+      final recommendation = proxy.recommendNewWindowNavigation(
+        targetUrl: '../map',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.cancel),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.relativeUrlWithoutSource),
+      );
+    });
+
+    /// 不正な URL は new window で cancel を推奨することのテスト
+    test('should recommend cancel for invalid new window target', () {
+      final recommendation = proxy.recommendNewWindowNavigation(
+        targetUrl: '',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.cancel),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(recommendation.webViewUri, isNull);
+      expect(recommendation.externalUri, isNull);
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.invalidUrl),
+      );
+    });
+
     /// 上流 origin の base path を含めて実リクエストへ反映することのテスト
     test('should forward requests using the same upstream resolver rules',
         () async {
@@ -1047,6 +1314,38 @@ void main() {
         equals(Uri.parse('https://example.com/app')),
       );
       expect(resolution.usedSourceUrl, isTrue);
+    });
+
+    /// ProxyWebViewNavigationRecommendation のテスト
+    test('should create ProxyWebViewNavigationRecommendation correctly', () {
+      final resolution = ProxyNavigationResolution(
+        inputUrl: 'http://127.0.0.1:8080/app',
+        sourceUri: Uri.parse('http://127.0.0.1:8080/home'),
+        normalizedTargetUri: Uri.parse('http://127.0.0.1:8080/app'),
+        upstreamUri: Uri.parse('https://example.com/app'),
+        proxyUri: Uri.parse('http://127.0.0.1:8080/app'),
+        disposition: ProxyNavigationDisposition.inWebView,
+        reason: ProxyNavigationReason.proxyUrl,
+        usedSourceUrl: true,
+        usedLoopbackAlias: false,
+        isStaticResource: false,
+      );
+      final recommendation = ProxyWebViewNavigationRecommendation.loadProxyUrl(
+        resolution: resolution,
+        webViewUri: Uri.parse('http://127.0.0.1:8080/app'),
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.loadProxyUrl),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(
+        recommendation.webViewUri,
+        equals(Uri.parse('http://127.0.0.1:8080/app')),
+      );
+      expect(recommendation.externalUri, isNull);
+      expect(recommendation.resolution, same(resolution));
     });
 
     /// ProxyStatsのテスト

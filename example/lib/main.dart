@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-/// offline_web_proxy の URL 解決 API を体験するサンプルアプリです。
+/// offline_web_proxy の WebView delegate API を体験するサンプルアプリです。
 void main() {
   runApp(const ProxyExampleApp());
 }
@@ -31,7 +31,7 @@ class ProxyExampleApp extends StatelessWidget {
   }
 }
 
-/// URL 解決 API と WebView 連携を表示するホーム画面です。
+/// WebView delegate API と連携例を表示するホーム画面です。
 class ProxyExampleHomePage extends StatefulWidget {
   /// ホーム画面を生成します。
   const ProxyExampleHomePage({super.key});
@@ -165,32 +165,33 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
   }
 
   NavigationDecision _handleNavigationRequest(NavigationRequest request) {
-    final resolution = _proxy.resolveNavigationTarget(
+    final recommendation = _proxy.recommendMainFrameNavigation(
       targetUrl: request.url,
       sourceUrl: _currentPageUrl,
     );
+    final targetUri = recommendation.externalUri ??
+        recommendation.webViewUri ??
+        recommendation.resolution.normalizedTargetUri;
     _appendLog(
-      'nav ${resolution.disposition.name} ${resolution.reason.name} -> ${resolution.normalizedTargetUri}',
+      'nav ${recommendation.action.name} ${recommendation.resolution.reason.name} -> $targetUri',
     );
 
-    if (resolution.disposition == ProxyNavigationDisposition.external) {
-      _showMessage('外部委譲候補: ${resolution.normalizedTargetUri}');
-      return NavigationDecision.prevent;
+    switch (recommendation.action) {
+      case ProxyWebViewNavigationAction.allow:
+        return NavigationDecision.navigate;
+      case ProxyWebViewNavigationAction.cancel:
+        _showMessage('遷移をキャンセル: ${recommendation.resolution.reason.name}');
+        return NavigationDecision.prevent;
+      case ProxyWebViewNavigationAction.loadProxyUrl:
+        final webViewUri = recommendation.webViewUri;
+        if (webViewUri != null) {
+          unawaited(_controller?.loadRequest(webViewUri));
+        }
+        return NavigationDecision.prevent;
+      case ProxyWebViewNavigationAction.launchExternal:
+        _showMessage('外部委譲候補: ${recommendation.externalUri}');
+        return NavigationDecision.prevent;
     }
-
-    if (resolution.disposition == ProxyNavigationDisposition.unresolved ||
-        resolution.disposition == ProxyNavigationDisposition.invalid) {
-      _showMessage('解決不能: ${resolution.reason.name}');
-      return NavigationDecision.prevent;
-    }
-
-    final proxyUri = resolution.proxyUri;
-    if (proxyUri != null && proxyUri.toString() != request.url) {
-      unawaited(_controller?.loadRequest(proxyUri));
-      return NavigationDecision.prevent;
-    }
-
-    return NavigationDecision.navigate;
   }
 
   void _handleProxyEvent(ProxyEvent event) {
@@ -217,26 +218,26 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
   }
 
   void _simulateExternalTarget() {
-    final resolution = _proxy.resolveNavigationTarget(
+    final recommendation = _proxy.recommendMainFrameNavigation(
       targetUrl: 'tel:+81012345678',
       sourceUrl: _currentPageUrl,
     );
     _appendLog(
-      'simulate external ${resolution.disposition.name} ${resolution.reason.name} ${resolution.normalizedTargetUri}',
+      'simulate external ${recommendation.action.name} ${recommendation.resolution.reason.name} ${recommendation.externalUri ?? recommendation.resolution.normalizedTargetUri}',
     );
-    _showMessage('外部委譲候補: ${resolution.normalizedTargetUri}');
+    _showMessage('外部委譲候補: ${recommendation.externalUri}');
   }
 
   void _simulateNewWindowTarget() {
-    final resolution = _proxy.resolveNavigationTarget(
+    final recommendation = _proxy.recommendNewWindowNavigation(
       targetUrl:
           'https://www.google.com/maps/search/?api=1&query=Tokyo+Station',
       sourceUrl: _currentPageUrl,
     );
     _appendLog(
-      'simulate new-window ${resolution.disposition.name} ${resolution.reason.name} ${resolution.normalizedTargetUri}',
+      'simulate new-window ${recommendation.action.name} ${recommendation.resolution.reason.name} ${recommendation.externalUri ?? recommendation.webViewUri ?? recommendation.resolution.normalizedTargetUri}',
     );
-    _showMessage('target=_blank 相当の判定: ${resolution.disposition.name}');
+    _showMessage('target=_blank 相当の推奨: ${recommendation.action.name}');
   }
 
   void _appendLog(String message) {
@@ -279,7 +280,7 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
 <p><a href="$upstreamOrigin/app">back home by absolute upstream url</a></p>
 ''',
       _ => '''
-<p>offline_web_proxy の URL 解決 API を使った WebView サンプルです。</p>
+<p>offline_web_proxy の delegate 推奨アクション API を使った WebView サンプルです。</p>
 <ul>
   <li><a href="/app/orders/detail">relative same-origin link</a></li>
   <li><a href="$upstreamOrigin/app/absolute">absolute same-origin link</a></li>
@@ -336,7 +337,7 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
                         Text(
-                          'URL 解決デモ',
+                          'WebView delegate デモ',
                           style: Theme.of(context).textTheme.headlineSmall,
                         ),
                         const SizedBox(height: 8),

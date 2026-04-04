@@ -222,6 +222,30 @@ if (navigation.disposition == ProxyNavigationDisposition.external) {
   print('外部委譲: ${navigation.normalizedTargetUri}');
 }
 
+// 注意: 以下の推奨アクション API は現在の main ブランチと次回リリース向けです。
+// pub.dev の 0.5.0 を利用中の場合は、次版公開まで
+// resolveNavigationTarget(...) を利用してください。
+// //example.com のような scheme-relative URL でも sourceUrl が必要です。
+
+// WebView の main frame delegate 向け推奨アクションを取得
+final recommendation = proxy.recommendMainFrameNavigation(
+  targetUrl: 'https://api.example.com/app/map?mode=car',
+  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+);
+switch (recommendation.action) {
+  case ProxyWebViewNavigationAction.allow:
+    break;
+  case ProxyWebViewNavigationAction.loadProxyUrl:
+    await controller.loadRequest(recommendation.webViewUri!);
+    break;
+  case ProxyWebViewNavigationAction.launchExternal:
+    print('外部起動: ${recommendation.externalUri}');
+    break;
+  case ProxyWebViewNavigationAction.cancel:
+    print('キャンセル: ${recommendation.resolution.reason}');
+    break;
+}
+
 // proxy 起動前に Cookie を復元
 await proxy.restoreCookies([
   CookieRestoreEntry.fromSetCookieHeader(

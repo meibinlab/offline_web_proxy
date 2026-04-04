@@ -222,6 +222,30 @@ if (navigation.disposition == ProxyNavigationDisposition.external) {
   print('Delegate externally: ${navigation.normalizedTargetUri}');
 }
 
+// Note: the recommendation API below is available on the current main branch
+// and the next release. If you are using pub.dev 0.5.0, use
+// resolveNavigationTarget(...) until the next version is published.
+// sourceUrl is also required for scheme-relative targets such as //example.com.
+
+// Get a recommended action for a main-frame WebView delegate
+final recommendation = proxy.recommendMainFrameNavigation(
+  targetUrl: 'https://api.example.com/app/map?mode=car',
+  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+);
+switch (recommendation.action) {
+  case ProxyWebViewNavigationAction.allow:
+    break;
+  case ProxyWebViewNavigationAction.loadProxyUrl:
+    await controller.loadRequest(recommendation.webViewUri!);
+    break;
+  case ProxyWebViewNavigationAction.launchExternal:
+    print('Launch externally: ${recommendation.externalUri}');
+    break;
+  case ProxyWebViewNavigationAction.cancel:
+    print('Cancel: ${recommendation.resolution.reason}');
+    break;
+}
+
 // Restore cookies before starting the proxy
 await proxy.restoreCookies([
   CookieRestoreEntry.fromSetCookieHeader(

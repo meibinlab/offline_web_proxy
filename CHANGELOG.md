@@ -1,3 +1,20 @@
+## Unreleased
+
+### 機能追加
+
+- **WebView delegate 向け推奨アクション API を追加**: `recommendMainFrameNavigation(...)` と `recommendNewWindowNavigation(...)` を追加し、`allow`、`cancel`、`loadProxyUrl`、`launchExternal` の推奨動作を取得可能に
+- **delegate 判定モデルを追加**: `ProxyWebViewNavigationRecommendation` と `ProxyWebViewNavigationAction` を公開し、proxy 再読込 URL や外部委譲用の正規化済み URL を参照可能に
+
+### ドキュメント
+
+- **README / 仕様書を更新**: WebView delegate 向け推奨アクション API の使い方と main frame / new window の扱いを追記
+
+### テスト
+
+- **delegate 推奨アクションのテストを追加**: main frame と new window の内部遷移、外部委譲、解決不能ケースを検証
+
+---
+
 ## 0.5.0
 
 ### 機能追加

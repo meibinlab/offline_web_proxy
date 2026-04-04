@@ -1019,7 +1019,7 @@ WebView の遷移前に target URL を解決し、upstream URL、proxy URL、外
 
 - **パラメータ**:
   - `targetUrl`: 遷移先候補 URL
-  - `sourceUrl`: 相対 URL を解決する基準 URL。relative、query-only、fragment-only の場合に必要
+  - `sourceUrl`: 相対 URL を解決する基準 URL。relative、scheme-relative、query-only、fragment-only の場合に必要
 - **戻り値**: `ProxyNavigationResolution`
 - **注意**:
   - `disposition` は `inWebView`、`localOnly`、`external`、`unresolved`、`invalid` を返す
@@ -1039,6 +1039,52 @@ if (resolution.disposition == ProxyNavigationDisposition.inWebView) {
   print('Proxy: ${resolution.proxyUri}');
 }
 ```
+
+#### `ProxyWebViewNavigationRecommendation recommendMainFrameNavigation({required String targetUrl, String? sourceUrl})`
+
+WebView の main frame delegate 向けに、`allow`、`cancel`、`loadProxyUrl`、`launchExternal` の推奨アクションを返します。
+
+- **パラメータ**:
+  - `targetUrl`: 遷移先候補 URL
+  - `sourceUrl`: 相対 URL を解決する基準 URL。relative、scheme-relative、query-only、fragment-only の場合に必要
+- **戻り値**: `ProxyWebViewNavigationRecommendation`
+- **注意**:
+  - `launchExternal` の場合は `externalUri` に外部起動へそのまま渡せる正規化済み URL が入る
+  - `loadProxyUrl` の場合は `webViewUri` に読み込み先の proxy URL が入る
+  - `cancel` は危険な URL に限定されず、`outsideProxyScope` や `relativeUrlWithoutSource` のように、このライブラリだけでは安全に判断できないケースも含む
+
+```dart
+final recommendation = proxy.recommendMainFrameNavigation(
+  targetUrl: 'https://example.com/base/app/map?mode=car',
+  sourceUrl: 'http://127.0.0.1:8080/app/orders/detail',
+);
+
+switch (recommendation.action) {
+  case ProxyWebViewNavigationAction.allow:
+    break;
+  case ProxyWebViewNavigationAction.loadProxyUrl:
+    await controller.loadRequest(recommendation.webViewUri!);
+    break;
+  case ProxyWebViewNavigationAction.launchExternal:
+    print(recommendation.externalUri);
+    break;
+  case ProxyWebViewNavigationAction.cancel:
+    print(recommendation.resolution.reason);
+    break;
+}
+```
+
+#### `ProxyWebViewNavigationRecommendation recommendNewWindowNavigation({required String targetUrl, String? sourceUrl})`
+
+WebView の新規 window delegate 向けに、`cancel`、`loadProxyUrl`、`launchExternal` の推奨アクションを返します。
+
+- **パラメータ**:
+  - `targetUrl`: 遷移先候補 URL
+  - `sourceUrl`: 相対 URL を解決する基準 URL。relative、scheme-relative、query-only、fragment-only の場合に必要
+- **戻り値**: `ProxyWebViewNavigationRecommendation`
+- **注意**:
+  - main frame と同じ URL 解決ルールを使う
+  - 新規 window では `allow` は返さない
 
 #### `Future<void> clearCookies({String? domain})`
 

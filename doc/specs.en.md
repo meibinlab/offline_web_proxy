@@ -1019,7 +1019,7 @@ Resolves a navigation target before WebView navigation and returns the upstream 
 
 - **Parameters**:
   - `targetUrl`: Candidate navigation target URL
-  - `sourceUrl`: Base URL used to resolve relative, query-only, and fragment-only targets
+  - `sourceUrl`: Base URL used to resolve relative, scheme-relative, query-only, and fragment-only targets
 - **Return Value**: `ProxyNavigationResolution`
 - **Notes**:
   - `disposition` returns `inWebView`, `localOnly`, `external`, `unresolved`, or `invalid`
@@ -1039,6 +1039,52 @@ if (resolution.disposition == ProxyNavigationDisposition.inWebView) {
   print('Proxy: ${resolution.proxyUri}');
 }
 ```
+
+#### `ProxyWebViewNavigationRecommendation recommendMainFrameNavigation({required String targetUrl, String? sourceUrl})`
+
+Returns a recommended WebView main-frame delegate action: `allow`, `cancel`, `loadProxyUrl`, or `launchExternal`.
+
+- **Parameters**:
+  - `targetUrl`: Candidate navigation target URL
+  - `sourceUrl`: Base URL used to resolve relative, scheme-relative, query-only, and fragment-only targets
+- **Return Value**: `ProxyWebViewNavigationRecommendation`
+- **Notes**:
+  - `launchExternal` populates `externalUri` with a normalized URL that can be passed directly to an external launcher
+  - `loadProxyUrl` populates `webViewUri` with the proxy URL to load explicitly
+  - `cancel` is not limited to dangerous URLs; it also covers cases such as `outsideProxyScope` or `relativeUrlWithoutSource`, where this library cannot make a safe decision by itself
+
+```dart
+final recommendation = proxy.recommendMainFrameNavigation(
+  targetUrl: 'https://example.com/base/app/map?mode=car',
+  sourceUrl: 'http://127.0.0.1:8080/app/orders/detail',
+);
+
+switch (recommendation.action) {
+  case ProxyWebViewNavigationAction.allow:
+    break;
+  case ProxyWebViewNavigationAction.loadProxyUrl:
+    await controller.loadRequest(recommendation.webViewUri!);
+    break;
+  case ProxyWebViewNavigationAction.launchExternal:
+    print(recommendation.externalUri);
+    break;
+  case ProxyWebViewNavigationAction.cancel:
+    print(recommendation.resolution.reason);
+    break;
+}
+```
+
+#### `ProxyWebViewNavigationRecommendation recommendNewWindowNavigation({required String targetUrl, String? sourceUrl})`
+
+Returns a recommended WebView new-window delegate action: `cancel`, `loadProxyUrl`, or `launchExternal`.
+
+- **Parameters**:
+  - `targetUrl`: Candidate navigation target URL
+  - `sourceUrl`: Base URL used to resolve relative, scheme-relative, query-only, and fragment-only targets
+- **Return Value**: `ProxyWebViewNavigationRecommendation`
+- **Notes**:
+  - Uses the same URL resolution rules as the main-frame API
+  - Never returns `allow` for a new window
 
 #### `Future<void> clearCookies({String? domain})`
 

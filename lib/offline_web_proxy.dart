@@ -76,6 +76,7 @@ import 'src/models/proxy_config.dart';
 import 'src/models/proxy_event.dart';
 import 'src/models/proxy_navigation_resolution.dart';
 import 'src/models/proxy_stats.dart';
+import 'src/models/proxy_webview_navigation_recommendation.dart';
 import 'src/models/queued_request.dart';
 import 'src/models/response_header_snapshot.dart';
 import 'src/models/warmup_result.dart';
@@ -90,6 +91,7 @@ export 'src/models/proxy_config.dart';
 export 'src/models/proxy_event.dart';
 export 'src/models/proxy_navigation_resolution.dart';
 export 'src/models/proxy_stats.dart';
+export 'src/models/proxy_webview_navigation_recommendation.dart';
 export 'src/models/queued_request.dart';
 export 'src/models/warmup_result.dart';
 
@@ -734,6 +736,40 @@ class OfflineWebProxy {
     return _resolveNavigationTargetInternal(
       targetUrl: targetUrl,
       sourceUrl: sourceUrl,
+    );
+  }
+
+  /// WebView の main frame 遷移向けに推奨アクションを返します。
+  ///
+  /// [targetUrl] は遷移先候補の URL です。
+  /// [sourceUrl] は相対 URL を解決するための基準 URL です。
+  ///
+  /// Returns: delegate で利用できる推奨アクションと補助 URI を含む結果。
+  ProxyWebViewNavigationRecommendation recommendMainFrameNavigation({
+    required String targetUrl,
+    String? sourceUrl,
+  }) {
+    return _recommendWebViewNavigation(
+      targetUrl: targetUrl,
+      sourceUrl: sourceUrl,
+      allowInPlace: true,
+    );
+  }
+
+  /// WebView の新規 window 遷移向けに推奨アクションを返します。
+  ///
+  /// [targetUrl] は遷移先候補の URL です。
+  /// [sourceUrl] は相対 URL を解決するための基準 URL です。
+  ///
+  /// Returns: delegate で利用できる推奨アクションと補助 URI を含む結果。
+  ProxyWebViewNavigationRecommendation recommendNewWindowNavigation({
+    required String targetUrl,
+    String? sourceUrl,
+  }) {
+    return _recommendWebViewNavigation(
+      targetUrl: targetUrl,
+      sourceUrl: sourceUrl,
+      allowInPlace: false,
     );
   }
 
@@ -2742,6 +2778,69 @@ class OfflineWebProxy {
       reason: ProxyNavigationReason.externalOrigin,
       usedSourceUrl: usedSourceUrl,
     );
+  }
+
+  /// WebView delegate 向けの推奨アクションを構築します。
+  ProxyWebViewNavigationRecommendation _recommendWebViewNavigation({
+    required String targetUrl,
+    String? sourceUrl,
+    required bool allowInPlace,
+  }) {
+    final resolution = _resolveNavigationTargetInternal(
+      targetUrl: targetUrl,
+      sourceUrl: sourceUrl,
+    );
+
+    switch (resolution.disposition) {
+      case ProxyNavigationDisposition.external:
+        final externalUri = resolution.normalizedTargetUri;
+        if (externalUri == null) {
+          return ProxyWebViewNavigationRecommendation.cancel(
+            resolution: resolution,
+          );
+        }
+        return ProxyWebViewNavigationRecommendation.launchExternal(
+          resolution: resolution,
+          externalUri: externalUri,
+        );
+      case ProxyNavigationDisposition.unresolved:
+      case ProxyNavigationDisposition.invalid:
+        return ProxyWebViewNavigationRecommendation.cancel(
+          resolution: resolution,
+        );
+      case ProxyNavigationDisposition.inWebView:
+      case ProxyNavigationDisposition.localOnly:
+        final proxyUri = resolution.proxyUri;
+        if (proxyUri == null) {
+          return ProxyWebViewNavigationRecommendation.cancel(
+            resolution: resolution,
+          );
+        }
+
+        if (allowInPlace && _canAllowWebViewNavigationInPlace(resolution)) {
+          return ProxyWebViewNavigationRecommendation.allow(
+            resolution: resolution,
+          );
+        }
+
+        return ProxyWebViewNavigationRecommendation.loadProxyUrl(
+          resolution: resolution,
+          webViewUri: proxyUri,
+        );
+    }
+  }
+
+  /// WebView が現在の navigation をそのまま継続できるかどうかを返します。
+  bool _canAllowWebViewNavigationInPlace(
+    ProxyNavigationResolution resolution,
+  ) {
+    final normalizedTargetUri = resolution.normalizedTargetUri;
+    final proxyUri = resolution.proxyUri;
+    if (normalizedTargetUri == null || proxyUri == null) {
+      return false;
+    }
+
+    return normalizedTargetUri == proxyUri;
   }
 
   /// 解決結果オブジェクトを構築します。
