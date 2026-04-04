@@ -41,6 +41,8 @@ dependencies:
 flutter pub get
 ```
 
+proxy に同梱静的ファイルを認識させたい場合は、アプリ側の `pubspec.yaml` にアセットを宣言し、`AssetManifest.json` に載る状態にしてください。ファイルを置いただけで Flutter アセットとして登録していないものは、proxy ローカル静的リソースとして分類されません。
+
 ## クイックスタート
 
 現在の WebView 連携は、`WebViewController`、`WebViewWidget`、および 0.5.0 / 0.6.0 で追加した遷移補助 API を前提にするのが扱いやすいです。
@@ -217,6 +219,8 @@ final newWindowRecommendation = proxy.recommendNewWindowNavigation(
 - `recommendNewWindowNavigation(...)` は target=_blank 相当の新規 window 判定向けです。
 
 相対 URL や scheme-relative URL の解決には `sourceUrl` が必要です。`sourceUrl` が無い場合、意図的に unresolved になるケースがあります。
+起動時に `AssetManifest.json` を走査し、`assets/static/` 配下に存在するファイルだけを proxy ローカル静的リソースとして扱います。たとえば `assets/static/app.css` は proxy URL の `/app.css` に対応し、一覧に無い `/test.css` は upstream 解決を優先します。
+実行環境で manifest を読み込めない場合でも、proxy 起動は中断せず、静的リソース一覧を空として通常の upstream 解決へフォールバックします。
 
 ## Cookie API
 
@@ -316,7 +320,8 @@ proxy.events.listen((event) {
 
 - 1 つの `OfflineWebProxy` インスタンスが扱える上流 origin は 1 つです。
 - サポートされる設定経路は `ProxyConfig` です。外部 YAML の自動読込は未実装です。
-- `assets/static/` からの静的リソース実配信は未実装です。静的リソースらしいパスは遷移判定で分類されますが、現在のサーバ応答は 404 プレースホルダです。
+- `assets/static/` からの静的リソース実配信は未実装です。起動時に `AssetManifest.json` から検出した `assets/static/` 配下のファイルだけを静的リソースとして分類し、現在のサーバ応答は 404 プレースホルダです。
+- `AssetManifest.json` または実行環境上の同等 manifest を読み込めない場合は、静的リソースを一覧化せず、通常の upstream 解決へフォールバックします。
 
 ## サンプルと参照先
 

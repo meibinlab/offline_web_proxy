@@ -41,6 +41,8 @@ Then run:
 flutter pub get
 ```
 
+If you want the proxy to recognize bundled static files, declare them in your app's `pubspec.yaml` so they are included in `AssetManifest.json`. Files that are only placed on disk and not registered as Flutter assets are not classified as proxy-local static resources.
+
 ## Quick Start
 
 The current WebView integration pattern is based on `WebViewController`, `WebViewWidget`, and the navigation helper APIs added in 0.5.0 and 0.6.0.
@@ -217,6 +219,8 @@ Use cases:
 - `recommendNewWindowNavigation(...)` for target=_blank or equivalent new-window flows
 
 Relative URLs and scheme-relative URLs depend on `sourceUrl`. If `sourceUrl` is missing, some targets remain unresolved by design.
+At startup, the proxy scans `AssetManifest.json` for files under `assets/static/` and exposes only those entries as proxy-local static resources. For example, `assets/static/app.css` is matched by the proxy URL `/app.css`, while an unlisted `/test.css` still resolves upstream.
+If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.
 
 ## Cookie APIs
 
@@ -316,7 +320,8 @@ Reference it from `android/app/src/main/AndroidManifest.xml`:
 
 - One `OfflineWebProxy` instance supports one configured upstream origin.
 - `ProxyConfig` is the supported configuration path. External YAML configuration loading is not implemented.
-- Static-resource serving from `assets/static/` is not implemented yet. Static-looking paths are still classified by the navigation helpers, but the current server response is a 404 placeholder.
+- Static-resource serving from `assets/static/` is not implemented yet. Only files discovered from `AssetManifest.json` under `assets/static/` are classified as static resources, and the current server response is a 404 placeholder.
+- If `AssetManifest.json` or its runtime equivalent cannot be loaded, the proxy continues with no indexed static resources and falls back to normal upstream resolution.
 
 ## Example and Reference
 

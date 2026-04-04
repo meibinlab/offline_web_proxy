@@ -9,7 +9,7 @@
 /// * **インテリジェントキャッシング**: RFC準拠のキャッシュ制御とオフライン戦略
 /// * **リクエストキューイング**: オフライン時のPOST/PUT/DELETEリクエストの自動キュー
 /// * **Cookie管理**: AES-256暗号化による安全なCookie永続化
-/// * **静的リソース配信**: バンドルされた静的アセットのローカル配信
+/// * **静的リソース一覧**: `assets/static/` 配下を起動時に走査して proxy URL へ対応付け
 /// * **シームレスなオフライン対応**: 透過的なオンライン/オフライン切り替え
 ///
 /// ## クイックスタート
@@ -57,6 +57,7 @@ import 'dart:typed_data';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
@@ -108,21 +109,10 @@ const String _cookieEncryptionKeyStorageKey =
 const int _cookieEncryptionKeyLength = 32;
 const String _droppedRequestBoxName = 'proxy_dropped_requests';
 const Set<String> _loopbackHosts = {'127.0.0.1', 'localhost'};
-const Set<String> _staticResourceExtensions = {
-  '.html',
-  '.css',
-  '.js',
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.gif',
-  '.svg',
-  '.ico',
-  '.woff',
-  '.woff2',
-  '.ttf',
-  '.eot',
-};
+const List<String> _staticResourceAssetPrefixes = [
+  'assets/static/',
+  'packages/offline_web_proxy/assets/static/',
+];
 
 /// Flutter WebView内で動作するオフライン対応ローカルプロキシサーバ。
 /// WebViewからのリクエストを横取りし、ネットワーク接続状態に基づいて
@@ -243,8 +233,8 @@ class OfflineWebProxy {
   /// ドロップされたリクエスト履歴の永続化ボックス。
   Box? _droppedRequestBox;
 
-  /// 静的リソースの存在確認結果キャッシュ。
-  final Map<String, bool> _staticResourceCache = {};
+  /// 起動時に構築した静的リソースの proxy URL と asset key の対応表。
+  final Map<String, String> _staticResourceAssetMap = {};
 
   /// 上流サーバへの同時接続数を制限するセマフォ。
   /// WebView が短時間に多数のリクエストを投げた場合にネイティブ側のソケット枯渇を防ぐ。
@@ -279,6 +269,9 @@ class OfflineWebProxy {
 
       // ストレージを初期化
       await _initializeStorage();
+
+      // 静的リソース一覧を初期化
+      await _initializeStaticResourceIndex();
 
       // 接続状態の監視を開始
       _startConnectivityMonitoring();
@@ -346,6 +339,7 @@ class OfflineWebProxy {
       // HTTPクライアントを閉じる
       _httpClient?.close(force: true);
       _httpClient = null;
+      _staticResourceAssetMap.clear();
 
       _isRunning = false;
       _server = null;
@@ -1301,7 +1295,7 @@ class OfflineWebProxy {
   Future<shelf.Response> _handleRequest(shelf.Request request) async {
     final path = request.url.path;
 
-    // 最初に静的リソースかどうかをチェック
+    // 起動時に構築した静的リソース一覧を先に確認する
     if (await _isStaticResource(path)) {
       return await _serveStaticResource(path);
     }
@@ -1316,39 +1310,31 @@ class OfflineWebProxy {
 
   /// 指定したパスが静的リソースかどうかを判定します。
   ///
-  /// assets/static/フォルダ内のファイル存在をチェックし、
-  /// 結果をキャッシュしてパフォーマンスを向上させます。
+  /// 起動時に構築した静的リソース一覧に一致するかどうかを返します。
   ///
   /// [path] チェックするパス。
   ///
   /// Returns: 静的リソースの場合は `true`。
   Future<bool> _isStaticResource(String path) async {
-    if (_staticResourceCache.containsKey(path)) {
-      return _staticResourceCache[path]!;
-    }
-
-    final exists = _looksLikeStaticResourcePath(path);
-
-    _staticResourceCache[path] = exists;
-    return exists;
+    return _isIndexedStaticResourcePath(path);
   }
 
   /// 静的リソースを配信します。
   ///
-  /// assets/static/フォルダから指定したパスのファイルを
-  /// 読み込んでレスポンスとして返却します。
+  /// 一覧に一致した静的リソース URL に対してプレースホルダレスポンスを返却します。
   ///
   /// [path] 配信するファイルのパス。
   ///
   /// Returns: 静的リソースのHTTPレスポンス。
   Future<shelf.Response> _serveStaticResource(String path) async {
     try {
-      // Flutterアセットバンドルから静的リソースを読み込み
-      // 現在はファイルシステムアクセスはサポートしていない
+      final assetPath =
+          _staticResourceAssetMap[_normalizeStaticResourceRequestPath(path)] ??
+              path;
       final mimeType = _getMimeType(path);
 
       return shelf.Response.notFound(
-        '静的リソースの配信は未実装です。アセットパス: $path',
+        '静的リソースの配信は未実装です。アセットパス: $assetPath',
         headers: {
           'Content-Type': mimeType,
           'X-Static-Resource': 'true',
@@ -1797,12 +1783,13 @@ class OfflineWebProxy {
     HttpClientRequest ioRequest, {
     required Uri upstreamUri,
   }) async {
+    final connectionSpecificHeaders =
+        _extractConnectionSpecificHeaders(request.headers);
     request.headers.forEach((key, value) {
-      final lowerKey = key.toLowerCase();
-      if (!_isHopByHopHeader(key) &&
-          lowerKey != 'accept-encoding' &&
-          lowerKey != 'host' &&
-          lowerKey != 'cookie') {
+      if (_shouldForwardUpstreamHeader(
+        key,
+        connectionSpecificHeaders: connectionSpecificHeaders,
+      )) {
         ioRequest.headers.set(key, value);
       }
     });
@@ -1816,6 +1803,38 @@ class OfflineWebProxy {
     }
 
     // 非圧縮レスポンスを要求
+    ioRequest.headers.set('accept-encoding', 'identity');
+  }
+
+  /// キュー再送時の保存済みヘッダを上流リクエストへ反映します。
+  ///
+  /// WebView 由来の保存ヘッダには `host` や `connection` など再送時に
+  /// 不要または禁止される値が含まれるため、通常転送と同様にサニタイズします。
+  Future<void> _applyQueuedRequestHeaders(
+    HttpClientRequest ioRequest, {
+    required Uri upstreamUri,
+    required Map<String, String> requestHeaders,
+  }) async {
+    final connectionSpecificHeaders =
+        _extractConnectionSpecificHeaders(requestHeaders);
+    requestHeaders.forEach((key, value) {
+      if (_shouldForwardUpstreamHeader(
+        key,
+        connectionSpecificHeaders: connectionSpecificHeaders,
+        dropContentLength: true,
+      )) {
+        ioRequest.headers.set(key, value);
+      }
+    });
+
+    final mergedCookieHeader = await _mergeCookieHeaderForUpstream(
+      upstreamUri,
+      requestHeaders['cookie'],
+    );
+    if (mergedCookieHeader != null && mergedCookieHeader.isNotEmpty) {
+      ioRequest.headers.set('cookie', mergedCookieHeader);
+    }
+
     ioRequest.headers.set('accept-encoding', 'identity');
   }
 
@@ -1898,6 +1917,7 @@ class OfflineWebProxy {
   bool _isHopByHopHeader(String header) {
     const hopByHopHeaders = [
       'connection',
+      'keep-alive',
       'upgrade',
       'proxy-authenticate',
       'proxy-authorization',
@@ -1906,6 +1926,50 @@ class OfflineWebProxy {
       'transfer-encoding',
     ];
     return hopByHopHeaders.contains(header.toLowerCase());
+  }
+
+  /// `Connection` ヘッダが指名する hop-by-hop ヘッダ名を抽出します。
+  Set<String> _extractConnectionSpecificHeaders(Map<String, String> headers) {
+    final connectionHeader = headers.entries
+        .where((entry) => entry.key.toLowerCase() == 'connection')
+        .map((entry) => entry.value)
+        .cast<String?>()
+        .firstWhere((value) => value != null && value.isNotEmpty,
+            orElse: () => null);
+    if (connectionHeader == null) {
+      return const <String>{};
+    }
+
+    return connectionHeader
+        .split(',')
+        .map((value) => value.trim().toLowerCase())
+        .where((value) => value.isNotEmpty)
+        .toSet();
+  }
+
+  /// 上流へ転送するヘッダかどうかを返します。
+  bool _shouldForwardUpstreamHeader(
+    String key, {
+    required Set<String> connectionSpecificHeaders,
+    bool dropContentLength = false,
+  }) {
+    final lowerKey = key.toLowerCase();
+    if (_isHopByHopHeader(key) ||
+        connectionSpecificHeaders.contains(lowerKey)) {
+      return false;
+    }
+
+    if (lowerKey == 'accept-encoding' ||
+        lowerKey == 'host' ||
+        lowerKey == 'cookie') {
+      return false;
+    }
+
+    if (dropContentLength && lowerKey == 'content-length') {
+      return false;
+    }
+
+    return true;
   }
 
   /// 上流レスポンスヘッダをクライアント返却/キャッシュ向けにサニタイズします。
@@ -2378,12 +2442,11 @@ class OfflineWebProxy {
       }
       final request = await client.openUrl(method, uri);
 
-      // keep-aliveを有効化（接続を閉じる指示を送らない）
-      request.headers.set('accept-encoding', 'gzip, deflate');
-
-      headers.forEach((key, value) {
-        request.headers.set(key, value);
-      });
+      await _applyQueuedRequestHeaders(
+        request,
+        upstreamUri: uri,
+        requestHeaders: headers,
+      );
 
       if (body.isNotEmpty && method != 'GET') {
         request.add(body);
@@ -2687,7 +2750,7 @@ class OfflineWebProxy {
 
     if (targetIsProxyUrl) {
       final isStaticResource =
-          _looksLikeStaticResourcePath(normalizedTargetUri.path);
+          _isIndexedStaticResourcePath(normalizedTargetUri.path);
       if (isStaticResource) {
         return _buildNavigationResolution(
           inputUrl: targetUrl,
@@ -2922,13 +2985,68 @@ class OfflineWebProxy {
     return uri.scheme.toLowerCase() == 'http' && _isLoopbackHost(uri.host);
   }
 
-  /// 静的リソースらしいパスかどうかを返します。
-  bool _looksLikeStaticResourcePath(String path) {
-    final lower = path.toLowerCase();
-    final dotIndex = lower.lastIndexOf('.');
-    final extension = dotIndex >= 0 ? lower.substring(dotIndex) : '';
-    return extension.isNotEmpty &&
-        _staticResourceExtensions.contains(extension);
+  /// 起動時に AssetManifest を走査して静的リソース一覧を構築します。
+  Future<void> _initializeStaticResourceIndex() async {
+    _staticResourceAssetMap.clear();
+
+    try {
+      for (final key in await _loadStaticResourceAssetKeys()) {
+        final publicPath = _toStaticResourcePublicPath(key);
+        if (publicPath == null) {
+          continue;
+        }
+
+        _staticResourceAssetMap.putIfAbsent(publicPath, () => key);
+      }
+    } catch (_) {
+      // 静的資産を使わないアプリでも起動できるよう、失敗時は空一覧で継続する。
+    }
+  }
+
+  /// AssetManifest から asset key 一覧を読み込みます。
+  Future<Iterable<String>> _loadStaticResourceAssetKeys() async {
+    try {
+      final assetManifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      return assetManifest.listAssets();
+    } catch (_) {
+      final assetManifestJson =
+          await rootBundle.loadString('AssetManifest.json');
+      final decoded = jsonDecode(assetManifestJson);
+      if (decoded is! Map) {
+        return const <String>[];
+      }
+      return decoded.keys.whereType<String>();
+    }
+  }
+
+  /// 起動時に構築した静的リソース一覧に存在する path かどうかを返します。
+  bool _isIndexedStaticResourcePath(String path) {
+    return _staticResourceAssetMap
+        .containsKey(_normalizeStaticResourceRequestPath(path));
+  }
+
+  /// リクエスト path を静的リソース一覧照合用に正規化します。
+  String _normalizeStaticResourceRequestPath(String path) {
+    final normalizedPath = path.startsWith('/') ? path.substring(1) : path;
+    return normalizedPath.replaceAll('\\', '/');
+  }
+
+  /// asset key を proxy 公開 URL の path へ変換します。
+  String? _toStaticResourcePublicPath(String assetKey) {
+    for (final prefix in _staticResourceAssetPrefixes) {
+      if (!assetKey.startsWith(prefix)) {
+        continue;
+      }
+
+      final suffix = assetKey.substring(prefix.length).replaceAll('\\', '/');
+      if (suffix.isEmpty) {
+        return null;
+      }
+
+      return suffix.startsWith('/') ? suffix.substring(1) : suffix;
+    }
+
+    return null;
   }
 
   /// path と query から upstream URI を構築します。

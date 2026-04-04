@@ -8,6 +8,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 
+const Map<String, List<String>> _mockAssetManifest = {
+  'assets/static/app.js': ['assets/static/app.js'],
+  'assets/static/app.css': ['assets/static/app.css'],
+  'assets/static/css/app.css': ['assets/static/css/app.css'],
+  'assets/static/js/vendor/runtime.js': ['assets/static/js/vendor/runtime.js'],
+  'packages/offline_web_proxy/assets/static/pkg/package.css': [
+    'packages/offline_web_proxy/assets/static/pkg/package.css',
+  ],
+};
+
 class _RealHttpOverrides extends HttpOverrides {
   @override
   // ignore: unnecessary_overrides
@@ -27,6 +37,16 @@ void main() {
         .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
       if (methodCall.method == 'getApplicationDocumentsDirectory') {
         return hiveTestDirectory;
+      }
+      return null;
+    });
+
+    const stringCodec = StringCodec();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMessageHandler('flutter/assets', (ByteData? message) async {
+      final assetKey = stringCodec.decodeMessage(message);
+      if (assetKey == 'AssetManifest.json') {
+        return stringCodec.encodeMessage(jsonEncode(_mockAssetManifest));
       }
       return null;
     });
@@ -342,6 +362,81 @@ void main() {
           );
 
           expect(replayBodies, equals(['first', 'second']));
+        } finally {
+          await upstreamServer.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// ブラウザ由来ヘッダを含む POST がキュー再送で消化されることの統合テスト
+    test('should drain queued requests with browser style headers', () async {
+      await HttpOverrides.runZoned(() async {
+        late HttpServer upstreamServer;
+        var upstreamStatus = HttpStatus.serviceUnavailable;
+        final replayBodies = <String>[];
+        final replayConnectionHeaders = <String?>[];
+        final replayAcceptEncodingHeaders = <String?>[];
+        final replayCookieHeaders = <String?>[];
+        final replayHostHeaders = <String?>[];
+        final replayDebugHeaders = <String?>[];
+
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer.listen((HttpRequest request) async {
+          final body = await utf8.decoder.bind(request).join();
+          if (upstreamStatus == HttpStatus.ok) {
+            replayBodies.add(body);
+            replayConnectionHeaders.add(request.headers.value('connection'));
+            replayAcceptEncodingHeaders
+                .add(request.headers.value('accept-encoding'));
+            replayCookieHeaders.add(request.headers.value('cookie'));
+            replayHostHeaders.add(request.headers.host);
+            replayDebugHeaders.add(request.headers.value('x-debug'));
+          }
+
+          request.response
+            ..statusCode = upstreamStatus
+            ..write(upstreamStatus == HttpStatus.ok ? 'ok' : 'retry');
+          await request.response.close();
+        });
+
+        try {
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstreamServer.port}',
+            ),
+          );
+
+          await _sendRawProxyRequest(
+            proxyPort,
+            method: 'POST',
+            path: '/echo',
+            body: 'hello-queue',
+            headers: const {
+              'Connection': 'keep-alive, x-debug',
+              'Accept-Encoding': 'gzip, deflate',
+              'Cookie': 'SESSION=abc123',
+              'Origin': 'http://127.0.0.1',
+              'Referer': 'http://127.0.0.1/context',
+              'X-Debug': 'leak-me',
+            },
+          );
+
+          final queuedBeforeDrain = await proxy.getQueuedRequests();
+          expect(queuedBeforeDrain, hasLength(1));
+
+          upstreamStatus = HttpStatus.ok;
+
+          await _waitUntil(
+            () async => (await proxy.getQueuedRequests()).isEmpty,
+            timeout: const Duration(seconds: 8),
+          );
+
+          expect(replayBodies, equals(['hello-queue']));
+          expect(replayConnectionHeaders, equals([null]));
+          expect(replayAcceptEncodingHeaders, equals(['identity']));
+          expect(replayCookieHeaders, equals(['SESSION=abc123']));
+          expect(replayHostHeaders, equals(['127.0.0.1']));
+          expect(replayDebugHeaders, equals([null]));
         } finally {
           await upstreamServer.close(force: true);
         }
@@ -668,6 +763,38 @@ Future<void> _sendProxyRequest(
     await response.drain<void>();
   } finally {
     client.close(force: true);
+  }
+}
+
+Future<void> _sendRawProxyRequest(
+  int proxyPort, {
+  required String method,
+  required String path,
+  required String body,
+  required Map<String, String> headers,
+}) async {
+  final socket = await Socket.connect(InternetAddress.loopbackIPv4, proxyPort);
+  try {
+    final buffer = StringBuffer()
+      ..writeln('$method $path HTTP/1.1')
+      ..writeln('Host: 127.0.0.1:$proxyPort')
+      ..writeln('Content-Type: text/plain; charset=utf-8')
+      ..writeln('Content-Length: ${utf8.encode(body).length}');
+
+    headers.forEach((key, value) {
+      buffer.writeln('$key: $value');
+    });
+
+    buffer
+      ..writeln()
+      ..write(body);
+
+    socket.add(utf8.encode(buffer.toString()));
+    await socket.flush();
+    await socket.first.timeout(const Duration(seconds: 5));
+  } finally {
+    await socket.close();
+    socket.destroy();
   }
 }
 

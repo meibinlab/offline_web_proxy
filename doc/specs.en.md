@@ -21,7 +21,7 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 - **Cache**: Store GET request responses in file-based storage. Achieve fast offline responses while considering Cache-Control headers
 - **Queue**: Manage POST/PUT/DELETE requests in FIFO (First In First Out). Send sequentially when network recovers
 - **Offline Response**: Return cache when cache hit, display fallback page when uncached
-- **Static Resources**: Serve files bundled in the app's assets/ folder locally (CSS, JS, images, etc.)
+- **Static Resources**: Index files under `assets/static/` that are declared in `pubspec.yaml` and listed in `AssetManifest.json`. The current response is still the 404 placeholder
 
 ### Proxy Target
 
@@ -44,47 +44,47 @@ Relays to the upstream origin server (e.g., https://sample.com). Supports a sing
 
 ### Detection Logic
 
-Automatically detects static resources by checking if a local file exists under `assets/static/` corresponding to the request path. No explicit specification in configuration files is required; files are automatically recognized as static resources simply by placement.
+At startup, the proxy scans `AssetManifest.json` and builds a static-resource index from files under `assets/static/` that are declared in `pubspec.yaml`. Only URLs present in that index are treated as proxy-local static resources, while ordinary same-origin URLs that are not indexed continue to resolve upstream or through proxy URL conversion. If the manifest cannot be loaded in the current runtime, the proxy continues startup with an empty static-resource index.
 
-### Automatic Mapping Feature
+### Indexing Rules
 
-Correspondence between request URL and local files:
+Mapping between local assets and proxy URLs:
 
 ```
+Local asset: assets/static/app.css
+           ↓
+Indexed at startup as: /app.css
+           ↓
 Request: http://127.0.0.1:8080/app.css
            ↓
-File Check: assets/static/app.css
+Classification: static resource
            ↓
-If exists: Return local file
-If not exists: Proxy forward to upstream server or use cache
+Current behavior: Return the 404 placeholder response
 ```
 
 ### URL Normalization Processing
 
 - **Slash Compression**: Convert `//` to `/`
 - **Relative Path Resolution**: Properly resolve `../` and `./`
-- **Path Traversal Prevention**: Reject paths containing `../`, strictly limit to under `assets/static/`
-- **Case Sensitivity**: Always distinguish case regardless of file system
+- **Index-Based Classification**: Treat only URLs present in the startup index as static resources
+- **Ordinary URL Priority**: Prefer upstream resolution for `.js`, `.css`, and image URLs when they are not in the static-resource index
 
 ### Processing Flow
 
-1. Normalize request URL
-2. Check for path traversal attacks
-3. Check for corresponding file under `assets/static/`
-4. If exists: Return local file (auto-detect Content-Type)
-5. If not exists: Proxy forward to upstream server
+1. At startup, read `AssetManifest.json` or the runtime-equivalent manifest and convert files under `assets/static/` into proxy URLs
+2. Normalize the incoming request URL
+3. If the URL is in the index: Return the 404 placeholder response
+4. Otherwise: Proxy forward to upstream or resolve as a proxy URL
 
 ### Performance Optimization
 
-- **Existence Check Cache**: Memory cache file existence check results
+- **Startup Index**: Build and keep the `assets/static/` index in memory at startup
 - **Content-Type Cache**: Cache Content-Type determination results based on extensions
-- **Startup Scan**: Scan `assets/static/` at app startup to build an in-memory list of existing files
 
 ### Security Measures
 
-- **Path Restriction**: Only accessible under `assets/static/`
-- **Path Traversal Prevention**: Strictly check `../`, `./`, absolute paths, etc.
-- **Filename Validation**: Reject invalid filename patterns
+- **Path Restriction**: Only URLs derived from files under `assets/static/` are treated as proxy-local static resources
+- **Misclassification Prevention**: Prefer upstream forwarding for URLs that are not present in the startup index instead of relying on file extensions alone
 
 ### Automatic Content-Type Detection
 

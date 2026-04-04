@@ -13,6 +13,27 @@ const String _encryptedCookieBoxName = 'proxy_cookies_secure';
 const String _legacyCookieBoxName = 'proxy_cookies';
 const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
+const Map<String, List<String>> _mockAssetManifest = {
+  'assets/static/app.js': ['assets/static/app.js'],
+  'assets/static/app.css': ['assets/static/app.css'],
+  'assets/static/css/app.css': ['assets/static/css/app.css'],
+  'assets/static/js/vendor/runtime.js': ['assets/static/js/vendor/runtime.js'],
+  'packages/offline_web_proxy/assets/static/pkg/package.css': [
+    'packages/offline_web_proxy/assets/static/pkg/package.css',
+  ],
+};
+const StringCodec _stringCodec = StringCodec();
+
+void _installMockAssetManifestHandler(Map<String, List<String>>? manifest) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMessageHandler('flutter/assets', (ByteData? message) async {
+    final assetKey = _stringCodec.decodeMessage(message);
+    if (assetKey == 'AssetManifest.json' && manifest != null) {
+      return _stringCodec.encodeMessage(jsonEncode(manifest));
+    }
+    return null;
+  });
+}
 
 class _RealHttpOverrides extends HttpOverrides {
   @override
@@ -38,6 +59,8 @@ void main() {
       }
       return null;
     });
+
+    _installMockAssetManifestHandler(_mockAssetManifest);
   });
 
   group('OfflineWebProxy Basic Tests', () {
@@ -652,6 +675,39 @@ void main() {
       );
     });
 
+    /// proxy URL 基準の相対 JavaScript URL が upstream 優先であることのテスト
+    test(
+        'should resolve relative script url by source url without classifying it as proxy static resource',
+        () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com/base'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: '../bundle.js?v=20260404',
+        sourceUrl: 'http://127.0.0.1:$proxyPort/app/page/index.html',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.inWebView),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.proxyUrl));
+      expect(resolution.usedSourceUrl, isTrue);
+      expect(resolution.isStaticResource, isFalse);
+      expect(
+        resolution.upstreamUri,
+        equals(
+          Uri.parse('https://example.com/base/app/bundle.js?v=20260404'),
+        ),
+      );
+      expect(
+        resolution.proxyUri,
+        equals(
+            Uri.parse('http://127.0.0.1:$proxyPort/app/bundle.js?v=20260404')),
+      );
+    });
+
     /// origin の base path 外 URL は unresolved になることのテスト
     test('should return unresolved for same-origin url outside proxy scope',
         () async {
@@ -678,14 +734,14 @@ void main() {
       );
     });
 
-    /// 静的リソースは localOnly として扱うことのテスト
+    /// 一覧登録された app.css は static resource として扱うことのテスト
     test('should classify proxy static resource as local only', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
       );
 
       final resolution = proxy.resolveNavigationTarget(
-        targetUrl: 'http://127.0.0.1:$proxyPort/app.js',
+        targetUrl: 'http://127.0.0.1:$proxyPort/app.css',
       );
 
       expect(
@@ -695,6 +751,67 @@ void main() {
       expect(resolution.reason, equals(ProxyNavigationReason.staticResource));
       expect(resolution.isStaticResource, isTrue);
       expect(resolution.upstreamUri, isNull);
+    });
+
+    /// 一覧登録された入れ子の css/app.css は static resource として扱うことのテスト
+    test('should classify nested static resource as local only', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: 'http://127.0.0.1:$proxyPort/css/app.css',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.localOnly),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.staticResource));
+      expect(resolution.isStaticResource, isTrue);
+      expect(resolution.upstreamUri, isNull);
+    });
+
+    /// package prefix 由来の package.css も static resource として扱うことのテスト
+    test('should classify package prefixed static resource as local only',
+        () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: 'http://127.0.0.1:$proxyPort/pkg/package.css',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.localOnly),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.staticResource));
+      expect(resolution.isStaticResource, isTrue);
+      expect(resolution.upstreamUri, isNull);
+    });
+
+    /// 一覧未登録の test.css は upstream 優先であることのテスト
+    test('should not classify unlisted css path as static resource', () async {
+      final proxyPort = await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      final resolution = proxy.resolveNavigationTarget(
+        targetUrl: 'http://127.0.0.1:$proxyPort/test.css',
+      );
+
+      expect(
+        resolution.disposition,
+        equals(ProxyNavigationDisposition.inWebView),
+      );
+      expect(resolution.reason, equals(ProxyNavigationReason.proxyUrl));
+      expect(resolution.isStaticResource, isFalse);
+      expect(
+        resolution.upstreamUri,
+        equals(Uri.parse('https://example.com/test.css')),
+      );
     });
 
     /// source URL が無い相対 URL は unresolved になることのテスト
@@ -787,7 +904,7 @@ void main() {
       );
     });
 
-    /// main frame の静的リソースは allow であることのテスト
+    /// main frame の app.css は allow であることのテスト
     test('should recommend allow for main frame proxy static resource',
         () async {
       final proxyPort = await proxy.start(
@@ -795,7 +912,7 @@ void main() {
       );
 
       final recommendation = proxy.recommendMainFrameNavigation(
-        targetUrl: 'http://127.0.0.1:$proxyPort/app.js',
+        targetUrl: 'http://127.0.0.1:$proxyPort/app.css',
       );
 
       expect(
@@ -860,7 +977,7 @@ void main() {
       expect(recommendation.externalUri, isNull);
     });
 
-    /// new window の静的リソースは loadProxyUrl であることのテスト
+    /// new window の app.css は loadProxyUrl であることのテスト
     test('should recommend proxy load for new window proxy static resource',
         () async {
       final proxyPort = await proxy.start(
@@ -868,7 +985,7 @@ void main() {
       );
 
       final recommendation = proxy.recommendNewWindowNavigation(
-        targetUrl: 'http://127.0.0.1:$proxyPort/app.js',
+        targetUrl: 'http://127.0.0.1:$proxyPort/app.css',
       );
 
       expect(
@@ -878,7 +995,7 @@ void main() {
       expect(recommendation.shouldPreventDefault, isTrue);
       expect(
         recommendation.webViewUri,
-        equals(Uri.parse('http://127.0.0.1:$proxyPort/app.js')),
+        equals(Uri.parse('http://127.0.0.1:$proxyPort/app.css')),
       );
       expect(recommendation.externalUri, isNull);
       expect(
@@ -1054,6 +1171,123 @@ void main() {
         await _performProxyGet(proxyPort, '/app/dashboard');
 
         expect(requestedPaths, equals(['/base/app/dashboard']));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 一覧登録された app.css への実リクエストは静的リソース応答になることのテスト
+    test('should return static placeholder for indexed static resource request',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final proxyPort = await proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .getUrl(Uri.parse('http://127.0.0.1:$proxyPort/app.css'));
+          final response = await request.close();
+          final body = await response.transform(utf8.decoder).join();
+
+          expect(response.statusCode, equals(HttpStatus.notFound));
+          expect(response.headers.value('x-static-resource'), equals('true'));
+          expect(body, contains('assets/static/app.css'));
+        } finally {
+          client.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 一覧登録された入れ子の css/app.css への実リクエストは静的リソース応答になることのテスト
+    test(
+        'should return static placeholder for indexed nested static resource request',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final proxyPort = await proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .getUrl(Uri.parse('http://127.0.0.1:$proxyPort/css/app.css'));
+          final response = await request.close();
+          final body = await response.transform(utf8.decoder).join();
+
+          expect(response.statusCode, equals(HttpStatus.notFound));
+          expect(response.headers.value('x-static-resource'), equals('true'));
+          expect(body, contains('assets/static/css/app.css'));
+        } finally {
+          client.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// package prefix 由来の package.css への実リクエストは静的リソース応答になることのテスト
+    test(
+        'should return static placeholder for package prefixed static resource request',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final proxyPort = await proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .getUrl(Uri.parse('http://127.0.0.1:$proxyPort/pkg/package.css'));
+          final response = await request.close();
+          final body = await response.transform(utf8.decoder).join();
+
+          expect(response.statusCode, equals(HttpStatus.notFound));
+          expect(response.headers.value('x-static-resource'), equals('true'));
+          expect(
+            body,
+            contains(
+                'packages/offline_web_proxy/assets/static/pkg/package.css'),
+          );
+        } finally {
+          client.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 拡張子付き proxy URL でも static が無ければ upstream 転送されることのテスト
+    test(
+        'should forward proxy script request to upstream when no bundled static asset exists',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final requestedPaths = <String>[];
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          requestedPaths.add(request.uri.path);
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType('application', 'javascript')
+            ..write('console.log("upstream");');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}/base',
+          ),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client.getUrl(
+            Uri.parse('http://127.0.0.1:$proxyPort/app/bundle.js'),
+          );
+          final response = await request.close();
+          final body = await response.transform(utf8.decoder).join();
+
+          expect(response.statusCode, equals(HttpStatus.ok));
+          expect(body, equals('console.log("upstream");'));
+          expect(requestedPaths, equals(['/base/app/bundle.js']));
+        } finally {
+          client.close(force: true);
+        }
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
