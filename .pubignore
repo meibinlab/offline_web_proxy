@@ -2,6 +2,9 @@
 **/build/
 **/.gradle/
 **/local.properties
+doc/api/
 coverage/
+adb_crash.log
+adb_crash_tail.log
 emulator_capture.png
 temp_dep.yml
