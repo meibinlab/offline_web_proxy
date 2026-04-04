@@ -254,6 +254,28 @@ if (navigation.disposition == ProxyNavigationDisposition.external) {
   print('Delegate externally: ${navigation.normalizedTargetUri}');
 }
 
+// Available in offline_web_proxy 0.6.0 and later.
+// sourceUrl is also required for scheme-relative targets such as //example.com.
+
+// Get a recommended action for a main-frame WebView delegate
+final recommendation = proxy.recommendMainFrameNavigation(
+  targetUrl: 'https://api.example.com/app/map?mode=car',
+  sourceUrl: 'http://127.0.0.1:$proxyPort/app/orders/detail',
+);
+switch (recommendation.action) {
+  case ProxyWebViewNavigationAction.allow:
+    break;
+  case ProxyWebViewNavigationAction.loadProxyUrl:
+    await controller.loadRequest(recommendation.webViewUri!);
+    break;
+  case ProxyWebViewNavigationAction.launchExternal:
+    print('Launch externally: ${recommendation.externalUri}');
+    break;
+  case ProxyWebViewNavigationAction.cancel:
+    print('Cancel: ${recommendation.resolution.reason}');
+    break;
+}
+
 // Restore cookies before starting the proxy
 await proxy.restoreCookies([
   CookieRestoreEntry.fromSetCookieHeader(
@@ -475,7 +497,7 @@ Timer.periodic(Duration(minutes: 5), (timer) async {
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.5.0
+      0.6.0
   </span>
 
   
