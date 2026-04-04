@@ -1,4 +1,4 @@
-## Unreleased
+## 0.6.0
 
 ### 機能追加
 
@@ -11,7 +11,7 @@
 
 ### テスト
 
-- **delegate 推奨アクションのテストを追加**: main frame と new window の内部遷移、外部委譲、解決不能ケースを検証
+- **delegate 推奨アクションのテストを追加**: main frame と new window の内部遷移、外部委譲、解決不能、静的リソース、不正 URL のケースを検証
 
 ---
 

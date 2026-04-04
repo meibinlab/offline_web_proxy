@@ -1,0 +1,7 @@
+*.iml
+**/build/
+**/.gradle/
+**/local.properties
+coverage/
+emulator_capture.png
+temp_dep.yml

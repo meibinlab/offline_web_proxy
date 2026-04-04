@@ -222,9 +222,7 @@ if (navigation.disposition == ProxyNavigationDisposition.external) {
   print('Delegate externally: ${navigation.normalizedTargetUri}');
 }
 
-// Note: the recommendation API below is available on the current main branch
-// and the next release. If you are using pub.dev 0.5.0, use
-// resolveNavigationTarget(...) until the next version is published.
+// Available in offline_web_proxy 0.6.0 and later.
 // sourceUrl is also required for scheme-relative targets such as //example.com.
 
 // Get a recommended action for a main-frame WebView delegate
