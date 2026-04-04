@@ -347,6 +347,12 @@ proxy.events.listen((event) {
 <li><code>dart analyze --fatal-warnings</code></li>
 </ul>
 <p>If a Dart file is reformatted or auto-fixed, the hook stops the commit so you can review and stage the changes.</p>
+<h2 id="release-process">Release Process</h2>
+<ul>
+<li>Update <code>pubspec.yaml</code> and <code>CHANGELOG.md</code> first, then commit those changes to <code>main</code>.</li>
+<li>Do not run <code>dart pub publish</code> manually for releases. This repository publishes via the GitHub Actions <code>release</code> job.</li>
+<li>Create and push a version tag such as <code>v0.6.1</code>. The <code>v*</code> tag push triggers GitHub Actions to run validation, publish to pub.dev, and create the GitHub Release.</li>
+</ul>
 <h2 id="license">License</h2>
 <p>MIT License</p>
 </section>
