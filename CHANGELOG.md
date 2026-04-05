@@ -1,3 +1,22 @@
+## 0.7.0
+
+### 改善
+
+- **上流 redirect の WebView 向け制御を改善**: WebView へ返す `301`、`302`、`303`、`307`、`308` では `HttpClient` の自動追従に依存せず `Location` を明示解決し、same-origin redirect は proxy URL へ書き換えるよう修正
+- **外部起動 redirect の通知を追加**: `tel:` や maps URL など外部委譲が必要な redirect を `ProxyEventType.redirectHandled` で app 側へ通知し、WebView エラー化を避けられるよう改善
+- **relative Location の解決を統一**: redirect の `Location` が相対 URL の場合でも、上流リクエスト URL 基準で一貫して解決するよう整理
+
+### ドキュメント
+
+- **README / 仕様書を更新**: upstream redirect の明示処理範囲、same-origin rewrite、外部起動通知イベントの扱いを追記
+
+### テスト
+
+- **redirect 回帰テストを追加**: direct URL 判定、same-origin redirect rewrite、relative `Location`、`tel:` / maps への外部委譲 redirect を検証
+- **エミュレータ E2E を確認**: `example` アプリの WebView E2E と device E2E を Android エミュレータで実行し、proxy 経由の実機相当動作を確認
+
+---
+
 ## 0.6.1
 
 ### 修正

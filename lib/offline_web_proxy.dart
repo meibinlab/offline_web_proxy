@@ -109,6 +109,13 @@ const String _cookieEncryptionKeyStorageKey =
 const int _cookieEncryptionKeyLength = 32;
 const String _droppedRequestBoxName = 'proxy_dropped_requests';
 const Set<String> _loopbackHosts = {'127.0.0.1', 'localhost'};
+const Set<int> _redirectStatusCodes = {
+  HttpStatus.movedPermanently,
+  HttpStatus.found,
+  HttpStatus.seeOther,
+  HttpStatus.temporaryRedirect,
+  HttpStatus.permanentRedirect,
+};
 const List<String> _staticResourceAssetPrefixes = [
   'assets/static/',
   'packages/offline_web_proxy/assets/static/',
@@ -1397,6 +1404,18 @@ class OfflineWebProxy {
         requestBodyBytes: requestBodyBytes,
       );
 
+      final redirectResponse = _tryBuildHandledRedirectResponse(
+        request: request,
+        upstreamRequestUri: result.upstreamUri,
+        statusCode: result.statusCode,
+        headers: result.headers,
+        bodyBytes: result.bodyBytes,
+      );
+      if (redirectResponse != null) {
+        _cacheMisses++;
+        return redirectResponse;
+      }
+
       // GETレスポンスをキャッシュ
       if (request.method == 'GET') {
         // Range要求（206）やRange付きGETをキャッシュすると
@@ -1713,8 +1732,14 @@ class OfflineWebProxy {
   ///
   /// [request] 転送するHTTPリクエスト。
   ///
-  /// Returns: ステータスコード、ヘッダ、ボディバイトを含むレコード。
-  Future<({int statusCode, Map<String, String> headers, List<int> bodyBytes})>
+  /// Returns: ステータスコード、ヘッダ、ボディバイト、送信先 URI を含むレコード。
+  Future<
+      ({
+        int statusCode,
+        Map<String, String> headers,
+        List<int> bodyBytes,
+        Uri upstreamUri,
+      })>
       _forwardToUpstream(
     shelf.Request request, {
     Uint8List? requestBodyBytes,
@@ -1737,6 +1762,7 @@ class OfflineWebProxy {
 
     try {
       final ioRequest = await client.openUrl(request.method, uri);
+      ioRequest.followRedirects = false;
       await _copyRequestHeaders(request, ioRequest, upstreamUri: uri);
 
       // GET以外のリクエストの場合はボディをコピー
@@ -1771,6 +1797,7 @@ class OfflineWebProxy {
         statusCode: ioResponse.statusCode,
         headers: sanitizedHeaders,
         bodyBytes: bodyBytes,
+        upstreamUri: uri,
       );
     } finally {
       _upstreamSemaphore.release();
@@ -1996,6 +2023,126 @@ class OfflineWebProxy {
     sanitized.removeWhere((key, _) => key.toLowerCase() == 'content-length');
 
     return sanitized;
+  }
+
+  /// ヘッダ名を大文字小文字を無視して取得します。
+  String? _getHeaderValueIgnoreCase(Map<String, String> headers, String name) {
+    final lowerName = name.toLowerCase();
+    for (final entry in headers.entries) {
+      if (entry.key.toLowerCase() == lowerName) {
+        return entry.value;
+      }
+    }
+    return null;
+  }
+
+  /// ヘッダ名を大文字小文字を無視して置き換えます。
+  Map<String, String> _putHeaderValueIgnoreCase(
+    Map<String, String> headers,
+    String name,
+    String value,
+  ) {
+    final updated = Map<String, String>.from(headers);
+    final lowerName = name.toLowerCase();
+    updated.removeWhere((key, _) => key.toLowerCase() == lowerName);
+    updated[name] = value;
+    return updated;
+  }
+
+  /// 上流 3xx レスポンスを解決し、必要に応じて proxy 応答へ変換します。
+  shelf.Response? _tryBuildHandledRedirectResponse({
+    required shelf.Request request,
+    required Uri upstreamRequestUri,
+    required int statusCode,
+    required Map<String, String> headers,
+    required List<int> bodyBytes,
+  }) {
+    if (!_isRedirectStatusCode(statusCode)) {
+      return null;
+    }
+
+    final locationHeader = _getHeaderValueIgnoreCase(headers, 'location');
+    if (locationHeader == null || locationHeader.trim().isEmpty) {
+      return null;
+    }
+
+    final recommendation = _recommendWebViewNavigation(
+      targetUrl: locationHeader,
+      sourceUrl: upstreamRequestUri.toString(),
+      allowInPlace: false,
+    );
+
+    switch (recommendation.action) {
+      case ProxyWebViewNavigationAction.allow:
+      case ProxyWebViewNavigationAction.cancel:
+        return null;
+      case ProxyWebViewNavigationAction.loadProxyUrl:
+        final webViewUri = recommendation.webViewUri;
+        if (webViewUri == null) {
+          return null;
+        }
+        _emitRedirectHandledEvent(
+          request: request,
+          upstreamRequestUri: upstreamRequestUri,
+          statusCode: statusCode,
+          locationHeader: locationHeader,
+          recommendation: recommendation,
+        );
+        return shelf.Response(
+          statusCode,
+          body: Uint8List.fromList(bodyBytes),
+          headers: _putHeaderValueIgnoreCase(
+            headers,
+            'location',
+            webViewUri.toString(),
+          ),
+        );
+      case ProxyWebViewNavigationAction.launchExternal:
+        _emitRedirectHandledEvent(
+          request: request,
+          upstreamRequestUri: upstreamRequestUri,
+          statusCode: statusCode,
+          locationHeader: locationHeader,
+          recommendation: recommendation,
+        );
+        return shelf.Response(
+          HttpStatus.noContent,
+          headers: {
+            'Cache-Control': 'no-store',
+            'X-Proxy-Redirect': 'external',
+            'X-Proxy-Redirect-Action':
+                ProxyWebViewNavigationAction.launchExternal.name,
+          },
+        );
+    }
+  }
+
+  /// 解決済み redirect を app 側へ通知します。
+  void _emitRedirectHandledEvent({
+    required shelf.Request request,
+    required Uri upstreamRequestUri,
+    required int statusCode,
+    required String locationHeader,
+    required ProxyWebViewNavigationRecommendation recommendation,
+  }) {
+    _emitEvent(ProxyEventType.redirectHandled, request.url.toString(), {
+      'method': request.method,
+      'proxyRequestUrl': request.requestedUri.toString(),
+      'sourceUpstreamUrl': upstreamRequestUri.toString(),
+      'redirectStatusCode': statusCode,
+      'locationHeader': locationHeader,
+      'redirectAction': recommendation.action.name,
+      'normalizedTargetUrl':
+          recommendation.resolution.normalizedTargetUri?.toString(),
+      'resolvedUpstreamUrl': recommendation.resolution.upstreamUri?.toString(),
+      'resolvedProxyUrl': recommendation.webViewUri?.toString(),
+      'externalUrl': recommendation.externalUri?.toString(),
+      'navigationDisposition': recommendation.resolution.disposition.name,
+      'navigationReason': recommendation.resolution.reason.name,
+      'usedSourceUrl': recommendation.resolution.usedSourceUrl,
+      'usedLoopbackAlias': recommendation.resolution.usedLoopbackAlias,
+      'isStaticResource': recommendation.resolution.isStaticResource,
+    });
   }
 
   /// 上流レスポンスの `Set-Cookie` を Cookie Box に保存します。
@@ -2939,6 +3086,11 @@ class OfflineWebProxy {
   /// HTTP または HTTPS スキームかどうかを返します。
   bool _isHttpScheme(String scheme) {
     return scheme == 'http' || scheme == 'https';
+  }
+
+  /// redirect として明示処理する HTTP ステータスかどうかを返します。
+  bool _isRedirectStatusCode(int statusCode) {
+    return _redirectStatusCodes.contains(statusCode);
   }
 
   /// URL 文字列を絶対 HTTP(S) URI として解釈します。

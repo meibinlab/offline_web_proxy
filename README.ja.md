@@ -5,7 +5,7 @@
 [![ライセンス](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![カバレッジ](https://codecov.io/gh/meibinlab/offline_web_proxy/branch/main/graph/badge.svg)](https://codecov.io/gh/meibinlab/offline_web_proxy)
 
-offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシです。既存の Web アプリをモバイルアプリ内で扱う際に、接続が不安定でも動作を継続しやすくすることを目的にしています。
+offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシです。既存の Web アプリをモバイルアプリ内で扱う際に、接続が不安定な場合や一時的に利用できない場合でも動作を継続しやすくすることを目的にしています。
 
 127.0.0.1 上で動作し、オンライン時は設定済みの上流 origin へ転送し、オフライン時はキャッシュを返し、更新系リクエストはキューに保持します。加えて、WebView の遷移判定、Cookie 再利用、統計取得、イベント監視の API を提供します。
 
@@ -16,7 +16,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 - POST、PUT、DELETE のオフラインキューイング
 - AES-256 による Cookie 永続化と復元 API
 - same-origin、外部委譲、新規 window 判定のための WebView 補助 API
-- 統計情報とイベントストリームによる監視
+- 統計情報とイベントストリームによる監視とデバッグ
 
 ## 動作要件
 
@@ -30,7 +30,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.6.1
+  offline_web_proxy: ^0.7.0
   # example アプリと CI ではこの WebView 系を使用しています。
   webview_flutter: ^4.8.0
 ```
@@ -221,6 +221,7 @@ final newWindowRecommendation = proxy.recommendNewWindowNavigation(
 相対 URL や scheme-relative URL の解決には `sourceUrl` が必要です。`sourceUrl` が無い場合、意図的に unresolved になるケースがあります。
 起動時に `AssetManifest.json` を走査し、`assets/static/` 配下に存在するファイルだけを proxy ローカル静的リソースとして扱います。たとえば `assets/static/app.css` は proxy URL の `/app.css` に対応し、一覧に無い `/test.css` は upstream 解決を優先します。
 実行環境で manifest を読み込めない場合でも、proxy 起動は中断せず、静的リソース一覧を空として通常の upstream 解決へフォールバックします。
+WebView へ返す上流レスポンスが `301`、`302`、`303`、`307`、`308` の場合、proxy は `HttpClient` の自動追従に依存せず `Location` を明示解決します。same-origin redirect は proxy URL へ書き換え、relative `Location` は上流リクエスト URL 基準で解決し、外部起動 redirect は `ProxyEventType.redirectHandled` で app 側へ通知できます。
 
 ## Cookie API
 
@@ -276,10 +277,15 @@ proxy.events.listen((event) {
     print(event.data['resolvedUpstreamUrl']);
     print(event.data['navigationDisposition']);
   }
+  if (event.type == ProxyEventType.redirectHandled &&
+      event.data['redirectAction'] ==
+          ProxyWebViewNavigationAction.launchExternal.name) {
+    print(event.data['externalUrl']);
+  }
 });
 ```
 
-イベントストリームでは、キャッシュヒット、キュー処理、URL 解決メタ情報などを監視できます。`requestReceived` では `resolvedUpstreamUrl`、`resolvedProxyUrl`、`navigationDisposition`、`navigationReason` などを参照できます。
+イベントストリームでは、キャッシュヒット、キュー処理、URL 解決メタ情報に加え、redirect 処理結果も監視できます。`redirectHandled` では `redirectStatusCode`、`locationHeader`、`redirectAction`、`resolvedProxyUrl`、`externalUrl` などを参照できます。
 
 ## プラットフォーム設定
 
@@ -349,7 +355,7 @@ Dart ファイルが自動修正または再整形された場合は、内容確
 
 - 先に `pubspec.yaml` と `CHANGELOG.md` を更新し、その変更を `main` へコミットします。
 - リリース時にローカルで `dart pub publish` を直接実行しません。このリポジトリは GitHub Actions の `release` job 経由で公開します。
-- `v0.6.1` のようなバージョンタグを作成して push します。`v*` タグ push を契機に GitHub Actions が検証、pub.dev 公開、GitHub Release 作成を実行します。
+- `v0.7.0` のようなバージョンタグを作成して push します。`v*` タグ push を契機に GitHub Actions が検証、pub.dev 公開、GitHub Release 作成を実行します。
 
 ## ライセンス
 

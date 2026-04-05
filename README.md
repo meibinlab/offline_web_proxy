@@ -30,7 +30,7 @@ Add the package to your app:
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.6.1
+  offline_web_proxy: ^0.7.0
   # Example app and CI currently use this WebView version range.
   webview_flutter: ^4.8.0
 ```
@@ -221,6 +221,7 @@ Use cases:
 Relative URLs and scheme-relative URLs depend on `sourceUrl`. If `sourceUrl` is missing, some targets remain unresolved by design.
 At startup, the proxy scans `AssetManifest.json` for files under `assets/static/` and exposes only those entries as proxy-local static resources. For example, `assets/static/app.css` is matched by the proxy URL `/app.css`, while an unlisted `/test.css` still resolves upstream.
 If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.
+For upstream `301`, `302`, `303`, `307`, and `308` responses returned to WebView, the proxy resolves `Location` explicitly instead of relying on `HttpClient` auto-follow. Same-origin redirects are rewritten to proxy URLs, relative `Location` values are resolved against the upstream request URL, and external-launch redirects are surfaced through `ProxyEventType.redirectHandled`.
 
 ## Cookie APIs
 
@@ -276,10 +277,15 @@ proxy.events.listen((event) {
     print(event.data['resolvedUpstreamUrl']);
     print(event.data['navigationDisposition']);
   }
+  if (event.type == ProxyEventType.redirectHandled &&
+      event.data['redirectAction'] ==
+          ProxyWebViewNavigationAction.launchExternal.name) {
+    print(event.data['externalUrl']);
+  }
 });
 ```
 
-The event stream is useful for observing cache hits, queue activity, and request-resolution metadata such as `resolvedUpstreamUrl`, `resolvedProxyUrl`, `navigationDisposition`, and `navigationReason`.
+The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. `redirectHandled` includes fields such as `redirectStatusCode`, `locationHeader`, `redirectAction`, `resolvedProxyUrl`, and `externalUrl`.
 
 ## Platform Setup
 
@@ -349,7 +355,7 @@ If a Dart file is reformatted or auto-fixed, the hook stops the commit so you ca
 
 - Update `pubspec.yaml` and `CHANGELOG.md` first, then commit those changes to `main`.
 - Do not run `dart pub publish` manually for releases. This repository publishes via the GitHub Actions `release` job.
-- Create and push a version tag such as `v0.6.1`. The `v*` tag push triggers GitHub Actions to run validation, publish to pub.dev, and create the GitHub Release.
+- Create and push a version tag such as `v0.7.0`. The `v*` tag push triggers GitHub Actions to run validation, publish to pub.dev, and create the GitHub Release.
 
 ## License
 

@@ -36,6 +36,9 @@ enum ProxyEventType {
   /// リクエスト受信
   requestReceived,
 
+  /// 上流 redirect を解決して処理
+  redirectHandled,
+
   /// キャッシュヒット
   cacheHit,
 

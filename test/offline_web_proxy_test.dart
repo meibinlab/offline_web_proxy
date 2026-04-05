@@ -845,6 +845,33 @@ void main() {
       );
     });
 
+    /// Google Maps 検索 URL は external launch を推奨することのテスト
+    test('should recommend external launch for google maps search url', () {
+      final recommendation = proxy.recommendMainFrameNavigation(
+        targetUrl:
+            'https://www.google.com/maps/search/?api=1&query=Tokyo+Station',
+      );
+
+      expect(
+        recommendation.action,
+        equals(ProxyWebViewNavigationAction.launchExternal),
+      );
+      expect(recommendation.shouldPreventDefault, isTrue);
+      expect(recommendation.webViewUri, isNull);
+      expect(
+        recommendation.externalUri,
+        equals(
+          Uri.parse(
+            'https://www.google.com/maps/search/?api=1&query=Tokyo+Station',
+          ),
+        ),
+      );
+      expect(
+        recommendation.resolution.reason,
+        equals(ProxyNavigationReason.externalOrigin),
+      );
+    });
+
     /// HTTPS の loopback URL を proxy URL と誤判定しないことのテスト
     test('should not treat https loopback url as proxy endpoint', () async {
       final proxyPort = await proxy.start(
@@ -1288,6 +1315,181 @@ void main() {
         } finally {
           client.close(force: true);
         }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 301/302/303/307/308 の same-origin redirect は proxy URL へ書き換えることのテスト
+    for (final redirectStatusCode in const <int>[301, 302, 303, 307, 308]) {
+      test(
+          'should rewrite same origin redirect location to proxy url for status $redirectStatusCode',
+          () async {
+        await HttpOverrides.runZoned(() async {
+          final requestedPaths = <String>[];
+          upstreamServer =
+              await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          upstreamServer!.listen((HttpRequest request) async {
+            requestedPaths.add(request.uri.path);
+            request.response
+              ..statusCode = redirectStatusCode
+              ..headers.set(
+                'Location',
+                'http://127.0.0.1:${upstreamServer!.port}/base/app/map?mode=car',
+              );
+            await request.response.close();
+          });
+
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstreamServer!.port}/base',
+            ),
+          );
+
+          final response = await _performProxyGetWithoutFollowingRedirects(
+            proxyPort,
+            '/redirect-same-origin',
+          );
+
+          expect(response.statusCode, equals(redirectStatusCode));
+          expect(
+            response.headers.value('location'),
+            equals('http://127.0.0.1:$proxyPort/app/map?mode=car'),
+          );
+          expect(requestedPaths, equals(['/base/redirect-same-origin']));
+        }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      });
+    }
+
+    /// 相対 Location の redirect は upstream 基準で解決して proxy URL へ書き換えることのテスト
+    test('should rewrite relative redirect location to proxy url', () async {
+      await HttpOverrides.runZoned(() async {
+        final requestedPaths = <String>[];
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          requestedPaths.add(request.uri.path);
+          request.response
+            ..statusCode = HttpStatus.found
+            ..headers.set('Location', '../app/map?mode=car');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}/base/flow',
+          ),
+        );
+
+        final response = await _performProxyGetWithoutFollowingRedirects(
+          proxyPort,
+          '/step/detail',
+        );
+
+        expect(response.statusCode, equals(HttpStatus.found));
+        expect(
+          response.headers.value('location'),
+          equals('http://127.0.0.1:$proxyPort/app/map?mode=car'),
+        );
+        expect(requestedPaths, equals(['/base/flow/step/detail']));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 外部 redirect は event で launchExternal を通知し、WebView へ 204 を返すことのテスト
+    test('should notify external launch for tel redirect', () async {
+      await HttpOverrides.runZoned(() async {
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          request.response
+            ..statusCode = HttpStatus.found
+            ..headers.set('Location', 'tel:+81012345678');
+          await request.response.close();
+        });
+
+        final redirectEvent = Completer<ProxyEvent>();
+        final subscription = proxy.events.listen((ProxyEvent event) {
+          if (event.type == ProxyEventType.redirectHandled &&
+              !redirectEvent.isCompleted) {
+            redirectEvent.complete(event);
+          }
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}/base',
+          ),
+        );
+
+        final response = await _performProxyGetWithoutFollowingRedirects(
+          proxyPort,
+          '/redirect-external-tel',
+        );
+        final event = await redirectEvent.future.timeout(
+          const Duration(seconds: 1),
+        );
+
+        expect(response.statusCode, equals(HttpStatus.noContent));
+        expect(
+          response.headers.value('x-proxy-redirect-action'),
+          equals(ProxyWebViewNavigationAction.launchExternal.name),
+        );
+        expect(event.data['redirectStatusCode'], equals(HttpStatus.found));
+        expect(event.data['locationHeader'], equals('tel:+81012345678'));
+        expect(
+          event.data['redirectAction'],
+          equals(ProxyWebViewNavigationAction.launchExternal.name),
+        );
+        expect(event.data['externalUrl'], equals('tel:+81012345678'));
+        expect(
+          event.data['navigationReason'],
+          equals(ProxyNavigationReason.nonHttpScheme.name),
+        );
+
+        await subscription.cancel();
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 外部 https redirect は event で launchExternal を通知し、WebView へ 204 を返すことのテスト
+    test('should notify external launch for maps redirect', () async {
+      await HttpOverrides.runZoned(() async {
+        const mapsUrl =
+            'https://www.google.com/maps/search/?api=1&query=Tokyo+Station';
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          request.response
+            ..statusCode = HttpStatus.seeOther
+            ..headers.set('Location', mapsUrl);
+          await request.response.close();
+        });
+
+        final redirectEvent = Completer<ProxyEvent>();
+        final subscription = proxy.events.listen((ProxyEvent event) {
+          if (event.type == ProxyEventType.redirectHandled &&
+              !redirectEvent.isCompleted) {
+            redirectEvent.complete(event);
+          }
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}/base',
+          ),
+        );
+
+        final response = await _performProxyGetWithoutFollowingRedirects(
+          proxyPort,
+          '/redirect-external-maps',
+        );
+        final event = await redirectEvent.future.timeout(
+          const Duration(seconds: 1),
+        );
+
+        expect(response.statusCode, equals(HttpStatus.noContent));
+        expect(event.data['locationHeader'], equals(mapsUrl));
+        expect(event.data['externalUrl'], equals(mapsUrl));
+        expect(
+          event.data['navigationReason'],
+          equals(ProxyNavigationReason.externalOrigin.name),
+        );
+
+        await subscription.cancel();
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
@@ -1799,6 +2001,27 @@ Future<void> _performProxyGet(int proxyPort, String path) async {
         await client.getUrl(Uri.parse('http://127.0.0.1:$proxyPort$path'));
     final response = await request.close();
     await response.drain<void>();
+  } finally {
+    client.close(force: true);
+  }
+}
+
+Future<({int statusCode, HttpHeaders headers, String body})>
+    _performProxyGetWithoutFollowingRedirects(
+  int proxyPort,
+  String path,
+) async {
+  final client = HttpClient();
+  try {
+    final request =
+        await client.getUrl(Uri.parse('http://127.0.0.1:$proxyPort$path'));
+    request.followRedirects = false;
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    return (statusCode: response.statusCode, headers: response.headers, body: body);
+  } catch (_) {
+    client.close(force: true);
+    rethrow;
   } finally {
     client.close(force: true);
   }

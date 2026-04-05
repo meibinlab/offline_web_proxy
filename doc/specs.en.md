@@ -477,8 +477,10 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 ### Location Header
 
-- **rewrite**: Rewrite to proxy server's URL
-- **passthrough**: Pass through as-is
+- **rewrite**: Rewrite same-origin `301`, `302`, `303`, `307`, and `308` redirects returned to WebView to proxy URLs
+- **relative resolution**: Resolve relative `Location` values against the upstream request URL
+- **external notify**: Notify external-launch targets such as `tel`, `mailto`, `sms`, `geo`, `google.navigation`, and Google Maps URLs through `ProxyEventType.redirectHandled`, then return 204
+- **passthrough**: Pass through `Location` unchanged when it cannot be normalized to a proxy URL
 
 ## [15] Timeout/Retry Default Values
 
@@ -1052,6 +1054,7 @@ Returns a recommended WebView main-frame delegate action: `allow`, `cancel`, `lo
   - `launchExternal` populates `externalUri` with a normalized URL that can be passed directly to an external launcher
   - `loadProxyUrl` populates `webViewUri` with the proxy URL to load explicitly
   - `cancel` is not limited to dangerous URLs; it also covers cases such as `outsideProxyScope` or `relativeUrlWithoutSource`, where this library cannot make a safe decision by itself
+  - Upstream redirect `Location` values are handled inside the proxy with the same resolution rules
 
 ```dart
 final recommendation = proxy.recommendMainFrameNavigation(
@@ -1350,6 +1353,7 @@ enum ProxyEventType {
   serverStarted, // Server started
   serverStopped, // Server stopped
   requestReceived, // Request received
+  redirectHandled, // Upstream redirect resolved and handled
   cacheHit, // Cache hit
   cacheMiss, // Cache miss
   cacheStaleUsed, // Stale cache used
@@ -1373,6 +1377,20 @@ For `requestReceived`, `data` may include the following metadata:
 - `usedLoopbackAlias`: Whether `localhost` and `127.0.0.1` alias handling was used
 - `usedSourceUrl`: Whether a relative target was resolved using `sourceUrl`
 - `isStaticResource`: Whether the request was classified as a proxy-local static resource
+
+For `redirectHandled`, `data` may include the following metadata:
+
+- `proxyRequestUrl`: Absolute proxy URL that triggered the redirect
+- `sourceUpstreamUrl`: Upstream request URL used to resolve `Location`
+- `redirectStatusCode`: Upstream redirect status code
+- `locationHeader`: Raw `Location` header value from upstream
+- `redirectAction`: `ProxyWebViewNavigationAction` name
+- `normalizedTargetUrl`: Normalized target URL after relative resolution
+- `resolvedUpstreamUrl`: Resolved upstream URL for the redirect target
+- `resolvedProxyUrl`: Proxy URL returned to WebView after rewrite
+- `externalUrl`: URL to hand to the app for external launch
+- `navigationDisposition`: `ProxyNavigationDisposition` name
+- `navigationReason`: `ProxyNavigationReason` name
 
 #### Exception Classes
 
