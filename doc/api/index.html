@@ -68,7 +68,7 @@
 <h2 id="installation">Installation</h2>
 <p>Add the package to your app:</p>
 <pre class="language-yaml"><code class="language-yaml">dependencies:
-  offline_web_proxy: ^0.6.1
+  offline_web_proxy: ^0.7.0
   # Example app and CI currently use this WebView version range.
   webview_flutter: ^4.8.0
 </code></pre>
@@ -241,7 +241,8 @@ final newWindowRecommendation = proxy.recommendNewWindowNavigation(
 </ul>
 <p>Relative URLs and scheme-relative URLs depend on <code>sourceUrl</code>. If <code>sourceUrl</code> is missing, some targets remain unresolved by design.
 At startup, the proxy scans <code>AssetManifest.json</code> for files under <code>assets/static/</code> and exposes only those entries as proxy-local static resources. For example, <code>assets/static/app.css</code> is matched by the proxy URL <code>/app.css</code>, while an unlisted <code>/test.css</code> still resolves upstream.
-If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.</p>
+If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.
+For upstream <code>301</code>, <code>302</code>, <code>303</code>, <code>307</code>, and <code>308</code> responses returned to WebView, the proxy resolves <code>Location</code> explicitly instead of relying on <code>HttpClient</code> auto-follow. Same-origin redirects are rewritten to proxy URLs, relative <code>Location</code> values are resolved against the upstream request URL, and external-launch redirects are surfaced through <code>ProxyEventType.redirectHandled</code>.</p>
 <h2 id="cookie-apis">Cookie APIs</h2>
 <p>Cookies are persisted in encrypted storage and can be restored before the proxy starts.</p>
 <pre class="language-dart"><code class="language-dart">await proxy.restoreCookies([
@@ -290,9 +291,14 @@ proxy.events.listen((event) {
     print(event.data['resolvedUpstreamUrl']);
     print(event.data['navigationDisposition']);
   }
+  if (event.type == ProxyEventType.redirectHandled &amp;&amp;
+      event.data['redirectAction'] ==
+          ProxyWebViewNavigationAction.launchExternal.name) {
+    print(event.data['externalUrl']);
+  }
 });
 </code></pre>
-<p>The event stream is useful for observing cache hits, queue activity, and request-resolution metadata such as <code>resolvedUpstreamUrl</code>, <code>resolvedProxyUrl</code>, <code>navigationDisposition</code>, and <code>navigationReason</code>.</p>
+<p>The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. <code>redirectHandled</code> includes fields such as <code>redirectStatusCode</code>, <code>locationHeader</code>, <code>redirectAction</code>, <code>resolvedProxyUrl</code>, and <code>externalUrl</code>.</p>
 <h2 id="platform-setup">Platform Setup</h2>
 <h3 id="ios">iOS</h3>
 <p>Allow local networking in <code>ios/Runner/Info.plist</code>:</p>
@@ -339,6 +345,12 @@ proxy.events.listen((event) {
 <li><code>dart analyze --fatal-warnings</code></li>
 </ul>
 <p>If a Dart file is reformatted or auto-fixed, the hook stops the commit so you can review and stage the changes.</p>
+<h2 id="release-process">Release Process</h2>
+<ul>
+<li>Update <code>pubspec.yaml</code> and <code>CHANGELOG.md</code> first, then commit those changes to <code>main</code>.</li>
+<li>Do not run <code>dart pub publish</code> manually for releases. This repository publishes via the GitHub Actions <code>release</code> job.</li>
+<li>Create and push a version tag such as <code>v0.7.0</code>. The <code>v*</code> tag push triggers GitHub Actions to run validation, publish to pub.dev, and create the GitHub Release.</li>
+</ul>
 <h2 id="license">License</h2>
 <p>MIT License</p>
 </section>
@@ -381,7 +393,7 @@ proxy.events.listen((event) {
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.6.1
+      0.7.0
   </span>
   
 </footer>
