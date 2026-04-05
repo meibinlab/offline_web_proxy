@@ -1739,8 +1739,7 @@ class OfflineWebProxy {
         Map<String, String> headers,
         List<int> bodyBytes,
         Uri upstreamUri,
-      })>
-      _forwardToUpstream(
+      })> _forwardToUpstream(
     shelf.Request request, {
     Uint8List? requestBodyBytes,
   }) async {

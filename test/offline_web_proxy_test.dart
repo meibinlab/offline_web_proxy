@@ -2018,7 +2018,11 @@ Future<({int statusCode, HttpHeaders headers, String body})>
     request.followRedirects = false;
     final response = await request.close();
     final body = await response.transform(utf8.decoder).join();
-    return (statusCode: response.statusCode, headers: response.headers, body: body);
+    return (
+      statusCode: response.statusCode,
+      headers: response.headers,
+      body: body
+    );
   } catch (_) {
     client.close(force: true);
     rethrow;
