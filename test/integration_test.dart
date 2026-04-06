@@ -71,7 +71,9 @@ void main() {
     });
 
     /// 複数の基本操作を連続して処理できること
-    test('keeps cache, queue, cookie, and stats APIs usable across sequential admin operations', () async {
+    test(
+        'keeps cache, queue, cookie, and stats APIs usable across sequential admin operations',
+        () async {
       expect(proxy.isRunning, isFalse);
 
       var stats = await proxy.getStats();
@@ -187,7 +189,8 @@ void main() {
     });
 
     /// 一部のエラーがあっても他の操作を継続できること
-    test('returns successful results from unaffected APIs when some calls fail', () async {
+    test('returns successful results from unaffected APIs when some calls fail',
+        () async {
       final futures = <Future>[];
 
       futures.add(proxy.getStats());
@@ -277,7 +280,8 @@ void main() {
     });
 
     /// オンライン時は既存キャッシュがあっても upstream 応答を優先すること
-    test('should prefer upstream response for online get requests even with cache',
+    test(
+        'should prefer upstream response for online get requests even with cache',
         () async {
       await HttpOverrides.runZoned(() async {
         late HttpServer upstreamServer;
@@ -448,7 +452,8 @@ void main() {
 
           expect(clientErrorResponse.statusCode, equals(HttpStatus.notFound));
           expect(clientErrorResponse.body, equals('{"error":"not-found"}'));
-          expect(clientErrorResponse.body, isNot(equals('{"source":"seeded"}')));
+          expect(
+              clientErrorResponse.body, isNot(equals('{"source":"seeded"}')));
           expect(clientErrorResponse.headers.value('x-offline-source'), isNull);
 
           final cacheStatsAfter4xx = await proxy.getCacheStats();
@@ -460,14 +465,15 @@ void main() {
           final serverErrorResponse =
               await _performProxyRequest(proxyPort, '/api/error-no-fallback');
 
-          expect(
-              serverErrorResponse.statusCode, equals(HttpStatus.serviceUnavailable));
+          expect(serverErrorResponse.statusCode,
+              equals(HttpStatus.serviceUnavailable));
           expect(serverErrorResponse.body, equals('{"error":"unavailable"}'));
-          expect(serverErrorResponse.body, isNot(equals('{"source":"seeded"}')));
+          expect(
+              serverErrorResponse.body, isNot(equals('{"source":"seeded"}')));
           expect(serverErrorResponse.headers.value('x-offline-source'), isNull);
 
-            final cacheStatsAfter5xx = await proxy.getCacheStats();
-            expect(cacheStatsAfter5xx.totalEntries, equals(1));
+          final cacheStatsAfter5xx = await proxy.getCacheStats();
+          expect(cacheStatsAfter5xx.totalEntries, equals(1));
 
           expect(requestCount, equals(3));
           expect(eventTypes, isNot(contains(ProxyEventType.cacheStaleUsed)));
@@ -937,7 +943,8 @@ Future<void> _sendProxyRequest(
   }
 }
 
-Future<({int statusCode, HttpHeaders headers, String body})> _performProxyRequest(
+Future<({int statusCode, HttpHeaders headers, String body})>
+    _performProxyRequest(
   int proxyPort,
   String path, {
   String method = 'GET',

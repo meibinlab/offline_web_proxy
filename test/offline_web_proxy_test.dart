@@ -183,8 +183,7 @@ void main() {
     });
 
     /// オンライン時にキャッシュが存在しても upstream を優先すること
-    test('should forward online get requests even when cache exists',
-        () async {
+    test('should forward online get requests even when cache exists', () async {
       await HttpOverrides.runZoned(() async {
         var requestCount = 0;
         upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -203,7 +202,8 @@ void main() {
           ),
         );
 
-        final firstResponse = await _performProxyRequest(proxyPort, '/api/data');
+        final firstResponse =
+            await _performProxyRequest(proxyPort, '/api/data');
         final secondResponse =
             await _performProxyRequest(proxyPort, '/api/data');
 
@@ -216,8 +216,7 @@ void main() {
     });
 
     /// request timeout 時だけキャッシュへフォールバックすること
-    test('should fallback to cached get response on request timeout',
-        () async {
+    test('should fallback to cached get response on request timeout', () async {
       await HttpOverrides.runZoned(() async {
         var shouldDelay = false;
         upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -240,7 +239,8 @@ void main() {
           ),
         );
 
-        final seededResponse = await _performProxyRequest(proxyPort, '/api/data');
+        final seededResponse =
+            await _performProxyRequest(proxyPort, '/api/data');
         expect(seededResponse.statusCode, equals(HttpStatus.ok));
         expect(seededResponse.body, equals('{"source":"upstream"}'));
 
@@ -254,8 +254,7 @@ void main() {
     });
 
     /// upstream 5xx ではキャッシュに切り替えないこと
-    test('should return upstream 5xx without falling back to cache',
-        () async {
+    test('should return upstream 5xx without falling back to cache', () async {
       await HttpOverrides.runZoned(() async {
         var returnServerError = false;
         upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -277,7 +276,8 @@ void main() {
           ),
         );
 
-        final seededResponse = await _performProxyRequest(proxyPort, '/api/data');
+        final seededResponse =
+            await _performProxyRequest(proxyPort, '/api/data');
         expect(seededResponse.statusCode, equals(HttpStatus.ok));
 
         returnServerError = true;
@@ -290,8 +290,7 @@ void main() {
     });
 
     /// upstream 4xx ではキャッシュに切り替えないこと
-    test('should return upstream 4xx without falling back to cache',
-        () async {
+    test('should return upstream 4xx without falling back to cache', () async {
       await HttpOverrides.runZoned(() async {
         var returnClientError = false;
         upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -313,7 +312,8 @@ void main() {
           ),
         );
 
-        final seededResponse = await _performProxyRequest(proxyPort, '/api/data');
+        final seededResponse =
+            await _performProxyRequest(proxyPort, '/api/data');
         expect(seededResponse.statusCode, equals(HttpStatus.ok));
 
         returnClientError = true;
@@ -1669,7 +1669,8 @@ void main() {
         'headers': {'content-type': 'application/json'},
         'body': Uint8List.fromList(utf8.encode('{"status":"stale"}')),
         'createdAt': now.subtract(const Duration(hours: 2)).toIso8601String(),
-        'expiresAt': now.subtract(const Duration(minutes: 10)).toIso8601String(),
+        'expiresAt':
+            now.subtract(const Duration(minutes: 10)).toIso8601String(),
         'contentType': 'application/json',
         'sizeBytes': 18,
       });
@@ -2217,7 +2218,8 @@ Future<void> _performProxyGet(int proxyPort, String path) async {
   }
 }
 
-Future<({int statusCode, HttpHeaders headers, String body})> _performProxyRequest(
+Future<({int statusCode, HttpHeaders headers, String body})>
+    _performProxyRequest(
   int proxyPort,
   String path, {
   String method = 'GET',

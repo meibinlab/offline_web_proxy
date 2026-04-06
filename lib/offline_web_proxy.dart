@@ -1598,7 +1598,8 @@ class OfflineWebProxy {
       final cacheKey = _generateCacheKey(upstreamUrl);
       final cachedEntry = await _loadCachedFallbackEntry(cacheKey);
 
-      if (cachedEntry != null && _shouldServeCachedFallback(cachedEntry.status)) {
+      if (cachedEntry != null &&
+          _shouldServeCachedFallback(cachedEntry.status)) {
         _cacheHits++;
         _emitEvent(ProxyEventType.cacheHit, request.url.toString(), {});
         return _buildCachedReadResponse(
@@ -1728,7 +1729,6 @@ class OfflineWebProxy {
     Map<String, String> headers,
     Uint8List bodyBytes,
   })? _cachedBytesEntryFromData(Map data) {
-
     final statusCode = data['statusCode'] as int;
     final headers = Map<String, String>.from(data['headers'] as Map);
     final body = data['body'];
@@ -1846,7 +1846,8 @@ class OfflineWebProxy {
           builder.add(chunk);
         }
         return builder.takeBytes();
-      })().timeout(requestTimeout);
+      })()
+          .timeout(requestTimeout);
 
       final headerSnapshot =
           ResponseHeaderSnapshot.fromHttpHeaders(ioResponse.headers);
@@ -2562,7 +2563,8 @@ class OfflineWebProxy {
           builder.add(chunk);
         }
         return builder.takeBytes();
-      })().timeout(timeoutDuration);
+      })()
+          .timeout(timeoutDuration);
 
       final headerSnapshot =
           ResponseHeaderSnapshot.fromHttpHeaders(response.headers);
@@ -2887,7 +2889,8 @@ class OfflineWebProxy {
   CacheStatus _determineStatus(Map data) {
     final now = DateTime.now();
     final expiresAt = DateTime.parse(data['expiresAt'] as String);
-    final contentType = data['contentType'] as String? ?? 'application/octet-stream';
+    final contentType =
+        data['contentType'] as String? ?? 'application/octet-stream';
 
     if (now.isBefore(expiresAt)) {
       return CacheStatus.fresh;

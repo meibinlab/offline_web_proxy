@@ -1,6 +1,7 @@
 import 'dart:io';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
@@ -103,7 +104,8 @@ void main() {
     });
 
     /// 複数のパス形式で proxy URL を組み立てられること
-    test('builds valid proxy urls for paths with and without a leading slash', () async {
+    test('builds valid proxy urls for paths with and without a leading slash',
+        () async {
       final config = ProxyConfig(
         origin: 'https://api.example.com',
         port: 0,
@@ -319,10 +321,9 @@ void main() {
       expect(proxy.isRunning, isTrue);
       expect(port, greaterThan(0));
 
-        final withLeadingSlash = 'http://127.0.0.1:$port/app/index.html';
-        final withoutLeadingSlash =
-          'http://127.0.0.1:$port/${'app/index.html'}';
-        expect(withLeadingSlash, equals(withoutLeadingSlash));
+      final withLeadingSlash = 'http://127.0.0.1:$port/app/index.html';
+      final withoutLeadingSlash = 'http://127.0.0.1:$port/${'app/index.html'}';
+      expect(withLeadingSlash, equals(withoutLeadingSlash));
     });
 
     /// クエリ付き URL でも起動状態を維持できること
