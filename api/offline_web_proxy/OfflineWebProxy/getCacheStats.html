@@ -91,8 +91,6 @@
     int expiredEntries = 0;
     int totalSize = 0;
 
-    final now = DateTime.now();
-
     if (_cacheBox != null) {
       for (final key in _cacheBox!.keys) {
         final entry = _cacheBox!.get(key) as Map?;
@@ -100,20 +98,13 @@
           totalEntries++;
           totalSize += (entry[&#39;sizeBytes&#39;] as int? ?? 0);
 
-          final expiresAt = DateTime.parse(entry[&#39;expiresAt&#39;] as String);
-          final createdAt = DateTime.parse(entry[&#39;createdAt&#39;] as String);
-
-          if (now.isBefore(expiresAt)) {
-            freshEntries++;
-          } else {
-            &#47;&#47; Stale期間内かチェック
-            final staleUntil = _calculateStaleExpiration(
-                createdAt, entry[&#39;contentType&#39;] as String);
-            if (now.isBefore(staleUntil)) {
+          switch (_determineStatus(entry)) {
+            case CacheStatus.fresh:
+              freshEntries++;
+            case CacheStatus.stale:
               staleEntries++;
-            } else {
+            case CacheStatus.expired:
               expiredEntries++;
-            }
           }
         }
       }

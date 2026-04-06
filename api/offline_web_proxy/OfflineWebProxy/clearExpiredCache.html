@@ -85,7 +85,6 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearExpiredCache() async {
   try {
-    final now = DateTime.now();
     final keysToDelete = &lt;String&gt;[];
 
     if (_cacheBox != null) {
@@ -94,8 +93,7 @@
         final key = keys[i];
         final entry = _cacheBox!.get(key) as Map?;
         if (entry != null) {
-          final expiresAt = DateTime.parse(entry[&#39;expiresAt&#39;] as String);
-          if (now.isAfter(expiresAt)) {
+          if (_determineStatus(entry) == CacheStatus.expired) {
             keysToDelete.add(key as String);
           }
         }

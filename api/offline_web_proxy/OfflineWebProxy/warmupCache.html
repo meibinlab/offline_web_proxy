@@ -129,6 +129,16 @@
         final entryStartTime = DateTime.now();
         try {
           final response = await _fetchFromUpstream(path, timeout: timeout);
+          if (response.statusCode == HttpStatus.ok) {
+            final upstreamUri = _buildUpstreamUriFromParts(path: path);
+            final cacheKey = _generateCacheKey(upstreamUri.toString());
+            await _cacheResponseBytes(
+              cacheKey,
+              response.statusCode,
+              response.headers,
+              response.bodyBytes,
+            );
+          }
           final duration = DateTime.now().difference(entryStartTime);
           successCount++;
           return WarmupEntry(
