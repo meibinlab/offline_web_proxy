@@ -70,72 +70,66 @@ void main() {
       await Hive.close();
     });
 
-    /// 複数操作の統合テスト
-    test('should handle complex workflow operations', () async {
-      // 1. 初期状態の確認
+    /// 複数の基本操作を連続して処理できること
+    test('keeps cache, queue, cookie, and stats APIs usable across sequential admin operations', () async {
       expect(proxy.isRunning, isFalse);
 
       var stats = await proxy.getStats();
       expect(stats.totalRequests, equals(0));
 
-      // 2. キャッシュ操作のテスト
       await proxy.clearCache();
       var cacheStats = await proxy.getCacheStats();
       expect(cacheStats.totalEntries, equals(0));
 
-      // 3. 特定URLのキャッシュクリア
       await proxy.clearCacheForUrl('https://example.com/test');
 
-      // 4. キューの確認
       var queuedRequests = await proxy.getQueuedRequests();
       expect(queuedRequests, isEmpty);
 
-      // 5. Cookieの管理
       var cookies = await proxy.getCookies();
       expect(cookies, isEmpty);
 
       await proxy.clearCookies();
 
-      // 6. 統計情報の再確認
       stats = await proxy.getStats();
       expect(stats.totalRequests, equals(0));
       expect(stats.cacheHits, equals(0));
       expect(stats.cacheMisses, equals(0));
     });
 
-    /// イベントストリームの統合テスト
+    /// イベントストリームを購読できること
     test('should provide working event stream', () async {
       final eventStream = proxy.events;
       expect(eventStream, isA<Stream<ProxyEvent>>());
 
-      // ストリームがリッスン可能であることを確認
       StreamSubscription<ProxyEvent>? subscription;
-      final completer = Completer<bool>();
+      final completer = Completer<ProxyEvent>();
 
       subscription = eventStream.listen(
         (event) {
-          // イベントを受信した場合
-          completer.complete(true);
+          if (event.type == ProxyEventType.serverStarted &&
+              !completer.isCompleted) {
+            completer.complete(event);
+          }
         },
         onError: (error) {
-          completer.complete(false);
+          if (!completer.isCompleted) {
+            completer.completeError(error);
+          }
         },
       );
 
-      // 短時間待機（実際のイベントは発生しないが、ストリームの動作を確認）
-      Timer(Duration(milliseconds: 100), () {
-        if (!completer.isCompleted) {
-          completer.complete(true); // イベントがなくてもストリームは正常
-        }
-      });
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
 
-      final result = await completer.future;
-      expect(result, isTrue);
+      final event = await completer.future.timeout(const Duration(seconds: 1));
+      expect(event.type, equals(ProxyEventType.serverStarted));
 
       await subscription.cancel();
     });
 
-    /// 設定オブジェクトとプロキシの統合テスト
+    /// カスタム ProxyConfig を保持できること
     test('should work with custom ProxyConfig', () async {
       const customConfig = ProxyConfig(
         origin: 'https://api.example.com',
@@ -146,20 +140,17 @@ void main() {
         enableAdminApi: false,
       );
 
-      // 設定が正しく作成されることを確認
       expect(customConfig.origin, equals('https://api.example.com'));
       expect(customConfig.cacheMaxSize, equals(50 * 1024 * 1024));
       expect(customConfig.logLevel, equals('debug'));
 
-      // プロキシは現在停止状態であることを確認
       expect(proxy.isRunning, isFalse);
     });
 
-    /// 大量データ処理の統合テスト
+    /// 多数の API 呼び出しを並行処理できること
     test('should handle bulk operations efficiently', () async {
       final futures = <Future>[];
 
-      // 大量の並行操作を実行
       for (int i = 0; i < 50; i++) {
         futures.add(proxy.getStats());
         futures.add(proxy.getCacheStats());
@@ -173,11 +164,9 @@ void main() {
         }
       }
 
-      // すべての操作が完了することを確認
       final results = await Future.wait(futures);
       expect(results.length, greaterThan(100));
 
-      // 結果の型チェック
       int statsCount = 0;
       int cacheStatsCount = 0;
       int cacheListCount = 0;
@@ -197,34 +186,27 @@ void main() {
       expect(cacheListCount, greaterThan(0));
     });
 
-    /// エラー回復力の統合テスト
-    test('should be resilient to errors', () async {
-      // 無効な操作を混在させても他の操作に影響しないことを確認
+    /// 一部のエラーがあっても他の操作を継続できること
+    test('returns successful results from unaffected APIs when some calls fail', () async {
       final futures = <Future>[];
 
-      // 正常な操作
       futures.add(proxy.getStats());
       futures.add(proxy.getCacheStats());
 
-      // エラーを発生させる可能性のある操作
       futures.add(proxy.clearCacheForUrl('').catchError((_) => null));
       futures.add(proxy.getCacheList(limit: -1));
 
-      // 再び正常な操作
       futures.add(proxy.getQueuedRequests());
       futures.add(proxy.getCookies());
 
-      // エラーがあっても他の操作が完了することを確認
       final results = await Future.wait(futures);
 
-      // null以外の結果（正常な操作の結果）が存在することを確認
       final validResults = results.where((r) => r != null).toList();
       expect(validResults.length, greaterThanOrEqualTo(4));
     });
 
-    /// メモリ効率性のテスト
-    test('should be memory efficient with repeated operations', () async {
-      // 同じ操作を繰り返し実行してメモリリークがないことを確認
+    /// 同種の操作を繰り返しても安定して処理できること
+    test('should remain stable with repeated operations', () async {
       for (int round = 0; round < 10; round++) {
         final roundFutures = <Future>[];
 
@@ -236,78 +218,271 @@ void main() {
 
         await Future.wait(roundFutures);
 
-        // ガベージコレクションを促進
         await Future.delayed(Duration(milliseconds: 10));
       }
 
-      // 最終的に正常な状態であることを確認
       final finalStats = await proxy.getStats();
       expect(finalStats, isNotNull);
       expect(finalStats.totalRequests, isA<int>());
     });
 
-    /// API互換性の統合テスト
-    test('should maintain API compatibility', () async {
-      // すべてのパブリックAPIが正しく動作することを確認
-
-      // 基本プロパティ
+    /// パブリック API を一通り呼び出せること
+    test('should call public APIs without asynchronous errors', () async {
       expect(proxy.isRunning, isA<bool>());
       expect(proxy.events, isA<Stream<ProxyEvent>>());
 
-      // 統計系メソッド
       expect(await proxy.getStats(), isA<ProxyStats>());
       expect(await proxy.getCacheStats(), isA<CacheStats>());
 
-      // キャッシュ管理メソッド
       expect(await proxy.getCacheList(), isA<List<CacheEntry>>());
-      expect(() => proxy.clearCache(), returnsNormally);
-      expect(() => proxy.clearExpiredCache(), returnsNormally);
-      expect(
-          () => proxy.clearCacheForUrl('https://example.com'), returnsNormally);
+      await expectLater(proxy.clearCache(), completes);
+      await expectLater(proxy.clearExpiredCache(), completes);
+      await expectLater(
+        proxy.clearCacheForUrl('https://example.com'),
+        completes,
+      );
 
-      // Cookie管理メソッド
       expect(await proxy.getCookies(), isA<List<CookieInfo>>());
-      expect(() => proxy.clearCookies(), returnsNormally);
+      await expectLater(proxy.clearCookies(), completes);
 
-      // キュー管理メソッド
       expect(await proxy.getQueuedRequests(), isA<List<QueuedRequest>>());
       expect(await proxy.getDroppedRequests(), isA<List<DroppedRequest>>());
-      expect(() => proxy.clearDroppedRequests(), returnsNormally);
+      await expectLater(proxy.clearDroppedRequests(), completes);
 
-      // ウォームアップメソッド
       expect(await proxy.warmupCache(paths: []), isA<WarmupResult>());
     });
 
-    /// 長時間実行テスト
+    /// 連続実行でも短時間で安定して完了すること
     test('should handle long-running operations', () async {
       final startTime = DateTime.now();
 
-      // 長時間にわたって操作を継続
       for (int minute = 0; minute < 3; minute++) {
-        // 1分ごとに各種操作を実行
         await proxy.getStats();
         await proxy.getCacheStats();
         await proxy.getCacheList(limit: 5);
         await proxy.getQueuedRequests();
         await proxy.getCookies();
 
-        // 少し待機
         await Future.delayed(Duration(milliseconds: 100));
       }
 
       final endTime = DateTime.now();
       final duration = endTime.difference(startTime);
 
-      // 実行時間が合理的であることを確認（3秒以内）
       expect(duration.inSeconds, lessThan(3));
 
-      // 最終状態が正常であることを確認
       expect(proxy.isRunning, isFalse);
       final finalStats = await proxy.getStats();
       expect(finalStats, isNotNull);
     });
 
-    /// キューされたリクエストが FIFO 順で再送されることの統合テスト
+    /// オンライン時は既存キャッシュがあっても upstream 応答を優先すること
+    test('should prefer upstream response for online get requests even with cache',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        late HttpServer upstreamServer;
+        var requestCount = 0;
+        var responseBody = '{"version":1}';
+        var responseDelay = Duration.zero;
+
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer.listen((HttpRequest request) async {
+          requestCount++;
+          if (responseDelay > Duration.zero) {
+            await Future<void>.delayed(responseDelay);
+          }
+
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType.json
+            ..write(responseBody);
+          await request.response.close();
+        });
+
+        try {
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstreamServer.port}',
+              requestTimeout: const Duration(milliseconds: 300),
+            ),
+          );
+
+          final firstResponse =
+              await _performProxyRequest(proxyPort, '/api/online-preferred');
+          expect(firstResponse.statusCode, equals(HttpStatus.ok));
+          expect(firstResponse.body, equals('{"version":1}'));
+
+          final seededCacheStats = await proxy.getCacheStats();
+          expect(seededCacheStats.totalEntries, equals(1));
+
+          responseBody = '{"version":2}';
+          responseDelay = const Duration(milliseconds: 100);
+
+          final secondResponse =
+              await _performProxyRequest(proxyPort, '/api/online-preferred');
+
+          expect(secondResponse.statusCode, equals(HttpStatus.ok));
+          expect(secondResponse.body, equals('{"version":2}'));
+          expect(secondResponse.headers.value('x-offline-source'), isNull);
+          expect(requestCount, equals(2));
+
+          final stats = await proxy.getStats();
+          expect(stats.cacheHits, equals(0));
+          expect(stats.cacheMisses, equals(2));
+        } finally {
+          await upstreamServer.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// requestTimeout 超過時だけ cached fallback を返すこと
+    test('should fallback to cached get response only after request timeout',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        late HttpServer upstreamServer;
+        var requestCount = 0;
+        var responseBody = '{"source":"seeded"}';
+        var responseDelay = Duration.zero;
+        final eventTypes = <ProxyEventType>[];
+        final subscription = proxy.events.listen((event) {
+          eventTypes.add(event.type);
+        });
+
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer.listen((HttpRequest request) async {
+          requestCount++;
+          if (responseDelay > Duration.zero) {
+            await Future<void>.delayed(responseDelay);
+          }
+
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType.json
+            ..write(responseBody);
+          await request.response.close();
+        });
+
+        try {
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstreamServer.port}',
+              requestTimeout: const Duration(milliseconds: 100),
+            ),
+          );
+
+          final seededResponse =
+              await _performProxyRequest(proxyPort, '/api/timeout-fallback');
+          expect(seededResponse.statusCode, equals(HttpStatus.ok));
+          expect(seededResponse.body, equals('{"source":"seeded"}'));
+
+          final seededCacheStats = await proxy.getCacheStats();
+          expect(seededCacheStats.totalEntries, equals(1));
+
+          responseBody = '{"source":"late-upstream"}';
+          responseDelay = const Duration(milliseconds: 300);
+
+          final fallbackResponse =
+              await _performProxyRequest(proxyPort, '/api/timeout-fallback');
+
+          expect(fallbackResponse.statusCode, equals(HttpStatus.ok));
+          expect(fallbackResponse.body, equals('{"source":"seeded"}'));
+          expect(fallbackResponse.headers.value('x-offline-source'), isNull);
+          expect(requestCount, equals(2));
+          expect(eventTypes, contains(ProxyEventType.cacheStaleUsed));
+
+          final stats = await proxy.getStats();
+          expect(stats.cacheHits, equals(1));
+          expect(stats.cacheMisses, equals(1));
+        } finally {
+          await subscription.cancel();
+          await upstreamServer.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// upstream 4xx/5xx では cached fallback へ切り替えないこと
+    test(
+        'should return upstream 4xx and 5xx responses as-is without falling back to cached get response',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        late HttpServer upstreamServer;
+        var requestCount = 0;
+        var responseStatus = HttpStatus.ok;
+        var responseBody = '{"source":"seeded"}';
+        final eventTypes = <ProxyEventType>[];
+        final subscription = proxy.events.listen((event) {
+          eventTypes.add(event.type);
+        });
+
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer.listen((HttpRequest request) async {
+          requestCount++;
+          request.response
+            ..statusCode = responseStatus
+            ..headers.contentType = ContentType.json
+            ..write(responseBody);
+          await request.response.close();
+        });
+
+        try {
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstreamServer.port}',
+              requestTimeout: const Duration(milliseconds: 500),
+            ),
+          );
+
+          final seededResponse =
+              await _performProxyRequest(proxyPort, '/api/error-no-fallback');
+          expect(seededResponse.statusCode, equals(HttpStatus.ok));
+          expect(seededResponse.body, equals('{"source":"seeded"}'));
+
+          final seededCacheStats = await proxy.getCacheStats();
+          expect(seededCacheStats.totalEntries, equals(1));
+
+          responseStatus = HttpStatus.notFound;
+          responseBody = '{"error":"not-found"}';
+
+          final clientErrorResponse =
+              await _performProxyRequest(proxyPort, '/api/error-no-fallback');
+
+          expect(clientErrorResponse.statusCode, equals(HttpStatus.notFound));
+          expect(clientErrorResponse.body, equals('{"error":"not-found"}'));
+          expect(clientErrorResponse.body, isNot(equals('{"source":"seeded"}')));
+          expect(clientErrorResponse.headers.value('x-offline-source'), isNull);
+
+          final cacheStatsAfter4xx = await proxy.getCacheStats();
+          expect(cacheStatsAfter4xx.totalEntries, equals(1));
+
+          responseStatus = HttpStatus.serviceUnavailable;
+          responseBody = '{"error":"unavailable"}';
+
+          final serverErrorResponse =
+              await _performProxyRequest(proxyPort, '/api/error-no-fallback');
+
+          expect(
+              serverErrorResponse.statusCode, equals(HttpStatus.serviceUnavailable));
+          expect(serverErrorResponse.body, equals('{"error":"unavailable"}'));
+          expect(serverErrorResponse.body, isNot(equals('{"source":"seeded"}')));
+          expect(serverErrorResponse.headers.value('x-offline-source'), isNull);
+
+            final cacheStatsAfter5xx = await proxy.getCacheStats();
+            expect(cacheStatsAfter5xx.totalEntries, equals(1));
+
+          expect(requestCount, equals(3));
+          expect(eventTypes, isNot(contains(ProxyEventType.cacheStaleUsed)));
+
+          final stats = await proxy.getStats();
+          expect(stats.cacheHits, equals(0));
+          expect(stats.cacheMisses, equals(3));
+        } finally {
+          await subscription.cancel();
+          await upstreamServer.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// キューされたリクエストが FIFO 順で再送されること
     test('should drain queued requests in fifo order', () async {
       await HttpOverrides.runZoned(() async {
         late HttpServer upstreamServer;
@@ -368,7 +543,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// ブラウザ由来ヘッダを含む POST がキュー再送で消化されることの統合テスト
+    /// ブラウザ由来ヘッダを含む POST がキュー再送で消化されること
     test('should drain queued requests with browser style headers', () async {
       await HttpOverrides.runZoned(() async {
         late HttpServer upstreamServer;
@@ -443,7 +618,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// キュー状態が再起動後も保持され再送を再開できることの統合テスト
+    /// キュー状態が再起動後も保持され再送を再開できること
     test('should persist queued requests across restart and resume draining',
         () async {
       await HttpOverrides.runZoned(() async {
@@ -513,7 +688,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// バックオフに応じて retryCount と nextRetryAt が進むことの統合テスト
+    /// バックオフに応じて retryCount と nextRetryAt が進むこと
     test('should update retryCount and honor nextRetryAt backoff schedule',
         () async {
       await HttpOverrides.runZoned(() async {
@@ -591,7 +766,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 4xx 再送時にドロップ履歴へ記録されることの統合テスト
+    /// 4xx 再送時にドロップ履歴へ記録されること
     test('should record dropped requests for 4xx responses and clear history',
         () async {
       await HttpOverrides.runZoned(() async {
@@ -665,7 +840,7 @@ void main() {
   });
 
   group('Configuration Integration Tests', () {
-    /// デフォルト設定での統合テスト
+    /// デフォルト設定を保持できること
     test('should work with all default configuration values', () {
       const defaultConfig = ProxyConfig(origin: '');
 
@@ -680,7 +855,7 @@ void main() {
       expect(defaultConfig.startupPaths, isEmpty);
     });
 
-    /// カスタム設定での統合テスト
+    /// カスタム設定を保持できること
     test('should work with all custom configuration values', () {
       const customConfig = ProxyConfig(
         origin: 'https://custom.api.com:8443',
@@ -719,22 +894,18 @@ void main() {
       expect(customConfig.startupPaths, hasLength(3));
     });
 
-    /// 設定の継承と上書きテスト
+    /// 部分指定の設定でも既定値を補完できること
     test('should handle configuration inheritance correctly', () {
-      // 部分的なカスタム設定
       const partialConfig = ProxyConfig(
         origin: 'https://example.com',
         logLevel: 'debug',
         enableAdminApi: true,
-        // 他の設定はデフォルト値を使用
       );
 
-      // カスタム設定された項目
       expect(partialConfig.origin, equals('https://example.com'));
       expect(partialConfig.logLevel, equals('debug'));
       expect(partialConfig.enableAdminApi, isTrue);
 
-      // デフォルト値が使用される項目
       expect(partialConfig.host, equals('127.0.0.1'));
       expect(partialConfig.port, equals(0));
       expect(partialConfig.cacheMaxSize, equals(200 * 1024 * 1024));
@@ -761,6 +932,29 @@ Future<void> _sendProxyRequest(
     }
     final response = await request.close();
     await response.drain<void>();
+  } finally {
+    client.close(force: true);
+  }
+}
+
+Future<({int statusCode, HttpHeaders headers, String body})> _performProxyRequest(
+  int proxyPort,
+  String path, {
+  String method = 'GET',
+}) async {
+  final client = HttpClient();
+  try {
+    final request = await client.openUrl(
+      method,
+      Uri.parse('http://127.0.0.1:$proxyPort$path'),
+    );
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    return (
+      statusCode: response.statusCode,
+      headers: response.headers,
+      body: body,
+    );
   } finally {
     client.close(force: true);
   }

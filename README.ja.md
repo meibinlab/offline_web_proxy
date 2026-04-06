@@ -7,12 +7,12 @@
 
 offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシです。既存の Web アプリをモバイルアプリ内で扱う際に、接続が不安定な場合や一時的に利用できない場合でも動作を継続しやすくすることを目的にしています。
 
-127.0.0.1 上で動作し、オンライン時は設定済みの上流 origin へ転送し、オフライン時はキャッシュを返し、更新系リクエストはキューに保持します。加えて、WebView の遷移判定、Cookie 再利用、統計取得、イベント監視の API を提供します。
+127.0.0.1 上で動作し、オンライン時は設定済みの上流 origin へ転送します。proxy キャッシュはオフライン時またはリクエストタイムアウト時の代替応答に限定して利用し、更新系リクエストはキューに保持します。加えて、WebView の遷移判定、Cookie 再利用、統計取得、イベント監視の API を提供します。
 
 ## 主な機能
 
 - Flutter WebView 向けローカルプロキシサーバ
-- RFC を踏まえたキャッシュ制御とオフライン時の stale 利用
+- オフライン時とリクエストタイムアウト時に限定したフォールバックキャッシュ
 - POST、PUT、DELETE のオフラインキューイング
 - AES-256 による Cookie 永続化と復元 API
 - same-origin、外部委譲、新規 window 判定のための WebView 補助 API
@@ -184,7 +184,7 @@ const config = ProxyConfig(
 
 - `origin` は必須で、絶対 HTTP URL または HTTPS URL である必要があります。
 - `port: 0` を指定すると、OS が空きポートを自動割り当てします。
-- `startupPaths` は `warmupCache()` と起動時の事前キャッシュ対象に使われます。
+- `startupPaths` は `warmupCache()` で、オフライン時またはタイムアウト時の代替応答を事前準備したいパスに使います。
 - 現在サポートされる設定入口は `ProxyConfig` です。外部 YAML の自動読込は実装されていません。
 
 ## WebView 遷移補助 API
@@ -284,6 +284,12 @@ proxy.events.listen((event) {
   }
 });
 ```
+
+補足:
+
+- オンライン時の GET/HEAD は upstream へ転送し、proxy キャッシュで応答を省略しません。
+- proxy キャッシュはオフライン時、または request timeout を超過した GET/HEAD の代替応答に使います。
+- `warmupCache()` は通常時の高速化ではなく、フォールバック用レスポンスの事前取得が目的です。
 
 イベントストリームでは、キャッシュヒット、キュー処理、URL 解決メタ情報に加え、redirect 処理結果も監視できます。`redirectHandled` では `redirectStatusCode`、`locationHeader`、`redirectAction`、`resolvedProxyUrl`、`externalUrl` などを参照できます。
 

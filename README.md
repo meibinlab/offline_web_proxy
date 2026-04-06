@@ -7,12 +7,12 @@
 
 offline_web_proxy is a local HTTP proxy for Flutter WebView that keeps existing web applications usable inside a mobile app even when connectivity becomes unstable or temporarily unavailable.
 
-It runs on 127.0.0.1, forwards requests to one configured upstream origin while online, serves cached responses while offline, queues mutating requests, and provides helper APIs for WebView navigation, cookie reuse, and runtime monitoring.
+It runs on 127.0.0.1, forwards requests to one configured upstream origin while online, and limits proxy-cache usage to substitute responses when offline or when a request times out. Mutating requests are queued, and helper APIs are provided for WebView navigation, cookie reuse, and runtime monitoring.
 
 ## Highlights
 
 - Local proxy server for Flutter WebView
-- RFC-aware cache handling with offline stale fallback
+- Fallback cache limited to offline and request-timeout recovery
 - Offline queue for POST, PUT, and DELETE requests
 - AES-256 encrypted cookie persistence with restore support
 - WebView navigation helper APIs for same-origin, external, and new-window flows
@@ -184,7 +184,7 @@ Notes:
 
 - `origin` is required and must be an absolute HTTP or HTTPS URL.
 - `port: 0` lets the OS assign a free local port.
-- `startupPaths` is used by `warmupCache()` and the startup warmup flow.
+- `startupPaths` is used by `warmupCache()` for paths whose fallback responses should be prepared in advance for offline or timeout scenarios.
 - The supported configuration entry point is `ProxyConfig`. The package does not currently load an external YAML file automatically.
 
 ## WebView Navigation Helper APIs
@@ -284,6 +284,12 @@ proxy.events.listen((event) {
   }
 });
 ```
+
+Notes:
+
+- Online GET/HEAD requests are forwarded upstream and are not short-circuited by the proxy cache.
+- The proxy cache is used only as a substitute response for offline requests or GET/HEAD requests that exceed `requestTimeout`.
+- `warmupCache()` is intended to prepare fallback responses in advance, not to optimize normal online browsing.
 
 The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. `redirectHandled` includes fields such as `redirectStatusCode`, `locationHeader`, `redirectAction`, `resolvedProxyUrl`, and `externalUrl`.
 

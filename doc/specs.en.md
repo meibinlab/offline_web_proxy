@@ -14,11 +14,11 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 - **Base Technology**: shelf (Dart's lightweight HTTP server framework), shelf_router (routing), shelf_proxy (proxy functionality)
 - **Communication Path**: WebView → http://127.0.0.1:<port> → (proxy) → Upstream Server
 - **Data Persistence**: Local storage using Hive
-- **Cache-Control Support**: RFC-compliant cache control combined with offline support
+- **Cache-Control Support**: Use response headers for storage eligibility and fallback eligibility
 
 ### Data Processing Strategy
 
-- **Cache**: Store GET request responses in file-based storage. Achieve fast offline responses while considering Cache-Control headers
+- **Cache**: Store successful GET responses in file-based storage. Do not use proxy cache to suppress online requests, and limit its use to offline or timeout fallback
 - **Queue**: Manage POST/PUT/DELETE requests in FIFO (First In First Out). Send sequentially when network recovers
 - **Offline Response**: Return cache when cache hit, display fallback page when uncached
 - **Static Resources**: Index files under `assets/static/` that are declared in `pubspec.yaml` and listed in `AssetManifest.json`. The current response is still the 404 placeholder
@@ -188,42 +188,42 @@ Use idempotency keys to prevent duplicate execution of the same request.
 
 ## [8] Cache Consistency
 
-### Cache-Control Support and Offline Strategy
+### Cache-Control Support and Fallback Strategy
 
-#### Cache-Control Processing When Online
+#### Online Principles
 
-Control cache behavior based on response Cache-Control header:
+- **Upstream first**: When online, the proxy forwards requests including GET/HEAD to the upstream server
+- **Browser-driven request suppression**: Whether a request is skipped because of Cache-Control is delegated to the WebView / browser HTTP cache
+- **Role of proxy cache**: The proxy cache is not an online optimization layer. It is limited to offline or timeout fallback
 
-- **max-age**: Set cache expiration time with specified seconds
-- **no-cache**: Do not use cache without validation, but **exceptionally use cache when offline**
-- **no-store**: Do not save to cache (can be overridden by configuration for offline support)
-- **must-revalidate**: Must validate with upstream server when expired
-- **public/private**: Control cache shareability
-- **s-maxage**: Proxy cache-specific expiration time (takes priority over max-age)
+#### Storage Policy
 
-#### Special Rules for Offline Support
+- **Stored responses**: Successful GET responses are eligible for storage
+- **no-store**: Do not persist the response
+- **max-age / s-maxage / Expires**: Used for internal TTL calculation of cache entries
+- **no-cache / must-revalidate**: Retained as metadata for saved entries, but not used by the proxy to suppress online forwarding
+- **default TTL**: Apply the configured Content-Type-based default TTL when none of the above are present
 
-In addition to standard Cache-Control directives, implement special behavior for offline support:
+#### Fallback Eligibility
 
-1. **Ignore no-cache**: Even if `no-cache` is specified, use cache when offline
-2. **Relax no-store**: Can ignore `no-store` and save cache depending on configuration
-3. **Allow Expired**: Return expired cache with `X-Cache-Status: stale` header when offline
-4. **Force Cache**: Important resources are forcibly cached regardless of Cache-Control
+1. **When offline**: Return cached entries only when they are fresh or stale
+2. **On request timeout**: Use a fresh or stale cached entry as a substitute response only when the upstream request exceeds the request timeout
+3. **On HTTP 4xx**: Return the upstream 4xx response as-is and do not switch to proxy cache
+4. **On HTTP 5xx**: Return the upstream 5xx response as-is and do not switch to proxy cache
+5. **When expired**: Do not return entries whose stale period has also elapsed
 
 #### Cache Expiration Calculation Priority
 
-1. **Cache-Control: s-maxage** (proxy-specific)
-2. **Cache-Control: max-age** (general expiration time)
-3. **Expires** header (HTTP/1.0 compatibility)
-4. **Default TTL in configuration file** (when all above are unspecified)
+1. **Cache-Control: s-maxage** (treated as proxy-side TTL)
+2. **Cache-Control: max-age**
+3. **Expires** header
+4. **Default TTL in configuration file**
 
 #### Conditional Request Support
 
-Process the following headers for cache validation:
-
-- **If-Modified-Since / Last-Modified**: Validation by modification date
-- **If-None-Match / ETag**: Validation by entity tag
-- **304 Not Modified**: Response when cache is valid
+- **If-Modified-Since / Last-Modified**: Forward upstream unchanged when the browser sends them
+- **If-None-Match / ETag**: Forward upstream unchanged when the browser sends them
+- **304 Not Modified**: Treat as the normal browser/upstream flow rather than a proxy-side online cache-hit decision
 
 ### Cache File Format
 
@@ -384,6 +384,8 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ### Response Types and Headers
 
+This section describes offline responses. Timeout fallback follows the same cache selection rules, but the debug header contract is defined only for offline responses.
+
 Add custom headers for debugging to offline responses:
 
 #### On Cache Hit
@@ -394,7 +396,6 @@ Add custom headers for debugging to offline responses:
   - `X-Offline-Source: cache`
   - `X-Cache-Status: hit` (cache within expiration)
   - `X-Cache-Status: stale` (cache expired but used because offline)
-  - `X-Cache-Control-Override: 1` (when no-cache, etc. ignored)
 - **Content**: Return cached response as-is
 
 #### On Fallback
@@ -415,7 +416,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 - **Original Retention**: Save original value in `X-Original-Cache-Control` header
 - **Expiration Display**: Add `Cache-Control: no-cache` for expired cache
-- **Offline Identification**: Add `offline-fallback` extension to `Cache-Control` (for debugging)
+- **Diagnostic separation**: Carry fallback reason in diagnostic headers or events instead of rewriting Cache-Control semantics
 
 ## [11] Root Path Processing
 
@@ -490,6 +491,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **sendTimeout**: 15 seconds (request send time limit)
 - **receiveTimeout**: 30 seconds (response receive time limit)
 - **requestTimeout**: 60 seconds (entire request time limit)
+- **Timeout fallback**: GET/HEAD may fall back to persisted cache only when the request exceeds `requestTimeout`
 
 ### Backoff Strategy
 
@@ -511,7 +513,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 ### TTL (Time to Live) and Stale Period Management
 
-Flexible TTL calculation and stale period setting considering Cache-Control headers:
+Manage TTL and stale periods as internal state for fallback decisions while considering Cache-Control headers:
 
 #### Calculation Logic
 
@@ -522,30 +524,30 @@ Flexible TTL calculation and stale period setting considering Cache-Control head
    - text/html: 1 hour
    - text/css, application/javascript: 24 hours
    - image/\*: 7 days
-   - Others: ttlDays in configuration file
+  - Others: the configured default TTL
 
 #### Cache State Management
 
-Cache is managed in the following 3 states and is not immediately deleted even after TTL expiration:
+Cache is managed in the following 3 states and these states are used for offline or timeout fallback decisions rather than online request suppression:
 
 ##### 1. Fresh
 
 - **Condition**: Within TTL period
-- **Behavior**: Use cache regardless of online/offline
+- **Behavior**: Eligible for substitute response when offline or when the upstream request times out
 - **Header**: `X-Cache-Status: hit`
 
 ##### 2. Stale
 
 - **Condition**: TTL expired, but within stale period
 - **Behavior**:
-  - **When Online**: Validate with upstream server (conditional request), use stale on error
-  - **When Offline**: Use stale cache
+  - **When Online**: Forward upstream and do not substitute from proxy cache
+  - **When Offline / On Timeout**: Eligible for substitute response from stale cache
 - **Header**: `X-Cache-Status: stale`
 
 ##### 3. Expired
 
 - **Condition**: Stale period also exceeded
-- **Behavior**: Do not use cache, target for deletion
+- **Behavior**: Not eligible for fallback
 - **Deletion**: Deleted in next purge process
 
 #### Stale Period Setting
@@ -562,9 +564,9 @@ cache:
 
 #### Special Directive Processing
 
-- **no-cache**: Validate every time when online, can use stale when offline
-- **no-store**: Can be ignored by configuration (`ignoreNoStore: true`)
-- **must-revalidate**: Mark forced validation when expired (ignore when offline and use stale)
+- **no-cache**: May still be stored, but must not be used by the proxy to suppress online forwarding
+- **no-store**: Do not persist
+- **must-revalidate**: Retain as metadata on the cache entry, while keeping online behavior upstream-first
 
 ### Cache Deletion Timing
 
@@ -597,16 +599,15 @@ Provides methods for cache management. See [20] API Reference for details.
 
 ### Cache Usage Priority
 
-Judgment order during request processing:
+Decision order during request processing:
 
 #### When Online
 
-1. **Fresh state**: Use as-is
-2. **Stale state**: Validate with conditional request
-   - **304 Not Modified**: Continue using cache (reset TTL)
-   - **200 OK**: Update cache with new response
-   - **Network Error**: Use stale cache
-3. **Expired/Uncached**: Fetch from upstream server
+1. **Normal flow**: Forward to upstream
+2. **304 response**: Pass through as part of the browser's normal cache flow
+3. **Request timeout**: Use a fresh or stale cached entry as a substitute response, otherwise return a timeout error
+4. **HTTP 4xx**: Return the upstream response as-is
+5. **HTTP 5xx**: Return the upstream response as-is
 
 #### When Offline
 
@@ -617,8 +618,8 @@ Judgment order during request processing:
 ### Maintenance
 
 - **Purge Execution**: Automatically execute Expired cache deletion and LRU cleanup every 1 hour
-- **Cache-Control Validation**: Periodically re-evaluate Cache-Control information of saved cache
-- **Statistics**: Log output of cache hit rate, stale usage rate, no-cache ignore count, etc.
+- **State Refresh**: Periodically re-evaluate TTL / stale state of saved cache
+- **Statistics**: Log cache hit rate, stale usage rate, timeout fallback count, etc.
 
 ### Configuration Example
 
@@ -642,10 +643,10 @@ proxy:
     maxSizeBytes: 209715200 # 200MB
     purgeIntervalSeconds: 3600 # Every 1 hour
 
-    # Startup update settings
+    # Startup warmup settings
     startup:
-      enabled: false # Enable startup update
-      paths: [] # Path list to update at startup (default is empty)
+      enabled: false # Prepare substitute responses for offline or timeout
+      paths: [] # Path list to fetch in advance (default is empty)
         # - "/config"
         # - "/user/profile"
         # - "/assets/app.css"
@@ -668,16 +669,6 @@ proxy:
       "image/*": 2592000 # 30 days
       "default": 259200 # 3 days
       maxPeriodSeconds: 2592000 # Maximum 30 days
-
-    # Cache-Control override
-    override:
-      ignoreNoStore: true # Ignore no-store
-      ignoreMustRevalidate: true # Ignore must-revalidate when offline
-      forceCache: # Force cache targets
-        - "/app.css"
-        - "/images/*"
-        - "*.woff2"
-        - "*.ttf"
 
   # Request queue settings
   queue:
@@ -900,24 +891,24 @@ print('Cache size: ${stats.totalSize} bytes');
 
 #### `Future<WarmupResult> warmupCache({List<String>? paths, int? timeout, int? maxConcurrency, WarmupProgressCallback? onProgress, WarmupErrorCallback? onError})`
 
-Batch updates cache for specified path list.
+Pre-fetch fallback cache for the specified path list.
 
 - **Parameters**:
-  - `paths`: Path list to update (uses startup.paths in configuration file when omitted)
+  - `paths`: Path list to pre-fetch (uses the configured startup paths when omitted)
   - `timeout`: Timeout seconds for each path (uses configuration value when omitted)
   - `maxConcurrency`: Number of concurrent executions (uses configuration value when omitted)
   - `onProgress`: Progress callback function
   - `onError`: Error callback function
-- **Return Value**: Detailed information of update results
+- **Return Value**: Detailed information of pre-fetch results
 - **Exceptions**:
   - `ArgumentError`: When invalid path is included
-  - `WarmupException`: When entire update process fails
+  - `WarmupException`: When the entire pre-fetch process fails
 
 ```dart
-// Update with path list from configuration file
+// Pre-fetch with configured path list
 final result = await proxy.warmupCache();
 
-// Update with custom path list
+// Pre-fetch with custom path list
 final result = await proxy.warmupCache(
   paths: [
     '/config',

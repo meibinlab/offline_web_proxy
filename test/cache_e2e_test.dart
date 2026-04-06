@@ -11,7 +11,7 @@ void main() {
   late Directory tempDir;
 
   setUpAll(() async {
-    // path_providerのモック設定
+    // path_provider が一時ディレクトリを返すようにモックする
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel('plugins.flutter.io/path_provider'),
@@ -52,7 +52,7 @@ void main() {
       }
     });
 
-    /// プロキシ起動テスト
+    /// プロキシを起動できること
     test('should start proxy server successfully', () async {
       final config = ProxyConfig(
         origin: 'https://jsonplaceholder.typicode.com',
@@ -66,11 +66,8 @@ void main() {
       expect(port, greaterThan(0));
     });
 
-    /// キャッシュキー生成の一貫性テスト
-    /// オンライン時とオフライン時で同じキャッシュキーが生成されることを確認
-    test(
-        'should generate consistent cache keys for online and offline requests',
-        () async {
+    /// 起動直後に proxy URL とキャッシュ統計を参照できること
+    test('should expose proxy url and cache stats after start', () async {
       final config = ProxyConfig(
         origin: 'https://httpbin.org',
         port: 0,
@@ -80,18 +77,16 @@ void main() {
       port = await proxy.start(config: config);
       expect(proxy.isRunning, isTrue);
 
-      // プロキシが起動していることを確認
       final proxyUrl = 'http://127.0.0.1:$port/get';
       expect(Uri.tryParse(proxyUrl), isNotNull);
 
-      // キャッシュ統計を確認
       final stats = await proxy.getCacheStats();
       expect(stats, isNotNull);
       expect(stats.totalEntries, greaterThanOrEqualTo(0));
     });
 
-    /// キャッシュ保存と取得のテスト（モックサーバー不要版）
-    test('should correctly handle cache key generation for paths', () async {
+    /// 起動直後のキャッシュ状態と統計を取得できること
+    test('should expose initial cache state after start', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
         port: 0,
@@ -100,17 +95,15 @@ void main() {
       port = await proxy.start(config: config);
       expect(proxy.isRunning, isTrue);
 
-      // 初期状態でキャッシュが空であることを確認
       final initialStats = await proxy.getCacheStats();
       expect(initialStats.totalEntries, equals(0));
 
-      // プロキシが正しく起動していることを確認
       final proxyStats = await proxy.getStats();
       expect(proxyStats.totalRequests, equals(0));
     });
 
-    /// 複数のパスでのキャッシュキー一貫性テスト
-    test('should handle various path formats consistently', () async {
+    /// 複数のパス形式で proxy URL を組み立てられること
+    test('builds valid proxy urls for paths with and without a leading slash', () async {
       final config = ProxyConfig(
         origin: 'https://api.example.com',
         port: 0,
@@ -118,7 +111,6 @@ void main() {
 
       port = await proxy.start(config: config);
 
-      // 異なるパス形式でリクエストを準備
       final testPaths = [
         '/app/index.html',
         'app/index.html',
@@ -128,10 +120,8 @@ void main() {
         '/posts?page=1',
       ];
 
-      // プロキシが起動していることを確認
       expect(proxy.isRunning, isTrue);
 
-      // 各パスに対してプロキシURLが正しく生成できることを確認
       for (final path in testPaths) {
         final normalizedPath = path.startsWith('/') ? path : '/$path';
         final proxyUrl = 'http://127.0.0.1:$port$normalizedPath';
@@ -139,7 +129,7 @@ void main() {
       }
     });
 
-    /// キャッシュクリア後の状態テスト
+    /// キャッシュクリア後に統計がリセットされること
     test('should clear cache and reset stats', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
@@ -148,10 +138,8 @@ void main() {
 
       port = await proxy.start(config: config);
 
-      // キャッシュをクリア
       await proxy.clearCache();
 
-      // キャッシュが空であることを確認
       final stats = await proxy.getCacheStats();
       expect(stats.totalEntries, equals(0));
       expect(stats.freshEntries, equals(0));
@@ -159,7 +147,7 @@ void main() {
       expect(stats.expiredEntries, equals(0));
     });
 
-    /// イベントストリームのテスト
+    /// プロキシ操作でイベントを購読できること
     test('should emit events during proxy operations', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
@@ -173,7 +161,6 @@ void main() {
 
       port = await proxy.start(config: config);
 
-      // サーバー起動イベントが発生していることを確認
       await Future.delayed(const Duration(milliseconds: 100));
 
       expect(events.any((e) => e.type == ProxyEventType.serverStarted), isTrue);
@@ -181,7 +168,7 @@ void main() {
       await subscription.cancel();
     });
 
-    /// 同時リクエストのテスト
+    /// 同時の統計取得を処理できること
     test('should handle concurrent requests correctly', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
@@ -190,7 +177,6 @@ void main() {
 
       port = await proxy.start(config: config);
 
-      // 複数の統計取得を同時に実行
       final futures = <Future<ProxyStats>>[];
       for (int i = 0; i < 10; i++) {
         futures.add(proxy.getStats());
@@ -198,7 +184,6 @@ void main() {
 
       final results = await Future.wait(futures);
 
-      // すべての結果が正常に返されることを確認
       expect(results.length, equals(10));
       for (final stats in results) {
         expect(stats, isNotNull);
@@ -206,7 +191,7 @@ void main() {
       }
     });
 
-    /// プロキシ停止後の状態テスト
+    /// stop 後に停止状態へ戻ること
     test('should properly clean up after stop', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
@@ -220,8 +205,8 @@ void main() {
       expect(proxy.isRunning, isFalse);
     });
 
-    /// 設定の検証テスト
-    test('should use correct origin URL for cache keys', () async {
+    /// origin 設定で起動し初期統計を参照できること
+    test('should initialize stats for configured origin', () async {
       const testOrigin = 'https://test-api.example.com';
       final config = ProxyConfig(
         origin: testOrigin,
@@ -230,18 +215,16 @@ void main() {
 
       port = await proxy.start(config: config);
 
-      // プロキシが正しいoriginで起動していることを確認
       expect(proxy.isRunning, isTrue);
 
-      // 統計が正しく初期化されていることを確認
       final stats = await proxy.getStats();
       expect(stats.totalRequests, equals(0));
       expect(stats.cacheHits, equals(0));
       expect(stats.cacheMisses, equals(0));
     });
 
-    /// 二重起動の防止テスト
-    test('should prevent double start', () async {
+    /// 二重起動を防止できること
+    test('should reject second start while already running', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
         port: 0,
@@ -250,14 +233,13 @@ void main() {
       port = await proxy.start(config: config);
       expect(proxy.isRunning, isTrue);
 
-      // 二重起動を試みるとエラーになることを確認
-      expect(
-        () => proxy.start(config: config),
+      await expectLater(
+        proxy.start(config: config),
         throwsA(isA<ProxyStartException>()),
       );
     });
 
-    /// ウォームアップのテスト
+    /// ネットワークエラー時もウォームアップ結果を返せること
     test('should handle warmup with network errors gracefully', () async {
       final config = ProxyConfig(
         origin: 'https://nonexistent-domain-12345.invalid',
@@ -266,18 +248,16 @@ void main() {
 
       port = await proxy.start(config: config);
 
-      // 存在しないドメインへのウォームアップ
       final result = await proxy.warmupCache(
         paths: ['/test'],
         timeout: 1,
       );
 
-      // エラーが発生してもクラッシュしないことを確認
-      // successCount + failureCount = 1（処理されたパスの数）
+      // successCount + failureCount は処理したパス数と一致する
       expect(result.successCount + result.failureCount, equals(1));
     });
 
-    /// キューの状態テスト
+    /// 起動直後のキューが空であること
     test('should maintain empty queue initially', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
@@ -295,8 +275,8 @@ void main() {
   });
 
   group('Cache Key Consistency Tests', () {
-    /// キャッシュキーがURLのパスに基づいて一貫して生成されることをテスト
-    test('should generate same cache key for same upstream URL', () async {
+    /// リクエスト前の統計初期値を参照できること
+    test('should keep initial cache stats before making requests', () async {
       final proxy = OfflineWebProxy();
 
       final config = ProxyConfig(
@@ -306,8 +286,6 @@ void main() {
 
       await proxy.start(config: config);
 
-      // 同じパスに対して複数回リクエストした場合、
-      // キャッシュヒット/ミスの統計が正しく更新されることを確認
       final initialStats = await proxy.getStats();
       expect(initialStats.cacheHits, equals(0));
       expect(initialStats.cacheMisses, equals(0));
@@ -329,8 +307,8 @@ void main() {
       }
     });
 
-    /// スラッシュの正規化テスト
-    test('should normalize paths with leading slash', () async {
+    /// 先頭スラッシュの有無を正規化して同じ proxy URL に組み立てられること
+    test('should build same proxy url for leading slash variants', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
         port: 0,
@@ -338,13 +316,16 @@ void main() {
 
       final port = await proxy.start(config: config);
 
-      // パスが正しく処理されることを確認
-      // /app/index.html と app/index.html は同じキャッシュキーになるべき
       expect(proxy.isRunning, isTrue);
       expect(port, greaterThan(0));
+
+        final withLeadingSlash = 'http://127.0.0.1:$port/app/index.html';
+        final withoutLeadingSlash =
+          'http://127.0.0.1:$port/${'app/index.html'}';
+        expect(withLeadingSlash, equals(withoutLeadingSlash));
     });
 
-    /// クエリパラメータを含むURLのテスト
+    /// クエリ付き URL でも起動状態を維持できること
     test('should handle URLs with query parameters', () async {
       final config = ProxyConfig(
         origin: 'https://api.example.com',
@@ -353,7 +334,6 @@ void main() {
 
       await proxy.start(config: config);
 
-      // クエリパラメータを含むURLでもプロキシが動作することを確認
       expect(proxy.isRunning, isTrue);
 
       final stats = await proxy.getStats();
@@ -374,9 +354,8 @@ void main() {
       }
     });
 
-    /// 異なるクエリパラメータが異なるキャッシュエントリとして扱われることをテスト
-    test('should treat different query parameters as different cache entries',
-        () async {
+    /// 異なるクエリ付きパスを個別の proxy URL に組み立てられること
+    test('should build proxy urls for query parameter variants', () async {
       final config = ProxyConfig(
         origin: 'https://api.example.com',
         port: 0,
@@ -384,10 +363,8 @@ void main() {
 
       await proxy.start(config: config);
 
-      // プロキシが起動していることを確認
       expect(proxy.isRunning, isTrue);
 
-      // 異なるクエリパラメータのURLを準備
       final testUrls = [
         '/api/users?page=1',
         '/api/users?page=2',
@@ -396,15 +373,14 @@ void main() {
         '/api/users', // クエリパラメータなし
       ];
 
-      // 各URLに対してプロキシURLが正しく生成できることを確認
       for (final path in testUrls) {
-        final port = proxy.isRunning ? 8080 : 0; // ダミーポート
+        final port = proxy.isRunning ? 8080 : 0; // URL 組み立て用のダミーポート
         final proxyUrl = 'http://127.0.0.1:$port$path';
         expect(Uri.tryParse(proxyUrl), isNotNull);
       }
     });
 
-    /// クエリパラメータ付きのウォームアップテスト
+    /// クエリ付きパスでもウォームアップ結果を返せること
     test('should warmup cache with query parameters', () async {
       final config = ProxyConfig(
         origin: 'https://httpbin.org',
@@ -413,17 +389,15 @@ void main() {
 
       await proxy.start(config: config);
 
-      // クエリパラメータ付きのパスでウォームアップ
       final result = await proxy.warmupCache(
         paths: ['/get?param1=value1', '/get?param2=value2'],
         timeout: 10,
       );
 
-      // 処理されたパスの数を確認
       expect(result.successCount + result.failureCount, equals(2));
     });
 
-    /// 同じパスで異なるクエリパラメータの統計テスト
+    /// クエリ差分のあるパスでも初期統計を取得できること
     test('should track stats correctly for paths with different query params',
         () async {
       final config = ProxyConfig(
@@ -433,18 +407,16 @@ void main() {
 
       await proxy.start(config: config);
 
-      // 初期状態の統計を確認
       final initialStats = await proxy.getStats();
       expect(initialStats.totalRequests, equals(0));
       expect(initialStats.cacheHits, equals(0));
       expect(initialStats.cacheMisses, equals(0));
 
-      // キャッシュが空であることを確認
       final cacheStats = await proxy.getCacheStats();
       expect(cacheStats.totalEntries, equals(0));
     });
 
-    /// 空のクエリパラメータのテスト
+    /// 空のクエリ文字列を含むパスを扱えること
     test('should handle empty query parameters correctly', () async {
       final config = ProxyConfig(
         origin: 'https://example.com',
@@ -454,7 +426,6 @@ void main() {
       await proxy.start(config: config);
       expect(proxy.isRunning, isTrue);
 
-      // 空のクエリパラメータ（?のみ）やクエリなしのURLを確認
       final testPaths = [
         '/api/data',
         '/api/data?',

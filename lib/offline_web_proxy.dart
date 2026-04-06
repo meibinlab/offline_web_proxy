@@ -392,7 +392,6 @@ class OfflineWebProxy {
   ///   * [CacheOperationException] キャッシュ削除に失敗した場合。
   Future<void> clearExpiredCache() async {
     try {
-      final now = DateTime.now();
       final keysToDelete = <String>[];
 
       if (_cacheBox != null) {
@@ -401,8 +400,7 @@ class OfflineWebProxy {
           final key = keys[i];
           final entry = _cacheBox!.get(key) as Map?;
           if (entry != null) {
-            final expiresAt = DateTime.parse(entry['expiresAt'] as String);
-            if (now.isAfter(expiresAt)) {
+            if (_determineStatus(entry) == CacheStatus.expired) {
               keysToDelete.add(key as String);
             }
           }
@@ -497,8 +495,6 @@ class OfflineWebProxy {
       int expiredEntries = 0;
       int totalSize = 0;
 
-      final now = DateTime.now();
-
       if (_cacheBox != null) {
         for (final key in _cacheBox!.keys) {
           final entry = _cacheBox!.get(key) as Map?;
@@ -506,20 +502,13 @@ class OfflineWebProxy {
             totalEntries++;
             totalSize += (entry['sizeBytes'] as int? ?? 0);
 
-            final expiresAt = DateTime.parse(entry['expiresAt'] as String);
-            final createdAt = DateTime.parse(entry['createdAt'] as String);
-
-            if (now.isBefore(expiresAt)) {
-              freshEntries++;
-            } else {
-              // Stale期間内かチェック
-              final staleUntil = _calculateStaleExpiration(
-                  createdAt, entry['contentType'] as String);
-              if (now.isBefore(staleUntil)) {
+            switch (_determineStatus(entry)) {
+              case CacheStatus.fresh:
+                freshEntries++;
+              case CacheStatus.stale:
                 staleEntries++;
-              } else {
+              case CacheStatus.expired:
                 expiredEntries++;
-              }
             }
           }
         }
@@ -591,6 +580,16 @@ class OfflineWebProxy {
           final entryStartTime = DateTime.now();
           try {
             final response = await _fetchFromUpstream(path, timeout: timeout);
+            if (response.statusCode == HttpStatus.ok) {
+              final upstreamUri = _buildUpstreamUriFromParts(path: path);
+              final cacheKey = _generateCacheKey(upstreamUri.toString());
+              await _cacheResponseBytes(
+                cacheKey,
+                response.statusCode,
+                response.headers,
+                response.bodyBytes,
+              );
+            }
             final duration = DateTime.now().difference(entryStartTime);
             successCount++;
             return WarmupEntry(
@@ -1374,28 +1373,13 @@ class OfflineWebProxy {
   Future<shelf.Response> _handleOnlineRequest(shelf.Request request) async {
     final upstreamUrl = _buildUpstreamUrl(request);
     final cacheKey = _generateCacheKey(upstreamUrl);
-    final cachedResponse = await _getCachedResponse(cacheKey);
 
-    if (cachedResponse != null && _isCacheValid(cachedResponse)) {
-      _cacheHits++;
-      _emitEvent(ProxyEventType.cacheHit, request.url.toString(), {});
-      final rangeEntry = await _getCachedResponseBytesEntry(cacheKey);
-      if (rangeEntry != null) {
-        final rangeResp = _tryBuildRangeResponseFromCache(
-          request,
-          cachedHeaders: rangeEntry.headers,
-          cachedBodyBytes: rangeEntry.bodyBytes,
-        );
-        if (rangeResp != null) return rangeResp;
-      }
-      return cachedResponse;
-    }
-
-    // NOTE: 非GETは、失敗時のキュー保存や再送のためにボディを保持する必要がある。
+    // NOTE: read系以外は、失敗時のキュー保存や再送のためにボディを保持する必要がある。
     // shelf.Request のストリームは一度しか読めないため、ここで一度だけ読み取り
     // 上流転送とキュー保存で共有する。
-    final Uint8List? requestBodyBytes =
-        request.method == 'GET' ? null : await _readRequestBodyBytes(request);
+    final Uint8List? requestBodyBytes = _isReadRequestMethod(request.method)
+        ? null
+        : await _readRequestBodyBytes(request);
 
     // 上流サーバに転送
     try {
@@ -1428,12 +1412,14 @@ class OfflineWebProxy {
         }
       }
 
-      // GET以外のリクエストが失敗した場合はキューに保存
-      if (request.method != 'GET' && result.statusCode >= 500) {
+      // read系以外のリクエストが失敗した場合はキューに保存
+      if (!_isReadRequestMethod(request.method) && result.statusCode >= 500) {
         await _queueRequest(request, bodyBytes: requestBodyBytes);
       }
 
       _cacheMisses++;
+      // read系の 4xx/5xx は upstream 応答をそのまま返し、
+      // キャッシュフォールバックは timeout 時だけに限定する。
       // ボディを含む新しいレスポンスを返す
       return shelf.Response(
         result.statusCode,
@@ -1441,21 +1427,22 @@ class OfflineWebProxy {
         headers: result.headers,
       );
     } catch (e) {
-      // リクエストが失敗した場合、キャッシュを試すかキューに保存
-      if (request.method == 'GET' && cachedResponse != null) {
-        _cacheHits++;
-        _emitEvent(ProxyEventType.cacheStaleUsed, request.url.toString(), {});
-        final rangeEntry = await _getCachedResponseBytesEntry(cacheKey);
-        if (rangeEntry != null) {
-          final rangeResp = _tryBuildRangeResponseFromCache(
+      // timeout の read系だけキャッシュフォールバックを許可
+      if (_isReadRequestMethod(request.method) && _isRequestTimeoutError(e)) {
+        final cachedEntry = await _loadCachedFallbackEntry(cacheKey);
+        if (cachedEntry != null &&
+            _shouldServeCachedFallback(cachedEntry.status)) {
+          _cacheHits++;
+          _emitEvent(ProxyEventType.cacheStaleUsed, request.url.toString(), {});
+          return _buildCachedReadResponse(
             request,
-            cachedHeaders: rangeEntry.headers,
-            cachedBodyBytes: rangeEntry.bodyBytes,
+            cachedResponse: cachedEntry.response,
+            rangeEntry: cachedEntry.rangeEntry,
           );
-          if (rangeResp != null) return rangeResp;
         }
-        return cachedResponse;
-      } else if (request.method != 'GET') {
+
+        return _buildTimeoutErrorResponse(request.method);
+      } else if (!_isReadRequestMethod(request.method)) {
         await _queueRequest(request, bodyBytes: requestBodyBytes);
         return shelf.Response.ok('リクエストを再試行のためキューに保存しました', headers: {
           // クライアント側で脆弱な接続を開いたままにするのを避けるため
@@ -1477,59 +1464,160 @@ class OfflineWebProxy {
     return builder.takeBytes();
   }
 
+  /// read系メソッドかどうかを判定します。
+  bool _isReadRequestMethod(String method) {
+    final normalizedMethod = method.toUpperCase();
+    return normalizedMethod == 'GET' || normalizedMethod == 'HEAD';
+  }
+
+  /// タイムアウト起因の失敗かどうかを判定します。
+  bool _isRequestTimeoutError(Object error) => error is TimeoutException;
+
+  /// フォールバックに利用可能なキャッシュエントリを読み込みます。
+  Future<
+      ({
+        CacheStatus status,
+        shelf.Response response,
+        ({
+          int statusCode,
+          Map<String, String> headers,
+          Uint8List bodyBytes,
+        })? rangeEntry,
+      })?> _loadCachedFallbackEntry(String cacheKey) async {
+    final data = _cacheBox?.get(cacheKey) as Map?;
+    if (data == null) {
+      return null;
+    }
+
+    final response = _responseFromCacheData(data);
+    if (response == null) {
+      return null;
+    }
+
+    return (
+      status: _determineStatus(data),
+      response: response,
+      rangeEntry: _cachedBytesEntryFromData(data),
+    );
+  }
+
+  /// キャッシュ状態がフォールバック対象かどうかを返します。
+  bool _shouldServeCachedFallback(CacheStatus status) =>
+      status != CacheStatus.expired;
+
+  /// 保存済みキャッシュから read系レスポンスを構築します。
+  shelf.Response _buildCachedReadResponse(
+    shelf.Request request, {
+    required shelf.Response cachedResponse,
+    required ({
+      int statusCode,
+      Map<String, String> headers,
+      Uint8List bodyBytes,
+    })? rangeEntry,
+    Map<String, String>? extraHeaders,
+  }) {
+    if (request.method.toUpperCase() == 'HEAD') {
+      return shelf.Response(
+        cachedResponse.statusCode,
+        headers: {
+          if (extraHeaders != null) ...extraHeaders,
+          ...cachedResponse.headers,
+        },
+      );
+    }
+
+    if (rangeEntry != null) {
+      final rangeResponse = _tryBuildRangeResponseFromCache(
+        request,
+        cachedHeaders: rangeEntry.headers,
+        cachedBodyBytes: rangeEntry.bodyBytes,
+      );
+      if (rangeResponse != null) {
+        return extraHeaders == null
+            ? rangeResponse
+            : rangeResponse.change(headers: {
+                ...extraHeaders,
+                ...rangeResponse.headers,
+              });
+      }
+    }
+
+    return extraHeaders == null
+        ? cachedResponse
+        : cachedResponse.change(headers: {
+            ...extraHeaders,
+            ...cachedResponse.headers,
+          });
+  }
+
+  /// タイムアウト時にキャッシュが使えない場合のレスポンスを返します。
+  shelf.Response _buildTimeoutErrorResponse(String method) {
+    if (method.toUpperCase() == 'HEAD') {
+      return shelf.Response(HttpStatus.gatewayTimeout, headers: {
+        'Connection': 'close',
+      });
+    }
+
+    return shelf.Response(
+      HttpStatus.gatewayTimeout,
+      body: '上流サーバがタイムアウトしました',
+      headers: {'Connection': 'close'},
+    );
+  }
+
+  /// オフライン時にキャッシュが使えない場合のレスポンスを返します。
+  shelf.Response _buildOfflineCacheMissResponse(String method) {
+    if (method.toUpperCase() == 'HEAD') {
+      return shelf.Response(HttpStatus.gatewayTimeout, headers: {
+        'X-Offline': '1',
+        'X-Offline-Source': 'none',
+      });
+    }
+
+    return shelf.Response.ok(
+      _getOfflineFallbackContent(),
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'X-Offline': '1',
+        'X-Offline-Source': 'fallback',
+      },
+    );
+  }
+
   /// オフライン時のHTTPリクエストを処理します。
   ///
-  /// GETリクエストはキャッシュから配信し、ミスの場合はオフラインフォールバック。
-  /// 非-GETリクエストはオンライン復帰時の再送用にキューに保存します。
+  /// read系リクエストはキャッシュから配信し、ミスの場合はオフラインフォールバック。
+  /// read系以外のリクエストはオンライン復帰時の再送用にキューに保存します。
   ///
   /// [request] 処理するHTTPリクエスト。
   ///
   /// Returns: HTTPレスポンス。
   Future<shelf.Response> _handleOfflineRequest(shelf.Request request) async {
-    if (request.method == 'GET') {
+    if (_isReadRequestMethod(request.method)) {
       final upstreamUrl = _buildUpstreamUrl(request);
       final cacheKey = _generateCacheKey(upstreamUrl);
-      final cachedResponse = await _getCachedResponse(cacheKey);
+      final cachedEntry = await _loadCachedFallbackEntry(cacheKey);
 
-      if (cachedResponse != null) {
-        final rangeEntry = await _getCachedResponseBytesEntry(cacheKey);
-        if (rangeEntry != null) {
-          final rangeResp = _tryBuildRangeResponseFromCache(
-            request,
-            cachedHeaders: rangeEntry.headers,
-            cachedBodyBytes: rangeEntry.bodyBytes,
-          );
-          if (rangeResp != null) {
-            _cacheHits++;
-            _emitEvent(ProxyEventType.cacheHit, request.url.toString(), {});
-            return rangeResp.change(headers: {
-              'X-Offline': '1',
-              'X-Offline-Source': 'cache',
-              ...rangeResp.headers,
-            });
-          }
-        }
-
+      if (cachedEntry != null && _shouldServeCachedFallback(cachedEntry.status)) {
         _cacheHits++;
         _emitEvent(ProxyEventType.cacheHit, request.url.toString(), {});
-        return cachedResponse.change(headers: {
-          'X-Offline': '1',
-          'X-Offline-Source': 'cache',
-          ...cachedResponse.headers,
-        });
+        return _buildCachedReadResponse(
+          request,
+          cachedResponse: cachedEntry.response,
+          rangeEntry: cachedEntry.rangeEntry,
+          extraHeaders: {
+            'X-Offline': '1',
+            'X-Offline-Source': 'cache',
+            'X-Cache-Status':
+                cachedEntry.status == CacheStatus.stale ? 'stale' : 'hit',
+          },
+        );
       }
 
       // オフラインフォールバックを返却
-      return shelf.Response.ok(
-        _getOfflineFallbackContent(),
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'X-Offline': '1',
-          'X-Offline-Source': 'fallback',
-        },
-      );
+      return _buildOfflineCacheMissResponse(request.method);
     } else {
-      // GET以外のリクエストをキューに保存
+      // read系以外のリクエストをキューに保存
       await _queueRequest(request);
       _emitEvent(ProxyEventType.requestQueued, request.url.toString(), {});
 
@@ -1593,6 +1681,11 @@ class OfflineWebProxy {
       return null;
     }
 
+    return _responseFromCacheData(data);
+  }
+
+  /// キャッシュデータからレスポンスを復元します。
+  shelf.Response? _responseFromCacheData(Map data) {
     // キャッシュデータからレスポンスを再構築
     final statusCode = data['statusCode'] as int;
     final headers = Map<String, String>.from(data['headers'] as Map);
@@ -1625,6 +1718,16 @@ class OfflineWebProxy {
       })?> _getCachedResponseBytesEntry(String cacheKey) async {
     final data = _cacheBox?.get(cacheKey) as Map?;
     if (data == null) return null;
+
+    return _cachedBytesEntryFromData(data);
+  }
+
+  /// キャッシュデータから Range 用エントリを復元します。
+  ({
+    int statusCode,
+    Map<String, String> headers,
+    Uint8List bodyBytes,
+  })? _cachedBytesEntryFromData(Map data) {
 
     final statusCode = data['statusCode'] as int;
     final headers = Map<String, String>.from(data['headers'] as Map);
@@ -1694,45 +1797,6 @@ class OfflineWebProxy {
   ///
   /// TTL、Staleポリシー、Cache-Controlヘッダなどを
   /// 参照してキャッシュの有効性を判定します。
-  ///
-  /// [response] チェックするレスポンス。
-  ///
-  /// Returns: キャッシュが有効な場合は `true`。
-  bool _isCacheValid(shelf.Response response) {
-    // Cache-ControlヘッダやAgeヘッダをチェック
-    final cacheControl = response.headers['cache-control'];
-    final ageHeader = response.headers['age'];
-
-    // no-cacheやno-storeが指定されている場合は無効
-    if (cacheControl != null) {
-      if (cacheControl.contains('no-cache') ||
-          cacheControl.contains('no-store')) {
-        return false;
-      }
-
-      // max-ageとAgeヘッダで有効性をチェック
-      if (cacheControl.contains('max-age=') && ageHeader != null) {
-        final maxAge = int.tryParse(
-                cacheControl.split('max-age=')[1].split(',')[0].trim()) ??
-            0;
-        final age = int.tryParse(ageHeader) ?? 0;
-        return age < maxAge;
-      }
-    }
-
-    // デフォルトでは有効とみなす（TTLチェックは別途実装）
-    return true;
-  }
-
-  /// リクエストを上流サーバに転送します。
-  ///
-  /// 元のHTTPリクエストのメソッド、ヘッダ、ボディを保持したまま
-  /// 上流サーバに送信し、レスポンスを取得します。
-  /// Hop-by-Hopヘッダは除外されます。
-  ///
-  /// [request] 転送するHTTPリクエスト。
-  ///
-  /// Returns: ステータスコード、ヘッダ、ボディバイト、送信先 URI を含むレコード。
   Future<
       ({
         int statusCode,
@@ -1755,6 +1819,8 @@ class OfflineWebProxy {
     // HttpClientを再利用する（大量リクエストでの生成コストを削減）
     final client = _getOrCreateHttpClient();
     client.autoUncompress = false; // 自動解凍を無効化
+    final requestTimeout =
+        _config?.requestTimeout ?? const Duration(seconds: 60);
 
     // 同時上流接続数を制限してネイティブ側のリソース枯渇を防ぐ
     await _upstreamSemaphore.acquire(timeout: const Duration(seconds: 30));
@@ -1764,23 +1830,23 @@ class OfflineWebProxy {
       ioRequest.followRedirects = false;
       await _copyRequestHeaders(request, ioRequest, upstreamUri: uri);
 
-      // GET以外のリクエストの場合はボディをコピー
-      if (request.method != 'GET') {
+      // read系以外のリクエストの場合はボディをコピー
+      if (!_isReadRequestMethod(request.method)) {
         final bytes = requestBodyBytes ?? await _readRequestBodyBytes(request);
         if (bytes.isNotEmpty) {
           ioRequest.add(bytes);
         }
       }
 
-      final ioResponse = await ioRequest.close().timeout(
-            _config?.requestTimeout ?? const Duration(seconds: 60),
-          );
+      final ioResponse = await ioRequest.close().timeout(requestTimeout);
 
-      final builder = BytesBuilder(copy: false);
-      await for (final chunk in ioResponse) {
-        builder.add(chunk);
-      }
-      final bodyBytes = builder.takeBytes();
+      final bodyBytes = await (() async {
+        final builder = BytesBuilder(copy: false);
+        await for (final chunk in ioResponse) {
+          builder.add(chunk);
+        }
+        return builder.takeBytes();
+      })().timeout(requestTimeout);
 
       final headerSnapshot =
           ResponseHeaderSnapshot.fromHttpHeaders(ioResponse.headers);
@@ -2266,6 +2332,9 @@ class OfflineWebProxy {
   Future<void> _cacheResponseBytes(String cacheKey, int statusCode,
       Map<String, String> headers, List<int> bodyBytes) async {
     final sanitizedHeaders = _sanitizeResponseHeaders(headers);
+    if (!_shouldPersistResponse(statusCode, sanitizedHeaders)) {
+      return;
+    }
     final contentType =
         sanitizedHeaders['content-type'] ?? 'application/octet-stream';
     final data = {
@@ -2287,20 +2356,86 @@ class OfflineWebProxy {
   /// ヘッダからキャッシュ有効期限を算出します。
   DateTime _calculateExpirationFromHeaders(
       Map<String, String> headers, String contentType) {
-    // Cache-Controlヘッダに基づいて有効期限を算出
+    final now = DateTime.now();
     final cacheControl = headers['cache-control'];
-    if (cacheControl != null && cacheControl.contains('max-age=')) {
-      final maxAge =
-          int.tryParse(cacheControl.split('max-age=')[1].split(',')[0].trim());
-      if (maxAge != null) {
-        return DateTime.now().add(Duration(seconds: maxAge));
-      }
+
+    final sMaxAge = _extractCacheControlSeconds(cacheControl, 's-maxage');
+    if (sMaxAge != null) {
+      return now.add(Duration(seconds: sMaxAge));
+    }
+
+    final maxAge = _extractCacheControlSeconds(cacheControl, 'max-age');
+    if (maxAge != null) {
+      return now.add(Duration(seconds: maxAge));
+    }
+
+    final expiresHeader = headers['expires'];
+    if (expiresHeader != null) {
+      final expiresAt = HttpDate.parse(expiresHeader);
+      return expiresAt.isAfter(now) ? expiresAt : now;
     }
 
     // デフォルトTTLを使用
-    final ttl =
-        _config?.cacheTtl[contentType] ?? _config?.cacheTtl['default'] ?? 3600;
-    return DateTime.now().add(Duration(seconds: ttl));
+    final ttl = _resolveContentTypeDurationSeconds(
+      _config?.cacheTtl,
+      contentType,
+      3600,
+    );
+    return now.add(Duration(seconds: ttl));
+  }
+
+  /// キャッシュ保存可否を判定します。
+  bool _shouldPersistResponse(int statusCode, Map<String, String> headers) {
+    if (statusCode != HttpStatus.ok) {
+      return false;
+    }
+
+    final cacheControl = headers['cache-control']?.toLowerCase();
+    if (cacheControl != null && cacheControl.contains('no-store')) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /// Cache-Control から秒数指定ディレクティブを抽出します。
+  int? _extractCacheControlSeconds(String? cacheControl, String directive) {
+    if (cacheControl == null || cacheControl.isEmpty) {
+      return null;
+    }
+
+    final pattern = RegExp('(?:^|,)\\s*$directive=(\\d+)');
+    final match = pattern.firstMatch(cacheControl.toLowerCase());
+    return int.tryParse(match?.group(1) ?? '');
+  }
+
+  /// Content-Type に対応する TTL / stale 秒数を解決します。
+  int _resolveContentTypeDurationSeconds(
+    Map<String, int>? settings,
+    String contentType,
+    int fallbackSeconds,
+  ) {
+    if (settings == null || settings.isEmpty) {
+      return fallbackSeconds;
+    }
+
+    final normalizedContentType =
+        contentType.split(';').first.trim().toLowerCase();
+    final direct = settings[normalizedContentType];
+    if (direct != null) {
+      return direct;
+    }
+
+    final slashIndex = normalizedContentType.indexOf('/');
+    if (slashIndex > 0) {
+      final wildcardKey = '${normalizedContentType.substring(0, slashIndex)}/*';
+      final wildcard = settings[wildcardKey];
+      if (wildcard != null) {
+        return wildcard;
+      }
+    }
+
+    return settings['default'] ?? fallbackSeconds;
   }
 
   /// レスポンスのキャッシュ有効期限を算出します。
@@ -2319,15 +2454,17 @@ class OfflineWebProxy {
   /// TTL期限切れ後でも一定期間はStaleキャッシュとして
   /// 使用可能な期限をContent-Type別に算出します。
   ///
-  /// [createdAt] キャッシュ作成日時。
+  /// [expiresAt] Fresh 期限の日時。
   /// [contentType] コンテンツタイプ。
   ///
   /// Returns: Stale有効期限の日時。
-  DateTime _calculateStaleExpiration(DateTime createdAt, String contentType) {
-    final stalePeriod = _config?.cacheStale[contentType] ??
-        _config?.cacheStale['default'] ??
-        259200;
-    return createdAt.add(Duration(seconds: stalePeriod));
+  DateTime _calculateStaleExpiration(DateTime expiresAt, String contentType) {
+    final stalePeriod = _resolveContentTypeDurationSeconds(
+      _config?.cacheStale,
+      contentType,
+      259200,
+    );
+    return expiresAt.add(Duration(seconds: stalePeriod));
   }
 
   /// キューの再試行バックオフ秒数を計算します。
@@ -2416,15 +2553,16 @@ class OfflineWebProxy {
       // keep-aliveを有効にする（persistentConnectionデフォルトを使用）
       request.headers.set('accept-encoding', 'gzip, deflate');
 
-      final response = await request.close().timeout(
-            Duration(seconds: timeout ?? 30),
-          );
+      final timeoutDuration = Duration(seconds: timeout ?? 30);
+      final response = await request.close().timeout(timeoutDuration);
 
-      final builder = BytesBuilder(copy: false);
-      await for (final chunk in response) {
-        builder.add(chunk);
-      }
-      final bodyBytes = builder.takeBytes();
+      final bodyBytes = await (() async {
+        final builder = BytesBuilder(copy: false);
+        await for (final chunk in response) {
+          builder.add(chunk);
+        }
+        return builder.takeBytes();
+      })().timeout(timeoutDuration);
 
       final headerSnapshot =
           ResponseHeaderSnapshot.fromHttpHeaders(response.headers);
@@ -2749,14 +2887,13 @@ class OfflineWebProxy {
   CacheStatus _determineStatus(Map data) {
     final now = DateTime.now();
     final expiresAt = DateTime.parse(data['expiresAt'] as String);
-    final createdAt = DateTime.parse(data['createdAt'] as String);
+    final contentType = data['contentType'] as String? ?? 'application/octet-stream';
 
     if (now.isBefore(expiresAt)) {
       return CacheStatus.fresh;
     }
 
-    final staleUntil =
-        _calculateStaleExpiration(createdAt, data['contentType'] as String);
+    final staleUntil = _calculateStaleExpiration(expiresAt, contentType);
     if (now.isBefore(staleUntil)) {
       return CacheStatus.stale;
     }

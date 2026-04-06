@@ -6,7 +6,7 @@ import 'package:offline_web_proxy/src/models/response_header_snapshot.dart';
 
 void main() {
   group('Data Models Edge Cases', () {
-    /// CacheEntryのエッジケーステスト
+    /// CacheEntry が境界値を保持できること
     test('CacheEntry should handle edge case values', () {
       final now = DateTime.now();
       final pastTime = now.subtract(Duration(hours: 1));
@@ -29,7 +29,7 @@ void main() {
       expect(entry.createdAt.isBefore(entry.expiresAt), isTrue);
     });
 
-    /// CookieInfoのオプショナルフィールドテスト
+    /// CookieInfo が null のオプショナル項目を保持できること
     test('CookieInfo should handle null optional fields', () {
       const cookie = CookieInfo(
         name: 'test',
@@ -47,7 +47,7 @@ void main() {
       expect(cookie.secure, isFalse);
     });
 
-    /// CookieRecordのデフォルト属性テスト
+    /// CookieRecord が host-only Cookie の既定値を導出できること
     test('CookieRecord should derive host-only cookie defaults', () {
       final record = CookieRecord.fromSetCookieHeader(
         setCookieHeader: 'JSESSIONID=abc123; Path=/app; HttpOnly',
@@ -64,7 +64,7 @@ void main() {
       expect(record.expires, isNull);
     });
 
-    /// CookieRecordのMax-Age優先テスト
+    /// CookieRecord が Max-Age を Expires より優先できること
     test('CookieRecord should prioritize max-age over expires', () {
       final receivedAt = DateTime.utc(2026, 3, 19, 10);
       final record = CookieRecord.fromSetCookieHeader(
@@ -79,7 +79,7 @@ void main() {
       expect(record.expires, equals(receivedAt.add(Duration(seconds: 60))));
     });
 
-    /// CookieRecordのドメイン一致テスト
+    /// CookieRecord が host-only と domain Cookie を正しく判定できること
     test('CookieRecord should match host-only and domain cookies correctly',
         () {
       final hostOnlyCookie = CookieRecord.fromSetCookieHeader(
@@ -100,7 +100,7 @@ void main() {
       expect(domainCookie.matchesDomain('other.example.org'), isFalse);
     });
 
-    /// CookieRecordのパス一致テスト
+    /// CookieRecord がパス一致を正しく判定できること
     test('CookieRecord should evaluate path matching correctly', () {
       final cookie = CookieRecord.fromSetCookieHeader(
         setCookieHeader: 'SESSION=1; Path=/app',
@@ -114,7 +114,7 @@ void main() {
       expect(cookie.matchesPath('/other'), isFalse);
     });
 
-    /// CookieRecordのURI一致テスト
+    /// CookieRecord が期限切れとセキュア属性の不一致を除外できること
     test('CookieRecord should reject expired and insecure URI mismatches', () {
       final now = DateTime.utc(2026, 3, 19, 10);
       final secureCookie = CookieRecord.fromSetCookieHeader(
@@ -142,7 +142,7 @@ void main() {
       );
     });
 
-    /// CookieRestoreEntry の Set-Cookie 復元テスト
+    /// CookieRestoreEntry が Set-Cookie 文字列を復元できること
     test('CookieRestoreEntry should parse set-cookie strings', () {
       final receivedAt = DateTime.utc(2026, 3, 19, 10);
       final entry = CookieRestoreEntry.fromSetCookieHeader(
@@ -165,7 +165,7 @@ void main() {
       expect(cookieRecord.createdAt, equals(receivedAt));
     });
 
-    /// CookieRestoreEntry の構造化データ変換テスト
+    /// CookieRestoreEntry が構造化属性を保持したまま変換できること
     test('CookieRestoreEntry should preserve structured attributes', () {
       final createdAt = DateTime.utc(2026, 3, 19, 11);
       final entry = CookieRestoreEntry(
@@ -191,7 +191,7 @@ void main() {
       expect(cookieRecord.createdAt, equals(createdAt));
     });
 
-    /// Cookieヘッダ生成テスト
+    /// Cookie ヘッダーが一致条件と並び順を反映できること
     test('buildCookieHeaderForUri should filter and sort matching cookies', () {
       final now = DateTime.utc(2026, 3, 19, 10);
       final cookies = <CookieRecord>[
@@ -232,7 +232,7 @@ void main() {
       expect(httpHeader, equals('APP=app; ROOT=root'));
     });
 
-    /// ResponseHeaderSnapshotのSet-Cookie保持テスト
+    /// ResponseHeaderSnapshot が生の Set-Cookie を保持できること
     test('ResponseHeaderSnapshot should preserve raw set-cookie values', () {
       final snapshot = ResponseHeaderSnapshot.fromRawHeaders({
         'content-type': ['text/plain'],
@@ -250,7 +250,7 @@ void main() {
       expect(snapshot.setCookieHeaders.last, equals('B=2; Path=/; HttpOnly'));
     });
 
-    /// QueuedRequestの空ヘッダーテスト
+    /// QueuedRequest が空ヘッダーを保持できること
     test('QueuedRequest should handle empty headers', () {
       final now = DateTime.now();
 
@@ -267,7 +267,7 @@ void main() {
       expect(request.retryCount, equals(5));
     });
 
-    /// DroppedRequestのテスト
+    /// DroppedRequest がエラー情報を保持できること
     test('DroppedRequest should handle all error types', () {
       final now = DateTime.now();
 
@@ -287,7 +287,7 @@ void main() {
       expect(request.errorMessage, equals('Not Found'));
     });
 
-    /// WarmupEntryの失敗ケーステスト
+    /// WarmupEntry が失敗結果を保持できること
     test('WarmupEntry should handle failure cases', () {
       const entry = WarmupEntry(
         path: '/api/fail',
@@ -303,7 +303,7 @@ void main() {
       expect(entry.duration.inMilliseconds, equals(5000));
     });
 
-    /// ProxyEventの全イベントタイプテスト
+    /// ProxyEvent が全イベントタイプを扱えること
     test('ProxyEvent should support all event types', () {
       final eventTypes = [
         ProxyEventType.serverStarted,
@@ -334,7 +334,7 @@ void main() {
       }
     });
 
-    /// CacheStatusの全状態テスト
+    /// CacheStatus の全状態を扱えること
     test('CacheStatus should have all states defined', () {
       const statuses = [
         CacheStatus.fresh,
@@ -357,7 +357,7 @@ void main() {
       }
     });
 
-    /// 統計情報のゼロ値テスト
+    /// 統計情報がゼロ値を保持できること
     test('Stats should handle zero values correctly', () {
       final proxyStats = ProxyStats(
         totalRequests: 0,
@@ -389,7 +389,7 @@ void main() {
       expect(cacheStats.staleUsageRate, equals(0.0));
     });
 
-    /// 大きな数値の統計情報テスト
+    /// 統計情報が大きな値を保持できること
     test('Stats should handle large values correctly', () {
       const maxInt = 9223372036854775807; // 64-bit max int
       const largeSize = 1099511627776; // 1TB
@@ -424,7 +424,7 @@ void main() {
   });
 
   group('ProxyConfig Edge Cases', () {
-    /// 極端な設定値のテスト
+    /// ProxyConfig が極端な設定値を保持できること
     test('should handle extreme configuration values', () {
       final config = ProxyConfig(
         origin:
@@ -449,7 +449,7 @@ void main() {
       expect(config.startupPaths, hasLength(100));
     });
 
-    /// 空の設定値テスト
+    /// ProxyConfig が空の設定値を保持できること
     test('should handle empty configuration values', () {
       const config = ProxyConfig(
         origin: '', // 空のオリジン（通常は無効だが型上は可能）
@@ -466,7 +466,7 @@ void main() {
       expect(config.startupPaths, isEmpty);
     });
 
-    /// カスタムTTL設定のテスト
+    /// ProxyConfig がカスタム TTL と stale 設定を保持できること
     test('should handle custom TTL and stale configurations', () {
       const customTtl = {
         'application/json': 300, // 5分
@@ -493,7 +493,7 @@ void main() {
       expect(config.cacheStale['application/pdf'], equals(7776000));
     });
 
-    /// 特殊文字を含むオリジンURLのテスト
+    /// ProxyConfig が特殊文字を含む origin を保持できること
     test('should handle origins with special characters', () {
       const origins = [
         'https://api-v2.example-site.com:8443',

@@ -39,25 +39,25 @@ void main() {
       await Hive.close();
     });
 
-    /// 無効なURL引数のテスト
+    /// 空の URL では ArgumentError になること
     test('should throw ArgumentError for empty URL in clearCacheForUrl',
         () async {
       await expectLater(() => proxy.clearCacheForUrl(''), throwsArgumentError);
     });
 
-    /// 無効なURL引数のテスト（スペースのみ）
+    /// 空白だけの URL では ArgumentError になること
     test('should throw ArgumentError for whitespace-only URL', () async {
       await expectLater(
           () => proxy.clearCacheForUrl('   '), throwsArgumentError);
     });
 
-    /// 非常に長いURLでのテスト
+    /// 非常に長い URL でも処理を継続できること
     test('should handle very long URLs', () async {
       final longUrl = 'https://example.com/${'a' * 10000}';
       await proxy.clearCacheForUrl(longUrl);
     });
 
-    /// 特殊文字を含むURLのテスト
+    /// 特殊文字を含む URL でも処理を継続できること
     test('should handle URLs with special characters', () async {
       const urls = [
         'https://example.com/path?query=value&other=test',
@@ -72,11 +72,10 @@ void main() {
       }
     });
 
-    /// 複数の同時操作のテスト
+    /// 複数の同時操作を処理できること
     test('should handle multiple concurrent operations', () async {
       final futures = <Future>[];
 
-      // 同時に複数のキャッシュクリア操作を実行
       for (int i = 0; i < 10; i++) {
         futures.add(proxy.clearCache());
         futures.add(proxy.clearExpiredCache());
@@ -84,23 +83,22 @@ void main() {
         futures.add(proxy.getCacheStats());
       }
 
-      expect(() => Future.wait(futures), returnsNormally);
+      await expectLater(Future.wait(futures), completes);
     });
 
-    /// メモリ制約のテスト（大量のデータ）
+    /// 大きな limit のキャッシュ一覧取得を処理できること
     test('should handle large cache list requests', () async {
-      // 大量のキャッシュエントリを要求（実際には空だが、システムの動作を確認）
       final cacheList = await proxy.getCacheList(limit: 100000);
       expect(cacheList, isA<List<CacheEntry>>());
     });
 
-    /// ネガティブな制限値のテスト
+    /// 負の limit 値でもクラッシュしないこと
     test('should handle negative limit values', () async {
-      expect(() => proxy.getCacheList(limit: -1), returnsNormally);
-      expect(() => proxy.getDroppedRequests(limit: -100), returnsNormally);
+      await expectLater(proxy.getCacheList(limit: -1), completes);
+      await expectLater(proxy.getDroppedRequests(limit: -100), completes);
     });
 
-    /// ゼロ制限値のテスト
+    /// limit が 0 のとき空結果になること
     test('should handle zero limit values', () async {
       final cacheList = await proxy.getCacheList(limit: 0);
       expect(cacheList, isEmpty);
@@ -109,7 +107,7 @@ void main() {
       expect(droppedRequests, isEmpty);
     });
 
-    /// 大きなオフセット値のテスト
+    /// 大きな offset 値でも処理を継続できること
     test('should handle large offset values', () async {
       final cacheList = await proxy.getCacheList(offset: 1000000);
       expect(cacheList, isA<List<CacheEntry>>());
@@ -117,7 +115,7 @@ void main() {
   });
 
   group('Exception Classes Detailed Tests', () {
-    /// ProxyStartExceptionのtoStringテスト
+    /// ProxyStartException の toString に原因が含まれること
     test('ProxyStartException toString should include cause', () {
       final cause = Exception('Original error');
       final exception = ProxyStartException('Failed to start server', cause);
@@ -129,21 +127,21 @@ void main() {
       expect(str, contains('Original error'));
     });
 
-    /// ProxyStopExceptionのテスト
+    /// ProxyStopException が原因の有無を表現できること
     test('ProxyStopException should handle all scenarios', () {
-      // 原因なしのケース
+      // 原因がない場合
       const exception1 = ProxyStopException('Server already stopped', null);
       expect(exception1.toString(), contains('Server already stopped'));
       expect(exception1.toString(), isNot(contains('caused by')));
 
-      // 原因ありのケース
+      // 原因がある場合
       final cause = SocketException('Connection lost');
       final exception2 = ProxyStopException('Failed to stop gracefully', cause);
       expect(exception2.toString(), contains('Failed to stop gracefully'));
       expect(exception2.toString(), contains('caused by'));
     });
 
-    /// PortBindExceptionのテスト
+    /// PortBindException がポート番号を含めて表現できること
     test('PortBindException should include port number', () {
       const exception = PortBindException(8080, 'Port already in use');
 
@@ -153,7 +151,7 @@ void main() {
       expect(exception.toString(), contains('Port already in use'));
     });
 
-    /// CacheOperationExceptionの異なる操作タイプテスト
+    /// CacheOperationException が操作種別ごとに表現できること
     test('CacheOperationException should handle different operations', () {
       const operations = ['clear', 'get', 'put', 'delete', 'purge'];
 
@@ -167,7 +165,7 @@ void main() {
       }
     });
 
-    /// CookieOperationExceptionのテスト
+    /// CookieOperationException が Cookie 操作の失敗を表現できること
     test('CookieOperationException should handle cookie-specific errors', () {
       const exception = CookieOperationException(
         'save',
@@ -180,7 +178,7 @@ void main() {
       expect(exception.toString(), contains('CookieOperationException[save]'));
     });
 
-    /// QueueOperationExceptionのテスト
+    /// QueueOperationException がキュー操作の失敗を表現できること
     test('QueueOperationException should handle queue operations', () {
       final ioException = Exception('Disk full');
       final exception = QueueOperationException(
@@ -195,7 +193,7 @@ void main() {
       expect(exception.toString(), contains('caused by'));
     });
 
-    /// StatsOperationExceptionのテスト
+    /// StatsOperationException が統計処理の失敗を表現できること
     test('StatsOperationException should handle stats errors', () {
       const exception = StatsOperationException(
         'Database connection failed',
@@ -206,7 +204,7 @@ void main() {
       expect(exception.toString(), contains('StatsOperationException'));
     });
 
-    /// NetworkExceptionのテスト
+    /// NetworkException がネットワーク起因の失敗を表現できること
     test('NetworkException should handle network errors', () {
       final timeoutException = TimeoutException('Request timeout');
       final exception = NetworkException(
@@ -220,7 +218,7 @@ void main() {
       expect(exception.toString(), contains('caused by'));
     });
 
-    /// WarmupExceptionの詳細テスト
+    /// WarmupException が部分結果を保持できること
     test('WarmupException should include partial results', () {
       final partialResults = [
         const WarmupEntry(
@@ -250,7 +248,7 @@ void main() {
       expect(exception.toString(), contains('2 partial results'));
     });
 
-    /// ネストした例外のテスト
+    /// ネストした例外原因を保持できること
     test('should handle nested exceptions', () {
       final rootCause = FormatException('Invalid JSON');
       final intermediateCause = Exception('Parse error: $rootCause');
@@ -278,11 +276,10 @@ void main() {
       }
     });
 
-    /// 同時キャッシュ操作のテスト
+    /// 同時キャッシュ操作を処理できること
     test('should handle concurrent cache operations', () async {
       final futures = <Future>[];
 
-      // 同時に異なるキャッシュ操作を実行
       futures.add(proxy.clearCache());
       futures.add(proxy.clearExpiredCache());
       futures.add(proxy.getCacheStats());
@@ -290,11 +287,10 @@ void main() {
       futures.add(proxy.clearCacheForUrl('https://example.com/1'));
       futures.add(proxy.clearCacheForUrl('https://example.com/2'));
 
-      // すべての操作が完了することを確認
       await expectLater(Future.wait(futures), completes);
     });
 
-    /// 同時Cookie操作のテスト
+    /// 同時 Cookie 操作を処理できること
     test('should handle concurrent cookie operations', () async {
       final futures = <Future>[];
 
@@ -306,11 +302,10 @@ void main() {
       await expectLater(Future.wait(futures), completes);
     });
 
-    /// 同時統計取得のテスト
+    /// 同時の統計取得を処理できること
     test('should handle concurrent stats requests', () async {
       final futures = <Future>[];
 
-      // 複数の統計リクエストを同時実行
       for (int i = 0; i < 20; i++) {
         futures.add(proxy.getStats());
         futures.add(proxy.getCacheStats());
@@ -319,18 +314,16 @@ void main() {
       final results = await Future.wait(futures);
       expect(results, hasLength(40));
 
-      // すべての結果が正しい型であることを確認
       for (int i = 0; i < results.length; i += 2) {
         expect(results[i], isA<ProxyStats>());
         expect(results[i + 1], isA<CacheStats>());
       }
     });
 
-    /// ストレステスト（大量の同時操作）
+    /// 多数の同時操作を合理的な時間内に処理できること
     test('should handle stress test with many concurrent operations', () async {
       final futures = <Future>[];
 
-      // 100個の同時操作を実行
       for (int i = 0; i < 100; i++) {
         switch (i % 5) {
           case 0:
@@ -351,7 +344,6 @@ void main() {
         }
       }
 
-      // すべての操作が合理的な時間内に完了することを確認
       await expectLater(
         Future.wait(futures).timeout(Duration(seconds: 10)),
         completes,
@@ -372,7 +364,7 @@ void main() {
       }
     });
 
-    /// 不正な形式のURLテスト
+    /// 不正形式の URL でもクラッシュしないこと
     test('should handle malformed URLs gracefully', () async {
       const malformedUrls = [
         'not-a-url',
@@ -385,11 +377,9 @@ void main() {
       ];
 
       for (final url in malformedUrls) {
-        // 例外が発生するかもしれないが、クラッシュしないことを確認
         try {
           await proxy.clearCacheForUrl(url);
         } catch (e) {
-          // 例外は許可されるが、適切な型であることを確認
           expect(
               e,
               anyOf(
@@ -401,7 +391,7 @@ void main() {
       }
     });
 
-    /// 国際化ドメイン名のテスト
+    /// 国際化ドメイン名でも処理を継続できること
     test('should handle internationalized domain names', () async {
       const internationalUrls = [
         'https://日本語.example.com/path',
@@ -415,7 +405,7 @@ void main() {
       }
     });
 
-    /// 非常に長いURLのテスト
+    /// 極端に長い URL でもクラッシュしないこと
     test('should handle extremely long URLs', () async {
       final baseUrl = 'https://example.com/';
       final veryLongPath = 'path/' * 1000; // 非常に長いパス
@@ -423,13 +413,12 @@ void main() {
 
       final extremelyLongUrl = '$baseUrl$veryLongPath?$longQuery';
 
-      // 長いURLでもクラッシュしないことを確認
       await proxy.clearCacheForUrl(extremelyLongUrl);
     });
   });
 }
 
-/// TimeoutExceptionクラスの定義（テスト用）
+/// テスト用の TimeoutException です。
 class TimeoutException implements Exception {
   final String message;
 

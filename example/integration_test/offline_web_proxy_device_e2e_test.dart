@@ -104,14 +104,14 @@ void main() {
         expect(bin1.bodyBytes.first, 0);
         expect(bin1.bodyBytes.last, 255);
 
-        // Kill upstream to ensure proxy must serve from cache.
+        // 上流停止後はプロキシキャッシュから返せること
         await closeUpstream();
 
         final bin2 = await http.get(Uri.parse('$proxyBase/bin'));
         expect(bin2.statusCode, 200);
         expect(bin2.bodyBytes, bin1.bodyBytes);
 
-        // Non-GET queue path sanity (does not assert drain; just ensures it doesn't hang/crash)
+        // 非 GET の再送経路でもハングやクラッシュが起きないこと
         final post = await http.post(
           Uri.parse('$proxyBase/echo'),
           body: Uint8List.fromList(List<int>.filled(1024, 7)),
@@ -120,7 +120,7 @@ void main() {
 
         await proxy.stop();
 
-        // If periodic timers were leaked, errors often show up after stop.
+        // 停止後もタイマー起因の後続エラーが出ないこと
         await Future.delayed(const Duration(seconds: 6));
       },
       timeout: const Timeout(Duration(minutes: 2)),

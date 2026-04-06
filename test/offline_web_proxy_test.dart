@@ -82,18 +82,18 @@ void main() {
       await upstreamServer?.close(force: true);
     });
 
-    /// プロキシインスタンスのテスト
-    test('should create proxy instance', () {
+    /// プロキシインスタンスを生成できること
+    test('creates an OfflineWebProxy in stopped state', () {
       expect(proxy, isNotNull);
       expect(proxy.isRunning, isFalse);
     });
 
-    /// イベントストリームのテスト
-    test('should provide event stream', () {
+    /// イベントストリームを取得できること
+    test('exposes a ProxyEvent stream via events', () {
       expect(proxy.events, isA<Stream<ProxyEvent>>());
     });
 
-    /// requestReceived イベントに URL 解決メタ情報が入ることのテスト
+    /// requestReceived イベントに URL 解決メタ情報が入ること
     test('should include resolved navigation metadata in requestReceived event',
         () async {
       await HttpOverrides.runZoned(() async {
@@ -154,12 +154,12 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 初期状態のテスト
+    /// 初期状態が正しいこと
     test('should have correct initial state', () {
       expect(proxy.isRunning, isFalse);
     });
 
-    /// 統計情報の初期値テスト
+    /// 統計情報の初期値が正しいこと
     test('should provide initial stats', () async {
       final stats = await proxy.getStats();
       expect(stats.totalRequests, equals(0));
@@ -170,7 +170,7 @@ void main() {
       expect(stats.droppedRequestsCount, equals(0));
     });
 
-    /// キャッシュ統計の初期値テスト
+    /// キャッシュ統計の初期値が正しいこと
     test('should provide initial cache stats', () async {
       final cacheStats = await proxy.getCacheStats();
       expect(cacheStats.totalEntries, equals(0));
@@ -182,25 +182,168 @@ void main() {
       expect(cacheStats.staleUsageRate, equals(0.0));
     });
 
-    /// キューの初期状態テスト
+    /// オンライン時にキャッシュが存在しても upstream を優先すること
+    test('should forward online get requests even when cache exists',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        var requestCount = 0;
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          requestCount++;
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType.json
+            ..write('{"count":$requestCount}');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+          ),
+        );
+
+        final firstResponse = await _performProxyRequest(proxyPort, '/api/data');
+        final secondResponse =
+            await _performProxyRequest(proxyPort, '/api/data');
+
+        expect(firstResponse.statusCode, equals(HttpStatus.ok));
+        expect(firstResponse.body, equals('{"count":1}'));
+        expect(secondResponse.statusCode, equals(HttpStatus.ok));
+        expect(secondResponse.body, equals('{"count":2}'));
+        expect(requestCount, equals(2));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// request timeout 時だけキャッシュへフォールバックすること
+    test('should fallback to cached get response on request timeout',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        var shouldDelay = false;
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          if (shouldDelay) {
+            await Future<void>.delayed(const Duration(milliseconds: 150));
+          }
+
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType.json
+            ..write('{"source":"upstream"}');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+            requestTimeout: const Duration(milliseconds: 50),
+          ),
+        );
+
+        final seededResponse = await _performProxyRequest(proxyPort, '/api/data');
+        expect(seededResponse.statusCode, equals(HttpStatus.ok));
+        expect(seededResponse.body, equals('{"source":"upstream"}'));
+
+        shouldDelay = true;
+        final timeoutResponse =
+            await _performProxyRequest(proxyPort, '/api/data');
+
+        expect(timeoutResponse.statusCode, equals(HttpStatus.ok));
+        expect(timeoutResponse.body, equals('{"source":"upstream"}'));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// upstream 5xx ではキャッシュに切り替えないこと
+    test('should return upstream 5xx without falling back to cache',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        var returnServerError = false;
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          request.response.statusCode =
+              returnServerError ? HttpStatus.serviceUnavailable : HttpStatus.ok;
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(
+            returnServerError
+                ? '{"source":"upstream-error"}'
+                : '{"source":"upstream"}',
+          );
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+          ),
+        );
+
+        final seededResponse = await _performProxyRequest(proxyPort, '/api/data');
+        expect(seededResponse.statusCode, equals(HttpStatus.ok));
+
+        returnServerError = true;
+        final errorResponse =
+            await _performProxyRequest(proxyPort, '/api/data');
+
+        expect(errorResponse.statusCode, equals(HttpStatus.serviceUnavailable));
+        expect(errorResponse.body, equals('{"source":"upstream-error"}'));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// upstream 4xx ではキャッシュに切り替えないこと
+    test('should return upstream 4xx without falling back to cache',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        var returnClientError = false;
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          request.response.statusCode =
+              returnClientError ? HttpStatus.notFound : HttpStatus.ok;
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(
+            returnClientError
+                ? '{"source":"upstream-not-found"}'
+                : '{"source":"upstream"}',
+          );
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+          ),
+        );
+
+        final seededResponse = await _performProxyRequest(proxyPort, '/api/data');
+        expect(seededResponse.statusCode, equals(HttpStatus.ok));
+
+        returnClientError = true;
+        final errorResponse =
+            await _performProxyRequest(proxyPort, '/api/data');
+
+        expect(errorResponse.statusCode, equals(HttpStatus.notFound));
+        expect(errorResponse.body, equals('{"source":"upstream-not-found"}'));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// キューの初期状態が空であること
     test('should have empty queue initially', () async {
       final queuedRequests = await proxy.getQueuedRequests();
       expect(queuedRequests, isEmpty);
     });
 
-    /// ドロップされたリクエストの初期状態テスト
+    /// ドロップされたリクエストの初期状態が空であること
     test('should have no dropped requests initially', () async {
       final droppedRequests = await proxy.getDroppedRequests();
       expect(droppedRequests, isEmpty);
     });
 
-    /// Cookieの初期状態テスト
+    /// Cookie の初期状態が空であること
     test('should have no cookies initially', () async {
       final cookies = await proxy.getCookies();
       expect(cookies, isEmpty);
     });
 
-    /// 対象URL向けCookieヘッダ取得のテスト
+    /// 対象 URL 向け Cookie ヘッダーを組み立てられること
     test('should build cookie header for target url', () async {
       await proxy.start(
           config: const ProxyConfig(origin: 'https://example.com'));
@@ -233,7 +376,7 @@ void main() {
       expect(cookieHeader, equals('APP=app; ROOT=root'));
     });
 
-    /// 対象Cookieが無い場合はnullを返すテスト
+    /// 対象 Cookie が無い場合は null を返すこと
     test('should return null when no cookies match target url', () async {
       await proxy.start(
           config: const ProxyConfig(origin: 'https://example.com'));
@@ -244,7 +387,7 @@ void main() {
       expect(cookieHeader, isNull);
     });
 
-    /// start 前に復元した Cookie を起動後に送信できることのテスト
+    /// start 前に復元した Cookie を起動後に送信できること
     test('should restore cookies before start and use them after start',
         () async {
       await proxy.restoreCookies([
@@ -268,7 +411,7 @@ void main() {
       expect(cookieHeader, equals('NATIVE=native-token'));
     });
 
-    /// start 前に復元した Cookie が上流転送へ適用されることのテスト
+    /// start 前に復元した Cookie が上流転送へ適用されること
     test('should forward restored cookies to upstream after start', () async {
       await HttpOverrides.runZoned(() async {
         final receivedCookies = <String?>[];
@@ -311,7 +454,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 停止前に serverStopped イベントが購読側へ届くことのテスト
+    /// 停止前に serverStopped イベントが購読側へ届くこと
     test('should emit serverStopped event before closing stream', () async {
       final eventTypes = <ProxyEventType>[];
       final stoppedEvent = Completer<void>();
@@ -340,7 +483,7 @@ void main() {
       await subscription.cancel();
     });
 
-    /// stop 後に再起動してもイベント配信と上流転送が継続することのテスト
+    /// stop 後に再起動してもイベント配信と上流転送が継続すること
     test('should restart same instance and emit events again', () async {
       await HttpOverrides.runZoned(() async {
         var upstreamRequestCount = 0;
@@ -399,7 +542,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 上流の Set-Cookie を保存し次回上流転送へ適用することのテスト
+    /// 上流の Set-Cookie を保存し次回上流転送へ適用すること
     test('should capture upstream set-cookie and forward it later', () async {
       await HttpOverrides.runZoned(() async {
         final receivedCookies = <String?>[];
@@ -435,7 +578,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// Cookie 暗号化鍵をセキュアストレージに保存することのテスト
+    /// Cookie 暗号化鍵をセキュアストレージに保存すること
     test('should persist cookie encryption key in secure storage', () async {
       await proxy.restoreCookies([
         const CookieRestoreEntry(
@@ -455,7 +598,7 @@ void main() {
       expect(base64Decode(storedKey!), hasLength(32));
     });
 
-    /// 既存の平文 Cookie Box を暗号化 Box へ移行することのテスト
+    /// 既存の平文 Cookie Box を暗号化 Box へ移行すること
     test('should migrate legacy plain cookie box into encrypted box', () async {
       await Hive.initFlutter();
       final legacyBox = await Hive.openBox(_legacyCookieBoxName);
@@ -478,7 +621,7 @@ void main() {
       expect(await Hive.boxExists(_legacyCookieBoxName), isFalse);
     });
 
-    /// 不正な暗号化鍵では平文 Box にフォールバックしないことのテスト
+    /// 不正な暗号化鍵では平文 Box にフォールバックしないこと
     test('should fail without fallback when secure storage key is invalid',
         () async {
       FlutterSecureStorage.setMockInitialValues(<String, String>{
@@ -494,7 +637,7 @@ void main() {
       );
     });
 
-    /// 暗号化 Box が残っていても鍵喪失時は復号できず失敗することのテスト
+    /// 暗号化 Box が残っていても鍵喪失時は復号できず失敗すること
     test('should fail and require re-login when encryption key is missing',
         () async {
       await proxy.restoreCookies([
@@ -518,7 +661,7 @@ void main() {
       );
     });
 
-    /// Jar の同名 Cookie を保持しつつクライアント Cookie を補完するテスト
+    /// Jar の同名 Cookie を保持しつつクライアント Cookie を補完すること
     test('should preserve duplicate jar cookies and append client-only cookies',
         () async {
       await HttpOverrides.runZoned(() async {
@@ -573,7 +716,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// start 前に復元した Cookie を一覧取得できることのテスト
+    /// start 前に復元した Cookie を一覧取得できること
     test('should expose restored cookies before start', () async {
       await proxy.restoreCookies([
         CookieRestoreEntry.fromSetCookieHeader(
@@ -593,13 +736,13 @@ void main() {
       expect(cookies.first.sameSite, equals('Lax'));
     });
 
-    /// 不正URLのCookieヘッダ取得エラーテスト
+    /// 不正 URL の Cookie ヘッダー取得でエラーになること
     test('should throw error for invalid cookie header url', () async {
       expect(
           () => proxy.getCookieHeaderForUrl('not-a-url'), throwsArgumentError);
     });
 
-    /// origin 外URLのCookieヘッダ取得エラーテスト
+    /// origin 外 URL の Cookie ヘッダー取得でエラーになること
     test('should throw error for url outside configured origin', () async {
       await proxy.start(
           config: const ProxyConfig(origin: 'https://example.com'));
@@ -611,7 +754,7 @@ void main() {
       );
     });
 
-    /// proxy URL から upstream URL を復元できることのテスト
+    /// proxy URL から upstream URL を復元できること
     test('should resolve proxy url to upstream url', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -627,7 +770,7 @@ void main() {
       );
     });
 
-    /// localhost と 127.0.0.1 を loopback alias として扱うことのテスト
+    /// localhost と 127.0.0.1 を loopback alias として扱うこと
     test('should resolve localhost proxy url as loopback alias', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -649,7 +792,7 @@ void main() {
       );
     });
 
-    /// 相対 URL を source URL 基準で同じ upstream に解決することのテスト
+    /// 相対 URL を source URL 基準で同じ upstream に解決すること
     test('should resolve relative target by source url', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com/base'),
@@ -675,7 +818,7 @@ void main() {
       );
     });
 
-    /// proxy URL 基準の相対 JavaScript URL が upstream 優先であることのテスト
+    /// proxy URL 基準の相対 JavaScript URL が upstream 優先であること
     test(
         'should resolve relative script url by source url without classifying it as proxy static resource',
         () async {
@@ -708,7 +851,7 @@ void main() {
       );
     });
 
-    /// origin の base path 外 URL は unresolved になることのテスト
+    /// origin の base path 外 URL は unresolved になること
     test('should return unresolved for same-origin url outside proxy scope',
         () async {
       await proxy.start(
@@ -734,7 +877,7 @@ void main() {
       );
     });
 
-    /// 一覧登録された app.css は static resource として扱うことのテスト
+    /// 一覧登録された app.css は static resource として扱うこと
     test('should classify proxy static resource as local only', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -753,7 +896,7 @@ void main() {
       expect(resolution.upstreamUri, isNull);
     });
 
-    /// 一覧登録された入れ子の css/app.css は static resource として扱うことのテスト
+    /// 一覧登録された入れ子の css/app.css は static resource として扱うこと
     test('should classify nested static resource as local only', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -772,7 +915,7 @@ void main() {
       expect(resolution.upstreamUri, isNull);
     });
 
-    /// package prefix 由来の package.css も static resource として扱うことのテスト
+    /// package prefix 由来の package.css も static resource として扱うこと
     test('should classify package prefixed static resource as local only',
         () async {
       final proxyPort = await proxy.start(
@@ -792,7 +935,7 @@ void main() {
       expect(resolution.upstreamUri, isNull);
     });
 
-    /// 一覧未登録の test.css は upstream 優先であることのテスト
+    /// 一覧未登録の test.css は upstream 優先であること
     test('should not classify unlisted css path as static resource', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -814,7 +957,7 @@ void main() {
       );
     });
 
-    /// source URL が無い相対 URL は unresolved になることのテスト
+    /// source URL が無い相対 URL は unresolved になること
     test('should return unresolved for relative target without source url', () {
       final resolution = proxy.resolveNavigationTarget(targetUrl: '../map');
 
@@ -828,7 +971,7 @@ void main() {
       );
     });
 
-    /// 非 HTTP スキームは external として扱うことのテスト
+    /// 非 HTTP スキームは external として扱うこと
     test('should classify non http scheme as external', () {
       final resolution = proxy.resolveNavigationTarget(
         targetUrl: 'tel:+81012345678',
@@ -845,7 +988,7 @@ void main() {
       );
     });
 
-    /// Google Maps 検索 URL は external launch を推奨することのテスト
+    /// Google Maps 検索 URL は external launch を推奨すること
     test('should recommend external launch for google maps search url', () {
       final recommendation = proxy.recommendMainFrameNavigation(
         targetUrl:
@@ -872,7 +1015,7 @@ void main() {
       );
     });
 
-    /// HTTPS の loopback URL を proxy URL と誤判定しないことのテスト
+    /// HTTPS の loopback URL を proxy URL と誤判定しないこと
     test('should not treat https loopback url as proxy endpoint', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -890,7 +1033,7 @@ void main() {
       expect(resolution.upstreamUri, isNull);
     });
 
-    /// scheme-relative URL を source URL から解決できることのテスト
+    /// scheme-relative URL を source URL から解決できること
     test('should resolve scheme relative url by source url', () async {
       final resolution = proxy.resolveNavigationTarget(
         targetUrl: '//maps.example.com/route',
@@ -908,7 +1051,7 @@ void main() {
       expect(resolution.usedSourceUrl, isTrue);
     });
 
-    /// main frame の proxy URL は allow であることのテスト
+    /// main frame の proxy URL は allow であること
     test('should recommend allow for main frame proxy url', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -931,7 +1074,7 @@ void main() {
       );
     });
 
-    /// main frame の app.css は allow であることのテスト
+    /// main frame の app.css は allow であること
     test('should recommend allow for main frame proxy static resource',
         () async {
       final proxyPort = await proxy.start(
@@ -956,7 +1099,7 @@ void main() {
       expect(recommendation.resolution.isStaticResource, isTrue);
     });
 
-    /// main frame の upstream URL は proxy へ載せ替えることのテスト
+    /// main frame の upstream URL は proxy へ載せ替えること
     test('should recommend proxy load for main frame upstream url', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com/base'),
@@ -982,7 +1125,7 @@ void main() {
       );
     });
 
-    /// new window の proxy URL は loadProxyUrl であることのテスト
+    /// new window の proxy URL は loadProxyUrl であること
     test('should recommend proxy load for new window proxy url', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -1004,7 +1147,7 @@ void main() {
       expect(recommendation.externalUri, isNull);
     });
 
-    /// new window の app.css は loadProxyUrl であることのテスト
+    /// new window の app.css は loadProxyUrl であること
     test('should recommend proxy load for new window proxy static resource',
         () async {
       final proxyPort = await proxy.start(
@@ -1032,7 +1175,7 @@ void main() {
       expect(recommendation.resolution.isStaticResource, isTrue);
     });
 
-    /// new window の upstream URL も proxy へ載せ替えることのテスト
+    /// new window の upstream URL も proxy へ載せ替えること
     test('should recommend proxy load for new window upstream url', () async {
       final proxyPort = await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com/base'),
@@ -1053,7 +1196,7 @@ void main() {
       );
     });
 
-    /// 外部 URL は外部委譲を推奨することのテスト
+    /// 外部 URL は外部委譲を推奨すること
     test('should recommend external launch for external url', () {
       final recommendation = proxy.recommendMainFrameNavigation(
         targetUrl: 'tel:+81012345678',
@@ -1075,7 +1218,7 @@ void main() {
       );
     });
 
-    /// new window の外部 URL は外部委譲を推奨することのテスト
+    /// new window の外部 URL は外部委譲を推奨すること
     test('should recommend external launch for new window external url', () {
       final recommendation = proxy.recommendNewWindowNavigation(
         targetUrl: 'tel:+81012345678',
@@ -1092,7 +1235,7 @@ void main() {
       );
     });
 
-    /// 解決不能な URL は cancel を推奨することのテスト
+    /// 解決不能な URL は cancel を推奨すること
     test('should recommend cancel for unresolved upstream outside proxy scope',
         () async {
       await proxy.start(
@@ -1116,7 +1259,7 @@ void main() {
       );
     });
 
-    /// 不正な URL は main frame で cancel を推奨することのテスト
+    /// 不正な URL は main frame で cancel を推奨すること
     test('should recommend cancel for invalid main frame target', () {
       final recommendation = proxy.recommendMainFrameNavigation(
         targetUrl: '   ',
@@ -1135,7 +1278,7 @@ void main() {
       );
     });
 
-    /// new window の解決不能 URL は cancel を推奨することのテスト
+    /// new window の解決不能 URL は cancel を推奨すること
     test('should recommend cancel for new window unresolved target', () async {
       await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com/base'),
@@ -1156,7 +1299,7 @@ void main() {
       );
     });
 
-    /// 不正な URL は new window で cancel を推奨することのテスト
+    /// 不正な URL は new window で cancel を推奨すること
     test('should recommend cancel for invalid new window target', () {
       final recommendation = proxy.recommendNewWindowNavigation(
         targetUrl: '',
@@ -1175,7 +1318,7 @@ void main() {
       );
     });
 
-    /// 上流 origin の base path を含めて実リクエストへ反映することのテスト
+    /// 上流 origin の base path を含めて実リクエストへ反映すること
     test('should forward requests using the same upstream resolver rules',
         () async {
       await HttpOverrides.runZoned(() async {
@@ -1201,7 +1344,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 一覧登録された app.css への実リクエストは静的リソース応答になることのテスト
+    /// 一覧登録された app.css への実リクエストは静的リソース応答になること
     test('should return static placeholder for indexed static resource request',
         () async {
       await HttpOverrides.runZoned(() async {
@@ -1225,7 +1368,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 一覧登録された入れ子の css/app.css への実リクエストは静的リソース応答になることのテスト
+    /// 一覧登録された入れ子の css/app.css への実リクエストは静的リソース応答になること
     test(
         'should return static placeholder for indexed nested static resource request',
         () async {
@@ -1250,7 +1393,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// package prefix 由来の package.css への実リクエストは静的リソース応答になることのテスト
+    /// package prefix 由来の package.css への実リクエストは静的リソース応答になること
     test(
         'should return static placeholder for package prefixed static resource request',
         () async {
@@ -1279,7 +1422,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 拡張子付き proxy URL でも static が無ければ upstream 転送されることのテスト
+    /// 拡張子付き proxy URL でも static が無ければ upstream 転送されること
     test(
         'should forward proxy script request to upstream when no bundled static asset exists',
         () async {
@@ -1318,7 +1461,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 301/302/303/307/308 の same-origin redirect は proxy URL へ書き換えることのテスト
+    /// 301/302/303/307/308 の same-origin redirect は proxy URL へ書き換えること
     for (final redirectStatusCode in const <int>[301, 302, 303, 307, 308]) {
       test(
           'should rewrite same origin redirect location to proxy url for status $redirectStatusCode',
@@ -1359,7 +1502,7 @@ void main() {
       });
     }
 
-    /// 相対 Location の redirect は upstream 基準で解決して proxy URL へ書き換えることのテスト
+    /// 相対 Location の redirect は upstream 基準で解決して proxy URL へ書き換えること
     test('should rewrite relative redirect location to proxy url', () async {
       await HttpOverrides.runZoned(() async {
         final requestedPaths = <String>[];
@@ -1392,7 +1535,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 外部 redirect は event で launchExternal を通知し、WebView へ 204 を返すことのテスト
+    /// 外部 redirect は event で launchExternal を通知し、WebView へ 204 を返すこと
     test('should notify external launch for tel redirect', () async {
       await HttpOverrides.runZoned(() async {
         upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -1446,7 +1589,7 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 外部 https redirect は event で launchExternal を通知し、WebView へ 204 を返すことのテスト
+    /// 外部 https redirect は event で launchExternal を通知し、WebView へ 204 を返すこと
     test('should notify external launch for maps redirect', () async {
       await HttpOverrides.runZoned(() async {
         const mapsUrl =
@@ -1493,53 +1636,93 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// キャッシュリストの初期状態テスト
+    /// キャッシュリストの初期状態が空であること
     test('should have empty cache list initially', () async {
       final cacheList = await proxy.getCacheList();
       expect(cacheList, isEmpty);
     });
 
-    /// キャッシュクリア操作のテスト
-    test('should handle cache clear operation', () async {
-      expect(() => proxy.clearCache(), returnsNormally);
+    /// キャッシュクリア操作を呼び出せること
+    test('clears cache without error', () async {
+      await expectLater(proxy.clearCache(), completes);
     });
 
-    /// 期限切れキャッシュクリア操作のテスト
-    test('should handle expired cache clear operation', () async {
-      expect(() => proxy.clearExpiredCache(), returnsNormally);
+    /// 期限切れキャッシュクリア操作を呼び出せること
+    test('clears expired cache without error on an empty store', () async {
+      await expectLater(proxy.clearExpiredCache(), completes);
     });
 
-    /// 特定URLのキャッシュクリア操作のテスト
+    /// stale 状態のキャッシュは clearExpiredCache で保持されること
+    test('should keep stale cache entries when clearing expired cache',
+        () async {
+      await proxy.start(
+        config: const ProxyConfig(
+          origin: 'https://example.com',
+          cacheStale: {'default': 3600},
+        ),
+      );
+
+      final cacheBox = Hive.box('proxy_cache');
+      final now = DateTime.now();
+      await cacheBox.put('stale-entry', {
+        'statusCode': HttpStatus.ok,
+        'headers': {'content-type': 'application/json'},
+        'body': Uint8List.fromList(utf8.encode('{"status":"stale"}')),
+        'createdAt': now.subtract(const Duration(hours: 2)).toIso8601String(),
+        'expiresAt': now.subtract(const Duration(minutes: 10)).toIso8601String(),
+        'contentType': 'application/json',
+        'sizeBytes': 18,
+      });
+      await cacheBox.put('expired-entry', {
+        'statusCode': HttpStatus.ok,
+        'headers': {'content-type': 'application/json'},
+        'body': Uint8List.fromList(utf8.encode('{"status":"expired"}')),
+        'createdAt': now.subtract(const Duration(days: 2)).toIso8601String(),
+        'expiresAt': now.subtract(const Duration(hours: 2)).toIso8601String(),
+        'contentType': 'application/json',
+        'sizeBytes': 20,
+      });
+
+      await proxy.clearExpiredCache();
+      final cacheStats = await proxy.getCacheStats();
+
+      expect(cacheBox.containsKey('stale-entry'), isTrue);
+      expect(cacheBox.containsKey('expired-entry'), isFalse);
+      expect(cacheStats.staleEntries, equals(1));
+      expect(cacheStats.expiredEntries, equals(0));
+    });
+
+    /// 特定 URL のキャッシュクリア操作を呼び出せること
     test('should handle cache clear for specific URL', () async {
       const testUrl = 'https://example.com/test';
-      expect(() => proxy.clearCacheForUrl(testUrl), returnsNormally);
+      await expectLater(proxy.clearCacheForUrl(testUrl), completes);
     });
 
-    /// 無効なURLでのキャッシュクリアエラーテスト
+    /// 無効な URL ではキャッシュクリアでエラーになること
     test('should throw error for invalid URL in cache clear', () async {
       expect(() => proxy.clearCacheForUrl(''), throwsArgumentError);
     });
 
-    /// Cookieクリア操作のテスト
-    test('should handle cookie clear operation', () async {
+    /// Cookie クリア操作を呼び出せること
+    test('clears cookies without error', () async {
       await expectLater(proxy.clearCookies(), completes);
     });
 
-    /// 特定ドメインのCookieクリア操作のテスト
+    /// 特定ドメインの Cookie クリア操作を呼び出せること
     test('should handle cookie clear for specific domain', () async {
       const testDomain = 'example.com';
       await expectLater(proxy.clearCookies(domain: testDomain), completes);
     });
 
-    /// ドロップされたリクエストのクリア操作テスト
-    test('should handle dropped requests clear operation', () async {
-      expect(() => proxy.clearDroppedRequests(), returnsNormally);
+    /// ドロップされたリクエストのクリア操作を呼び出せること
+    test('clears dropped request history without error', () async {
+      await expectLater(proxy.clearDroppedRequests(), completes);
     });
   });
 
   group('ProxyConfig Tests', () {
-    /// デフォルト設定のテスト
-    test('should create config with default values', () {
+    /// デフォルト設定を保持できること
+    test('applies documented default values to ProxyConfig', () {
       const config = ProxyConfig(origin: 'https://example.com');
 
       expect(config.origin, equals('https://example.com'));
@@ -1553,7 +1736,7 @@ void main() {
       expect(config.startupPaths, isEmpty);
     });
 
-    /// カスタム設定のテスト
+    /// カスタム設定を保持できること
     test('should create config with custom values', () {
       const config = ProxyConfig(
         origin: 'https://api.test.com',
@@ -1579,7 +1762,7 @@ void main() {
       expect(config.startupPaths, contains('/health'));
     });
 
-    /// TTL設定のテスト
+    /// TTL 設定を保持できること
     test('should have correct default TTL settings', () {
       const config = ProxyConfig(origin: 'https://example.com');
 
@@ -1590,7 +1773,7 @@ void main() {
       expect(config.cacheTtl['default'], equals(86400));
     });
 
-    /// Stale期間設定のテスト
+    /// Stale 期間設定を保持できること
     test('should have correct default stale settings', () {
       const config = ProxyConfig(origin: 'https://example.com');
 
@@ -1600,14 +1783,14 @@ void main() {
       expect(config.cacheStale['default'], equals(259200));
     });
 
-    /// バックオフ設定のテスト
+    /// バックオフ設定を保持できること
     test('should have correct default backoff settings', () {
       const config = ProxyConfig(origin: 'https://example.com');
 
       expect(config.retryBackoffSeconds, equals([1, 2, 5, 10, 20, 30]));
     });
 
-    /// toString()メソッドのテスト
+    /// toString() メソッドで主要情報を表現できること
     test('should have proper string representation', () {
       const config = ProxyConfig(
         origin: 'https://example.com',
@@ -1622,8 +1805,8 @@ void main() {
   });
 
   group('Data Model Tests', () {
-    /// CacheEntryのテスト
-    test('should create CacheEntry correctly', () {
+    /// CacheEntry が主要情報を保持できること
+    test('preserves assigned CacheEntry field values', () {
       final entry = CacheEntry(
         url: 'https://example.com/test',
         statusCode: 200,
@@ -1641,7 +1824,7 @@ void main() {
       expect(entry.sizeBytes, equals(1024));
     });
 
-    /// CookieInfoのテスト
+    /// CookieInfo が主要情報を保持できること
     test('should create CookieInfo correctly', () {
       final cookie = CookieInfo(
         name: 'session_id',
@@ -1661,7 +1844,7 @@ void main() {
       expect(cookie.sameSite, equals('Lax'));
     });
 
-    /// QueuedRequestのテスト
+    /// QueuedRequest が主要情報を保持できること
     test('should create QueuedRequest correctly', () {
       final request = QueuedRequest(
         url: 'https://api.example.com/data',
@@ -1678,7 +1861,7 @@ void main() {
       expect(request.retryCount, equals(0));
     });
 
-    /// WarmupResultのテスト
+    /// WarmupResult が集計結果を保持できること
     test('should create WarmupResult correctly', () {
       final entries = [
         WarmupEntry(
@@ -1710,7 +1893,7 @@ void main() {
       expect(result.entries[1].success, isFalse);
     });
 
-    /// ProxyEventのテスト
+    /// ProxyEvent が主要情報を保持できること
     test('should create ProxyEvent correctly', () {
       final event = ProxyEvent(
         type: ProxyEventType.cacheHit,
@@ -1724,7 +1907,7 @@ void main() {
       expect(event.data['cached'], isTrue);
     });
 
-    /// ProxyNavigationResolution のテスト
+    /// ProxyNavigationResolution が主要情報を保持できること
     test('should create ProxyNavigationResolution correctly', () {
       final resolution = ProxyNavigationResolution(
         inputUrl: 'http://127.0.0.1:8080/app',
@@ -1752,7 +1935,7 @@ void main() {
       expect(resolution.usedSourceUrl, isTrue);
     });
 
-    /// ProxyWebViewNavigationRecommendation のテスト
+    /// ProxyWebViewNavigationRecommendation が主要情報を保持できること
     test('should create ProxyWebViewNavigationRecommendation correctly', () {
       final resolution = ProxyNavigationResolution(
         inputUrl: 'http://127.0.0.1:8080/app',
@@ -1784,7 +1967,7 @@ void main() {
       expect(recommendation.resolution, same(resolution));
     });
 
-    /// ProxyStatsのテスト
+    /// ProxyStats が主要情報を保持できること
     test('should create ProxyStats correctly', () {
       final stats = ProxyStats(
         totalRequests: 100,
@@ -1806,7 +1989,7 @@ void main() {
       expect(stats.uptime, equals(Duration(hours: 1)));
     });
 
-    /// CacheStatsのテスト
+    /// CacheStats が主要情報を保持できること
     test('should create CacheStats correctly', () {
       final stats = CacheStats(
         totalEntries: 50,
@@ -1829,7 +2012,7 @@ void main() {
   });
 
   group('Exception Tests', () {
-    /// ProxyStartExceptionのテスト
+    /// ProxyStartException が主要情報を保持できること
     test('should create ProxyStartException correctly', () {
       const exception = ProxyStartException('Failed to start', null);
 
@@ -1839,7 +2022,7 @@ void main() {
       expect(exception.toString(), contains('Failed to start'));
     });
 
-    /// CacheOperationExceptionのテスト
+    /// CacheOperationException が主要情報を保持できること
     test('should create CacheOperationException correctly', () {
       const exception =
           CacheOperationException('clear', 'Failed to clear cache', null);
@@ -1850,7 +2033,7 @@ void main() {
       expect(exception.toString(), contains('CacheOperationException[clear]'));
     });
 
-    /// NetworkExceptionのテスト
+    /// NetworkException が主要情報を保持できること
     test('should create NetworkException correctly', () {
       const exception = NetworkException('Connection timeout', null);
 
@@ -1860,7 +2043,7 @@ void main() {
       expect(exception.toString(), contains('Connection timeout'));
     });
 
-    /// WarmupExceptionのテスト
+    /// WarmupException が主要情報を保持できること
     test('should create WarmupException correctly', () {
       final entries = [
         WarmupEntry(
@@ -1894,7 +2077,7 @@ void main() {
       }
     });
 
-    /// 空のパスリストでのウォームアップテスト
+    /// 空のパスリストでもウォームアップ結果を返せること
     test('should handle warmup with empty paths', () async {
       final result = await proxy.warmupCache(paths: []);
 
@@ -1903,7 +2086,7 @@ void main() {
       expect(result.entries, isEmpty);
     });
 
-    /// ウォームアップの進捗コールバックテスト
+    /// ウォームアップの進捗コールバックを呼び出せること
     test('should call progress callback during warmup', () async {
       var progressCalled = false;
       var errorCalled = false;
@@ -1925,6 +2108,34 @@ void main() {
       expect(progressCalled, isTrue);
       expect(errorCalled, isTrue);
       expect(result.failureCount, greaterThan(0));
+    });
+
+    /// warmup がフォールバック用キャッシュを事前取得すること
+    test('should cache successful responses during warmup', () async {
+      await HttpOverrides.runZoned(() async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        server.listen((HttpRequest request) async {
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType.json
+            ..write('{"path":"${request.uri.path}"}');
+          await request.response.close();
+        });
+
+        await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${server.port}',
+          ),
+        );
+
+        final result = await proxy.warmupCache(paths: ['/config']);
+        final cacheEntries = await proxy.getCacheList();
+
+        expect(result.successCount, equals(1));
+        expect(result.failureCount, equals(0));
+        expect(cacheEntries, hasLength(1));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
   });
 
@@ -1964,7 +2175,7 @@ void main() {
       // getCacheListでレスポンス取得（キャッシュが空でもリクエストは発生）
       final entries = await proxy.getCacheList();
       // 圧縮データが展開されているか（body内容はキャッシュエントリに格納される想定）
-      // ここでは最低限、例外なくリクエストが通ることを確認
+      // ここでは最低限、例外なくリクエストが通ること
       expect(entries, isA<List<CacheEntry>>());
     });
   });
@@ -2001,6 +2212,29 @@ Future<void> _performProxyGet(int proxyPort, String path) async {
         await client.getUrl(Uri.parse('http://127.0.0.1:$proxyPort$path'));
     final response = await request.close();
     await response.drain<void>();
+  } finally {
+    client.close(force: true);
+  }
+}
+
+Future<({int statusCode, HttpHeaders headers, String body})> _performProxyRequest(
+  int proxyPort,
+  String path, {
+  String method = 'GET',
+}) async {
+  final client = HttpClient();
+  try {
+    final request = await client.openUrl(
+      method,
+      Uri.parse('http://127.0.0.1:$proxyPort$path'),
+    );
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    return (
+      statusCode: response.statusCode,
+      headers: response.headers,
+      body: body,
+    );
   } finally {
     client.close(force: true);
   }

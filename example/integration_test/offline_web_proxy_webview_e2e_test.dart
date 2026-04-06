@@ -182,7 +182,7 @@ void main() {
             .timeout(const Duration(seconds: 10));
         expect(msg1.toString(), contains('hello-from-upstream'));
 
-        // Shut down upstream and reload - should be served from proxy cache.
+        // 上流停止後の再読み込みがプロキシキャッシュで成立すること
         await closeUpstream();
 
         final reloadLoaded = Completer<void>();
@@ -290,14 +290,14 @@ return {status: r.status, body: t};
 
         expect((result['status'] as num).toInt(), greaterThanOrEqualTo(500));
 
-        // 5xxでもキューに保存されていること
+        // 5xx でもキューに保存されていること
         final queued1 = await proxy.getQueuedRequests();
         expect(queued1.length, greaterThanOrEqualTo(1));
 
-        // upstream復旧
+        // upstream を復旧する
         failPost = false;
 
-        // drain(5秒周期)で消化されるまで待つ
+        // drain が完了するまで待つ
         final deadline = DateTime.now().add(const Duration(seconds: 20));
         while (DateTime.now().isBefore(deadline)) {
           final queued = await proxy.getQueuedRequests();
@@ -397,7 +397,7 @@ return {status: r.status, body: t};
           Uri.parse(proxyContextUrl),
         );
 
-        // Range fetch (streaming-like)
+        // ストリーミング相当の Range 取得
         final rangeResult = await runAsyncJsReturningJsonMap(controller, '''
 const r = await fetch('/video', {headers: {'Range': 'bytes=0-1023'}});
 const b = await r.arrayBuffer();
@@ -407,7 +407,7 @@ return {status: r.status, len: b.byteLength, cr: r.headers.get('content-range')}
         expect((rangeResult['len'] as num).toInt(), 1024);
         expect((rangeResult['cr'] as String?) ?? '', contains('bytes 0-1023/'));
 
-        // Full fetch to warm cache
+        // 全量取得でキャッシュを温める
         final full1 = await runAsyncJsReturningJsonMap(controller, '''
 const r = await fetch('/video');
 const b = await r.arrayBuffer();
@@ -419,10 +419,10 @@ return {status: r.status, len: b.byteLength, first: u[0], last: u[u.length-1]};
         expect((full1['first'] as num).toInt(), 0);
         expect((full1['last'] as num).toInt(), 255);
 
-        // Stop upstream to force cache usage
+        // 上流停止でキャッシュ利用へ切り替える
         await upstream.close(force: true);
 
-        // Range fetch should be served from cache even when upstream is down
+        // 上流停止後も Range 取得がキャッシュで成立すること
         final cachedRange = await runAsyncJsReturningJsonMap(controller, '''
       const r = await fetch('/video', {headers: {'Range': 'bytes=0-1023'}});
       const b = await r.arrayBuffer();
@@ -552,7 +552,7 @@ return {
           expect((result['last'] as num).toInt(), end % 256);
         }
 
-        // 動画プレイヤーっぽく少しずつRange取得
+        // 動画プレイヤー相当の連続 Range 取得
         await expectRange(1, 1024);
         await expectRange(1025, 2048);
         await expectRange(2049, 3072);
@@ -566,7 +566,7 @@ return {
     testWidgets(
       'loads a typical website with parallel HTML/CSS/JS/images requests (and JS fetches)',
       (tester) async {
-        // 1x1 transparent PNG
+        // 1x1 の透過 PNG
         final pngBytes = base64Decode(
           'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6X3mS4AAAAASUVORK5CYII=',
         );
@@ -632,7 +632,7 @@ return {
                   'javascript',
                   charset: 'utf-8',
                 );
-                // JS側で並列に fetch と Image ロードを走らせ、結果を window に保存
+                // JS 側で並列 fetch と Image ロードを実行し、結果を window に保存する
                 req.response.write('''
 (function(){
   window.__owpParallel = {done:false, ok:false, details:null};
@@ -762,7 +762,7 @@ return window.__owpParallel;
           reason: 'details=${pageResult['details']}',
         );
 
-        // 上流が「サイト一式」を受信していること（HTML/CSS/JS/画像/JSON）
+        // 上流がサイト一式を受信していること
         final expectedPaths = <String>{
           'GET /site',
           'GET /style.css',
@@ -774,7 +774,7 @@ return window.__owpParallel;
           'GET /api/data1.json',
           'GET /api/data2.json',
         };
-        // WebViewの内部挙動で重複要求が来る場合があるので「含まれているか」だけ見る
+        // WebView の内部挙動で重複要求があり得るため、含有だけを見る
         final requestedSet = requested.toSet();
         for (final p in expectedPaths) {
           expect(
@@ -786,7 +786,7 @@ return window.__owpParallel;
 
         final requestedCountBeforeOffline = requested.length;
 
-        // 上流停止後も、サイト一式がプロキシキャッシュで成立すること
+        // 上流停止後もサイト一式がプロキシキャッシュで成立すること
         await upstream.close(force: true);
 
         final pageReloaded = Completer<void>();
@@ -812,7 +812,7 @@ return window.__owpParallel;
           reason: 'details=${pageResult2['details']}',
         );
 
-        // 上流は停止しているので、これ以上 upstream 側のログが増えていないこと
+        // 上流停止後は upstream 側のログが増えないこと
         expect(requested.length, requestedCountBeforeOffline);
 
         await proxy.stop();
