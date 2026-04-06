@@ -30,7 +30,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.7.0
+  offline_web_proxy: ^0.8.0
   # example アプリと CI ではこの WebView 系を使用しています。
   webview_flutter: ^4.8.0
 ```
@@ -361,7 +361,7 @@ Dart ファイルが自動修正または再整形された場合は、内容確
 
 - 先に `pubspec.yaml` と `CHANGELOG.md` を更新し、その変更を `main` へコミットします。
 - リリース時にローカルで `dart pub publish` を直接実行しません。このリポジトリは GitHub Actions の `release` job 経由で公開します。
-- `v0.7.0` のようなバージョンタグを作成して push します。`v*` タグ push を契機に GitHub Actions が検証、pub.dev 公開、GitHub Release 作成を実行します。
+- `v0.8.0` のようなバージョンタグを作成して push します。`v*` タグ push を契機に GitHub Actions が検証、pub.dev 公開、GitHub Release 作成を実行します。
 
 ## ライセンス
 

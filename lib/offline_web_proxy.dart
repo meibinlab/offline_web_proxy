@@ -1668,23 +1668,6 @@ class OfflineWebProxy {
     }
   }
 
-  /// キャッシュからレスポンスを取得します。
-  ///
-  /// 指定したキャッシュキーに対応するデータをHiveから読み込み、
-  /// shelf.Responseオブジェクトに再構築して返却します。
-  ///
-  /// [cacheKey] キャッシュキー。
-  ///
-  /// Returns: キャッシュされたレスポンス。キャッシュがない場合は `null`。
-  Future<shelf.Response?> _getCachedResponse(String cacheKey) async {
-    final data = _cacheBox?.get(cacheKey) as Map?;
-    if (data == null) {
-      return null;
-    }
-
-    return _responseFromCacheData(data);
-  }
-
   /// キャッシュデータからレスポンスを復元します。
   shelf.Response? _responseFromCacheData(Map data) {
     // キャッシュデータからレスポンスを再構築
@@ -1709,18 +1692,6 @@ class OfflineWebProxy {
 
     // 未知の形式はキャッシュ不一致扱い
     return null;
-  }
-
-  Future<
-      ({
-        int statusCode,
-        Map<String, String> headers,
-        Uint8List bodyBytes,
-      })?> _getCachedResponseBytesEntry(String cacheKey) async {
-    final data = _cacheBox?.get(cacheKey) as Map?;
-    if (data == null) return null;
-
-    return _cachedBytesEntryFromData(data);
   }
 
   /// キャッシュデータから Range 用エントリを復元します。

@@ -30,7 +30,7 @@ Add the package to your app:
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.7.0
+  offline_web_proxy: ^0.8.0
   # Example app and CI currently use this WebView version range.
   webview_flutter: ^4.8.0
 ```
@@ -361,7 +361,7 @@ If a Dart file is reformatted or auto-fixed, the hook stops the commit so you ca
 
 - Update `pubspec.yaml` and `CHANGELOG.md` first, then commit those changes to `main`.
 - Do not run `dart pub publish` manually for releases. This repository publishes via the GitHub Actions `release` job.
-- Create and push a version tag such as `v0.7.0`. The `v*` tag push triggers GitHub Actions to run validation, publish to pub.dev, and create the GitHub Release.
+- Create and push a version tag such as `v0.8.0`. The `v*` tag push triggers GitHub Actions to run validation, publish to pub.dev, and create the GitHub Release.
 
 ## License
 
