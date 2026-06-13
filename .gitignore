@@ -39,7 +39,8 @@ migrate_working_dir/
 **/build/
 /coverage/
 
-# Github Copilot
+# Local agent instructions (kept locally, not tracked)
+CLAUDE.md
 .github/agents/
 .github/instructions/
 .github/copilot-instructions.md

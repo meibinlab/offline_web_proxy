@@ -1,0 +1,95 @@
+# ===========================
+# Node.js / TypeScript
+# ===========================
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+.cache/
+*.tsbuildinfo
+coverage/
+.nyc_output/
+*.js.map
+*.d.ts.map
+
+# ===========================
+# Flutter / Dart
+# ===========================
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.g.dart
+*.freezed.dart
+*.gr.dart
+pubspec.lock
+.pub-cache/
+.pub/
+android/.gradle/
+android/local.properties
+android/app/google-services.json
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+*.dill
+
+# ===========================
+# Java
+# ===========================
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+.gradle/
+gradle/wrapper/gradle-wrapper.jar
+build/
+out/
+.classpath
+.project
+.settings/
+bin/
+*.iml
+.idea/
+
+# ===========================
+# テスト・カバレッジ
+# ===========================
+coverage/
+test-results/
+*.lcov
+htmlcov/
+
+# ===========================
+# OS / エディタ
+# ===========================
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===========================
+# ログ・一時ファイル
+# ===========================
+*.log
+logs/
+tmp/
+temp/
+.tmp/
+
+# ===========================
+# 環境・シークレット
+# ===========================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
