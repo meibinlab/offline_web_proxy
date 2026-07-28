@@ -87,6 +87,7 @@ final proxy = OfflineWebProxy();
 final config = ProxyConfig(
   origin: 'https://your-api-server.com',
   port: 0, // ポート自動割り当て
+  preferredPort: 8787, // 利用可能なら固定ポートを優先する
 );
 
 // プロキシサーバを起動
@@ -443,7 +444,7 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.0
+      0.8.1
   </span>
 
   

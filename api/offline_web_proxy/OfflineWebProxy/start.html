@@ -123,11 +123,7 @@
         .addHandler(router.call);
 
     &#47;&#47; サーバを起動
-    _server = await shelf_io.serve(
-      handler,
-      _config!.host,
-      _config!.port,
-    );
+    _server = await _bindServer(handler);
 
     _isRunning = true;
     _startedAt = DateTime.now();
@@ -180,7 +176,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.0
+      0.8.1
   </span>
 
   

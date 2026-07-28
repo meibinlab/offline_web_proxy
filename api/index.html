@@ -217,6 +217,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <ul>
 <li><code>origin</code> is required and must be an absolute HTTP or HTTPS URL.</li>
 <li><code>port: 0</code> lets the OS assign a free local port.</li>
+<li><code>preferredPort</code> tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.</li>
 <li><code>startupPaths</code> is used by <code>warmupCache()</code> for paths whose fallback responses should be prepared in advance for offline or timeout scenarios.</li>
 <li>The supported configuration entry point is <code>ProxyConfig</code>. The package does not currently load an external YAML file automatically.</li>
 </ul>
@@ -414,7 +415,7 @@ proxy.events.listen((event) {
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.0
+      0.8.1
   </span>
 
   

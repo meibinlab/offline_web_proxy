@@ -100,6 +100,8 @@
     await _cacheBox?.close();
     await _queueBox?.close();
     await _cookieBox?.close();
+    await _portPreferenceBox?.close();
+    await _webStorageBox?.close();
     await _idempotencyBox?.close();
     await _droppedRequestBox?.close();
 
@@ -150,7 +152,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.0
+      0.8.1
   </span>
 
   
