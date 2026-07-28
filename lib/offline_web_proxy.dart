@@ -1088,12 +1088,12 @@ class OfflineWebProxy {
       } on SocketException catch (e) {
         lastBindFailure = PortBindException(port, e.message);
         if (port == 0 || _config!.port > 0) {
-          throw lastBindFailure!;
+          throw lastBindFailure;
         }
       } on OSError catch (e) {
         lastBindFailure = PortBindException(port, e.message);
         if (port == 0 || _config!.port > 0) {
-          throw lastBindFailure!;
+          throw lastBindFailure;
         }
       }
     }
@@ -1339,7 +1339,7 @@ class OfflineWebProxy {
       return (shelf.Request request) async {
         try {
           return await innerHandler(request);
-        } catch (e, st) {
+        } catch (e) {
           return shelf.Response.internalServerError(
             body: 'Internal server error',
             headers: {
@@ -1433,7 +1433,7 @@ class OfflineWebProxy {
         final decoded = jsonDecode(utf8.decode(body));
         if (decoded is Map) {
           await _persistWebStorageSnapshot(
-            Map<String, dynamic>.from(decoded as Map<dynamic, dynamic>),
+            Map<String, dynamic>.from(decoded),
           );
         }
       } catch (_) {
