@@ -154,6 +154,175 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
+    /// 既定の優先ポートが使用中でも自動割当にフォールバックすること
+    test('should fall back to an auto-assigned port when preferredPort is busy',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final occupiedServer = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+        );
+
+        try {
+          final proxyPort = await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:1',
+              preferredPort: occupiedServer.port,
+            ),
+          );
+
+          expect(proxyPort, isNot(equals(occupiedServer.port)));
+          expect(proxyPort, greaterThan(0));
+        } finally {
+          await occupiedServer.close();
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 直前に成功したポートを次回起動時に再利用できること
+    test('should reuse the last successfully bound port on the next start',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final firstProxyPort = await proxy.start(
+          config: ProxyConfig(origin: 'http://127.0.0.1:1'),
+        );
+
+        await proxy.stop();
+
+        final nextProxy = OfflineWebProxy();
+        try {
+          final nextPort = await nextProxy.start(
+            config: ProxyConfig(origin: 'http://127.0.0.1:1'),
+          );
+
+          expect(nextPort, equals(firstProxyPort));
+        } finally {
+          if (nextProxy.isRunning) {
+            await nextProxy.stop();
+          }
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// WebStorage の保存・復元を行うブリッジが利用できること
+    test('should persist and restore web storage snapshots through the bridge',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:1',
+            enableWebStorageInheritance: true,
+          ),
+        );
+
+        final saveResponse = await _performProxyRequest(
+          proxyPort,
+          '/__offline_web_proxy/web_storage/snapshot',
+          method: 'POST',
+          body: jsonEncode({
+            'localStorage': {'k': 'v'},
+            'indexedDB': {
+              'demo': {
+                'store': [
+                  {
+                    'key': 'id',
+                    'value': {'count': 1}
+                  },
+                ],
+              },
+            },
+          }),
+        );
+        expect(saveResponse.statusCode, equals(HttpStatus.ok));
+
+        final restoreResponse = await _performProxyRequest(
+          proxyPort,
+          '/__offline_web_proxy/web_storage/snapshot',
+        );
+        expect(restoreResponse.statusCode, equals(HttpStatus.ok));
+        expect(restoreResponse.body, contains('"k":"v"'));
+        expect(restoreResponse.body, contains('"demo"'));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// HTML レスポンスに WebStorage 継承用スクリプトが注入されること
+    test('should inject web storage bridge script into html responses',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType.html
+            ..write('<html><body>hello</body></html>');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+            enableWebStorageInheritance: true,
+          ),
+        );
+
+        final response = await _performProxyRequest(proxyPort, '/index.html');
+        expect(response.statusCode, equals(HttpStatus.ok));
+        expect(
+            response.body, contains('__offline_web_proxy_web_storage_bridge'));
+        expect(response.body,
+            contains('/__offline_web_proxy/web_storage/snapshot'));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 期待しない Origin を持つリクエストは WebStorage bridge へアクセスできないこと
+    test('should reject web storage bridge requests from non-matching origins',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:1',
+            enableWebStorageInheritance: true,
+          ),
+        );
+
+        final response = await _performProxyRequest(
+          proxyPort,
+          '/__offline_web_proxy/web_storage/snapshot',
+          method: 'POST',
+          body: jsonEncode({'localStorage': {}}),
+          headers: {'origin': 'https://example.com'},
+        );
+        expect(response.statusCode, equals(HttpStatus.forbidden));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// HTML の body タグがない場合でも WebStorage bridge スクリプトを注入できること
+    test('should inject web storage bridge script when html has no body tag',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType.html
+            ..write('<html><head><title>hello</title></head>just text');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+            enableWebStorageInheritance: true,
+          ),
+        );
+
+        final response = await _performProxyRequest(proxyPort, '/index.html');
+        expect(response.statusCode, equals(HttpStatus.ok));
+        expect(
+            response.body, contains('__offline_web_proxy_web_storage_bridge'));
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
     /// 初期状態が正しいこと
     test('should have correct initial state', () {
       expect(proxy.isRunning, isFalse);
@@ -2223,6 +2392,8 @@ Future<({int statusCode, HttpHeaders headers, String body})>
   int proxyPort,
   String path, {
   String method = 'GET',
+  String? body,
+  Map<String, String>? headers,
 }) async {
   final client = HttpClient();
   try {
@@ -2230,12 +2401,21 @@ Future<({int statusCode, HttpHeaders headers, String body})>
       method,
       Uri.parse('http://127.0.0.1:$proxyPort$path'),
     );
+    if (headers != null) {
+      for (final entry in headers.entries) {
+        request.headers.set(entry.key, entry.value);
+      }
+    }
+    if (body != null) {
+      request.headers.contentType = ContentType('application', 'json');
+      request.write(body);
+    }
     final response = await request.close();
-    final body = await response.transform(utf8.decoder).join();
+    final responseBody = await response.transform(utf8.decoder).join();
     return (
       statusCode: response.statusCode,
       headers: response.headers,
-      body: body,
+      body: responseBody,
     );
   } finally {
     client.close(force: true);

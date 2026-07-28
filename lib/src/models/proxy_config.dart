@@ -15,6 +15,7 @@
 /// final advancedConfig = ProxyConfig(
 ///   origin: 'https://api.example.com',
 ///   port: 8080,                    // Fixed port instead of auto-assign
+///   preferredPort: 8787,           // Prefer this port, then fallback automatically
 ///   cacheMaxSize: 500 * 1024 * 1024, // 500MB cache
 ///   connectTimeout: Duration(seconds: 5),
 ///   cacheTtl: {
@@ -52,6 +53,15 @@ class ProxyConfig {
   ///
   /// **Default**: `0` (auto-assign)
   final int port;
+
+  /// Preferred port to try before falling back to an auto-assigned port.
+  ///
+  /// This is useful for keeping the WebView origin stable across app restarts
+  /// when the preferred port is available. If binding to this port fails,
+  /// the proxy will automatically fall back to an ephemeral port.
+  ///
+  /// **Default**: `0` (disabled)
+  final int preferredPort;
 
   /// Maximum size of the cache storage in bytes.
   ///
@@ -127,6 +137,15 @@ class ProxyConfig {
   /// **Default**: `false` (production safe)
   final bool enableAdminApi;
 
+  /// Enable a lightweight WebStorage inheritance bridge for WebView pages.
+  ///
+  /// When enabled, the proxy can inject a small script into HTML responses and
+  /// expose snapshot endpoints so the app can transfer localStorage and
+  /// IndexedDB data across origin changes.
+  ///
+  /// **Default**: `false`
+  final bool enableWebStorageInheritance;
+
   /// Logging verbosity level.
   ///
   /// Controls how much detail is logged during proxy operation:
@@ -152,6 +171,7 @@ class ProxyConfig {
     required this.origin,
     this.host = '127.0.0.1',
     this.port = 0,
+    this.preferredPort = 0,
     this.cacheMaxSize = 200 * 1024 * 1024,
     this.cacheTtl = const {
       'text/html': 3600,
@@ -170,6 +190,7 @@ class ProxyConfig {
     this.requestTimeout = const Duration(seconds: 60),
     this.retryBackoffSeconds = const [1, 2, 5, 10, 20, 30],
     this.enableAdminApi = false,
+    this.enableWebStorageInheritance = false,
     this.logLevel = 'info',
     this.startupPaths = const [],
   });

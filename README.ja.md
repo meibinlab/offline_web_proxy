@@ -184,6 +184,7 @@ const config = ProxyConfig(
 
 - `origin` は必須で、絶対 HTTP URL または HTTPS URL である必要があります。
 - `port: 0` を指定すると、OS が空きポートを自動割り当てします。
+- `preferredPort` を指定すると、まずそのポートを試し、使えない場合は自動割り当てへフォールバックします。直前に成功したポートも次回起動時に再利用されるため、WebView の origin をより安定させやすくなります。
 - `startupPaths` は `warmupCache()` で、オフライン時またはタイムアウト時の代替応答を事前準備したいパスに使います。
 - 現在サポートされる設定入口は `ProxyConfig` です。外部 YAML の自動読込は実装されていません。
 

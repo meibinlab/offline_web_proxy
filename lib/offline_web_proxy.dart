@@ -21,6 +21,7 @@
 /// final config = ProxyConfig(
 ///   origin: 'https://your-api-server.com',
 ///   port: 0, // ポート自動割り当て
+///   preferredPort: 8787, // 利用可能なら固定ポートを優先する
 /// );
 ///
 /// // プロキシサーバを起動
@@ -104,6 +105,8 @@ typedef WarmupErrorCallback = void Function(String path, String error);
 
 const String _encryptedCookieBoxName = 'proxy_cookies_secure';
 const String _legacyCookieBoxName = 'proxy_cookies';
+const String _portPreferenceBoxName = 'proxy_port_preferences';
+const String _webStorageBoxName = 'proxy_web_storage';
 const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 const int _cookieEncryptionKeyLength = 32;
@@ -231,6 +234,12 @@ class OfflineWebProxy {
   /// Cookieデータの永続化ボックス。
   Box? _cookieBox;
 
+  /// 直前に成功したバインドポートの永続化ボックス。
+  Box? _portPreferenceBox;
+
+  /// WebStorage 継承データの永続化ボックス。
+  Box? _webStorageBox;
+
   /// Cookie 暗号化鍵の永続化に利用するセキュアストレージ。
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
 
@@ -293,11 +302,7 @@ class OfflineWebProxy {
           .addHandler(router.call);
 
       // サーバを起動
-      _server = await shelf_io.serve(
-        handler,
-        _config!.host,
-        _config!.port,
-      );
+      _server = await _bindServer(handler);
 
       _isRunning = true;
       _startedAt = DateTime.now();
@@ -340,6 +345,8 @@ class OfflineWebProxy {
       await _cacheBox?.close();
       await _queueBox?.close();
       await _cookieBox?.close();
+      await _portPreferenceBox?.close();
+      await _webStorageBox?.close();
       await _idempotencyBox?.close();
       await _droppedRequestBox?.close();
 
@@ -1007,6 +1014,7 @@ class OfflineWebProxy {
       origin: '',
       host: '127.0.0.1',
       port: 0,
+      preferredPort: 0,
       cacheMaxSize: 200 * 1024 * 1024, // 200MB
       cacheTtl: {
         'text/html': 3600,
@@ -1036,10 +1044,100 @@ class OfflineWebProxy {
   Future<void> _initializeStorage() async {
     _cacheBox = await Hive.openBox('proxy_cache');
     _queueBox = await Hive.openBox('proxy_queue');
+    _portPreferenceBox = await Hive.openBox(_portPreferenceBoxName);
+    _webStorageBox = await Hive.openBox(_webStorageBoxName);
     await _ensureCookieStorageInitialized();
     _idempotencyBox = await Hive.openBox('proxy_idempotency');
     _droppedRequestBox = await Hive.openBox(_droppedRequestBoxName);
   }
+
+  /// サーバ起動時に使用するポートを解決します。
+  ///
+  /// 優先ポートが指定されている場合はまずそちらを試し、失敗時は自動割当にフォールバックします。
+  /// 直前の成功ポートが記録されている場合は、それも優先的に試します。
+  Future<HttpServer> _bindServer(shelf.Handler handler) async {
+    final candidates = <int>{};
+
+    if (_config!.port > 0) {
+      candidates.add(_config!.port);
+    } else {
+      if (_config!.preferredPort > 0) {
+        candidates.add(_config!.preferredPort);
+      }
+
+      final persistedPort = await _loadPersistedPortForHost(_config!.host);
+      if (persistedPort != null && persistedPort > 0) {
+        candidates.add(persistedPort);
+      }
+
+      candidates.add(0);
+    }
+
+    final attemptedPorts = candidates.toList(growable: false);
+    PortBindException? lastBindFailure;
+
+    for (final port in attemptedPorts) {
+      try {
+        final server = await shelf_io.serve(
+          handler,
+          _config!.host,
+          port,
+        );
+        await _persistBoundPort(server.port);
+        return server;
+      } on SocketException catch (e) {
+        lastBindFailure = PortBindException(port, e.message);
+        if (port == 0 || _config!.port > 0) {
+          throw lastBindFailure!;
+        }
+      } on OSError catch (e) {
+        lastBindFailure = PortBindException(port, e.message);
+        if (port == 0 || _config!.port > 0) {
+          throw lastBindFailure!;
+        }
+      }
+    }
+
+    if (lastBindFailure != null) {
+      throw lastBindFailure;
+    }
+
+    throw ProxyStartException(
+        'Failed to bind proxy server to any candidate port', null);
+  }
+
+  /// 指定されたホストに対して、直前に成功したポートを読み込みます。
+  Future<int?> _loadPersistedPortForHost(String host) async {
+    if (_portPreferenceBox == null || !_portPreferenceBox!.isOpen) {
+      return null;
+    }
+
+    final storageKey = _portPreferenceStorageKey(host);
+    final persistedValue = _portPreferenceBox!.get(storageKey);
+    if (persistedValue is int) {
+      return persistedValue;
+    }
+    if (persistedValue is String) {
+      final parsedPort = int.tryParse(persistedValue);
+      if (parsedPort != null && parsedPort > 0) {
+        return parsedPort;
+      }
+    }
+    return null;
+  }
+
+  /// 指定されたホストに対して、直前に成功したポートを保存します。
+  Future<void> _persistBoundPort(int port) async {
+    if (_portPreferenceBox == null || !_portPreferenceBox!.isOpen) {
+      return;
+    }
+
+    await _portPreferenceBox!
+        .put(_portPreferenceStorageKey(_config!.host), port);
+  }
+
+  /// ホストごとの永続化キーを生成します。
+  String _portPreferenceStorageKey(String host) => 'host:$host';
 
   /// Cookie 用ストレージを必要時に初期化します。
   ///
@@ -1241,7 +1339,7 @@ class OfflineWebProxy {
       return (shelf.Request request) async {
         try {
           return await innerHandler(request);
-        } catch (e) {
+        } catch (e, st) {
           return shelf.Response.internalServerError(
             body: 'Internal server error',
             headers: {
@@ -1299,7 +1397,14 @@ class OfflineWebProxy {
   ///
   /// Returns: HTTPレスポンス。
   Future<shelf.Response> _handleRequest(shelf.Request request) async {
-    final path = request.url.path;
+    final path = request.url.path.startsWith('/')
+        ? request.url.path
+        : '/${request.url.path}';
+
+    if (_config?.enableWebStorageInheritance == true &&
+        path.startsWith('/__offline_web_proxy/web_storage')) {
+      return await _handleWebStorageBridgeRequest(request);
+    }
 
     // 起動時に構築した静的リソース一覧を先に確認する
     if (await _isStaticResource(path)) {
@@ -1312,6 +1417,89 @@ class OfflineWebProxy {
     } else {
       return await _handleOfflineRequest(request);
     }
+  }
+
+  /// WebStorage 継承用のブリッジリクエストを処理します。
+  Future<shelf.Response> _handleWebStorageBridgeRequest(
+    shelf.Request request,
+  ) async {
+    if (!_isAllowedWebStorageBridgeRequest(request)) {
+      return shelf.Response.forbidden('web storage bridge is not allowed');
+    }
+
+    if (request.method.toUpperCase() == 'POST') {
+      try {
+        final body = await _readRequestBodyBytes(request);
+        final decoded = jsonDecode(utf8.decode(body));
+        if (decoded is Map) {
+          await _persistWebStorageSnapshot(
+            Map<String, dynamic>.from(decoded as Map<dynamic, dynamic>),
+          );
+        }
+      } catch (_) {
+        // malformed body is ignored and treated as no-op
+      }
+      return shelf.Response.ok('ok');
+    }
+
+    try {
+      final snapshot = await _loadWebStorageSnapshot();
+      return shelf.Response.ok(
+        jsonEncode(snapshot),
+        headers: {'Content-Type': 'application/json; charset=utf-8'},
+      );
+    } catch (_) {
+      return shelf.Response.internalServerError(body: 'bridge failed');
+    }
+  }
+
+  /// WebStorage bridge のリクエストが許可された origin から来ているかを確認します。
+  bool _isAllowedWebStorageBridgeRequest(shelf.Request request) {
+    final origin = request.headers['origin'];
+    if (origin == null || origin.isEmpty) {
+      return true;
+    }
+
+    final configuredOrigin = _config?.origin;
+    if (configuredOrigin == null || configuredOrigin.isEmpty) {
+      return false;
+    }
+
+    final configuredUri = Uri.tryParse(configuredOrigin);
+    if (configuredUri == null) {
+      return false;
+    }
+
+    final requestOriginUri = Uri.tryParse(origin);
+    if (requestOriginUri == null) {
+      return false;
+    }
+
+    return configuredUri.scheme == requestOriginUri.scheme &&
+        configuredUri.host == requestOriginUri.host &&
+        configuredUri.port == requestOriginUri.port;
+  }
+
+  /// WebStorage スナップショットを永続化します。
+  Future<void> _persistWebStorageSnapshot(Map<String, dynamic> snapshot) async {
+    if (_webStorageBox == null || !_webStorageBox!.isOpen) {
+      return;
+    }
+
+    await _webStorageBox!.put('snapshot', snapshot);
+  }
+
+  /// WebStorage スナップショットを読み込みます。
+  Future<Map<String, dynamic>> _loadWebStorageSnapshot() async {
+    if (_webStorageBox == null || !_webStorageBox!.isOpen) {
+      return {};
+    }
+
+    final saved = _webStorageBox!.get('snapshot');
+    if (saved is Map) {
+      return Map<String, dynamic>.from(saved);
+    }
+    return {};
   }
 
   /// 指定したパスが静的リソースかどうかを判定します。
@@ -1351,6 +1539,53 @@ class OfflineWebProxy {
         body: '静的リソースの配信に失敗しました: $e',
       );
     }
+  }
+
+  /// HTMLレスポンスに WebStorage 継承用スクリプトを注入します。
+  Future<shelf.Response> _decorateResponseForWebStorageInheritance({
+    required shelf.Request request,
+    required shelf.Response response,
+  }) async {
+    if (_config?.enableWebStorageInheritance != true) {
+      return response;
+    }
+
+    final contentType = response.headers['content-type'] ?? '';
+    if (!contentType.toLowerCase().contains('text/html')) {
+      return response;
+    }
+
+    final responseBody = await response.readAsString();
+    final script = '''
+<script id="__offline_web_proxy_web_storage_bridge">
+window.__offline_web_proxy_web_storage_bridge = {
+  snapshotUrl: '/__offline_web_proxy/web_storage/snapshot'
+};
+</script>
+''';
+
+    var updatedBody = responseBody;
+    if (updatedBody.contains('</body>')) {
+      updatedBody = updatedBody.replaceFirst(
+        '</body>',
+        '$script</body>',
+      );
+    } else if (updatedBody.contains('</html>')) {
+      updatedBody = updatedBody.replaceFirst(
+        '</html>',
+        '$script</html>',
+      );
+    } else {
+      updatedBody = '$updatedBody$script';
+    }
+
+    return response.change(
+      body: utf8.encode(updatedBody),
+      headers: {
+        ...response.headers,
+        'Content-Length': utf8.encode(updatedBody).length.toString(),
+      },
+    );
   }
 
   /// リクエストから上流サーバのURLを構築します。
@@ -1400,6 +1635,16 @@ class OfflineWebProxy {
         return redirectResponse;
       }
 
+      final response = shelf.Response(
+        result.statusCode,
+        body: Uint8List.fromList(result.bodyBytes),
+        headers: result.headers,
+      );
+      final finalResponse = await _decorateResponseForWebStorageInheritance(
+        request: request,
+        response: response,
+      );
+
       // GETレスポンスをキャッシュ
       if (request.method == 'GET') {
         // Range要求（206）やRange付きGETをキャッシュすると
@@ -1421,11 +1666,7 @@ class OfflineWebProxy {
       // read系の 4xx/5xx は upstream 応答をそのまま返し、
       // キャッシュフォールバックは timeout 時だけに限定する。
       // ボディを含む新しいレスポンスを返す
-      return shelf.Response(
-        result.statusCode,
-        body: Uint8List.fromList(result.bodyBytes),
-        headers: result.headers,
-      );
+      return finalResponse;
     } catch (e) {
       // timeout の read系だけキャッシュフォールバックを許可
       if (_isReadRequestMethod(request.method) && _isRequestTimeoutError(e)) {

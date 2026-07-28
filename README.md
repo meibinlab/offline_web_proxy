@@ -184,6 +184,7 @@ Notes:
 
 - `origin` is required and must be an absolute HTTP or HTTPS URL.
 - `port: 0` lets the OS assign a free local port.
+- `preferredPort` tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.
 - `startupPaths` is used by `warmupCache()` for paths whose fallback responses should be prepared in advance for offline or timeout scenarios.
 - The supported configuration entry point is `ProxyConfig`. The package does not currently load an external YAML file automatically.
 

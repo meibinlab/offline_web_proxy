@@ -1,3 +1,29 @@
+## 0.8.1
+
+### 機能追加
+
+- **ポート安定化を強化**: `preferredPort` を追加し、利用可能ならそのポートを優先してバインドするように改善
+- **直前成功ポートの再利用を追加**: 起動ごとに直前に成功したポートを記録・再利用し、WebView origin の変化を抑制
+- **WebStorage bridge を追加**: HTML レスポンスへ注入する軽量 bridge と snapshot API を追加し、WebView 側で localStorage / IndexedDB の保存・復元を行えるように改善
+
+### セキュリティ
+
+- **WebStorage bridge の origin 制御を追加**: 設定された upstream origin と一致しない Origin からのアクセスを拒否するように改善
+
+### 改善
+
+- **HTML 注入の堅牢性を改善**: `</body>` がなくても `</html>` があれば挿入し、どちらもない場合は末尾に追記するように改善
+
+### ドキュメント
+
+- **README を更新**: preferred port / persisted port reuse / WebStorage bridge の利用方法を追記
+
+### テスト
+
+- **回帰テストを追加**: preferred port fallback、persisted port reuse、WebStorage snapshot round-trip、origin 制御、HTML 注入 fallback を検証
+
+---
+
 ## 0.8.0
 
 ### 改善
