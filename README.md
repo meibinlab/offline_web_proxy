@@ -7,12 +7,12 @@
 
 offline_web_proxy is a local HTTP proxy for Flutter WebView that keeps existing web applications usable inside a mobile app even when connectivity becomes unstable or temporarily unavailable.
 
-It runs on 127.0.0.1, forwards requests to one configured upstream origin while online, and limits proxy-cache usage to substitute responses when offline or when a request times out. Mutating requests are queued, and helper APIs are provided for WebView navigation, cookie reuse, and runtime monitoring.
+It runs on 127.0.0.1, forwards requests to one configured upstream origin while online, and limits proxy-cache usage to substitute responses when offline or when the upstream is unreachable (connection failure or request timeout). Mutating requests are queued, and helper APIs are provided for WebView navigation, cookie reuse, and runtime monitoring.
 
 ## Highlights
 
 - Local proxy server for Flutter WebView
-- Fallback cache limited to offline and request-timeout recovery
+- Fallback cache limited to offline and unreachable-upstream recovery
 - Offline queue for POST, PUT, and DELETE requests
 - AES-256 encrypted cookie persistence with restore support
 - WebView navigation helper APIs for same-origin, external, and new-window flows
@@ -191,7 +191,7 @@ Notes:
 - `origin` is required and must be an absolute HTTP or HTTPS URL.
 - `port: 0` lets the OS assign a free local port.
 - `preferredPort` tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.
-- `startupPaths` is used by `warmupCache()` for paths whose fallback responses should be prepared in advance for offline or timeout scenarios.
+- `startupPaths` is used by `warmupCache()` for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.
 - `healthCheckPath` is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.
 - Setting `healthCheckInterval` above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by `ProxyLifecycleGuard` is the primary path.
 - `offlineFallbackHtml` and `gatewayTimeoutHtml` replace the built-in offline and timeout response bodies with wording supplied by your app.
@@ -358,7 +358,7 @@ proxy.events.listen((event) {
 Notes:
 
 - Online GET/HEAD requests are forwarded upstream and are not short-circuited by the proxy cache.
-- The proxy cache is used only as a substitute response for offline requests or GET/HEAD requests that exceed `requestTimeout`.
+- The proxy cache is used only as a substitute response for offline requests or GET/HEAD requests that could not reach the upstream. Connection refused, a dropped connection, and exceeding `requestTimeout` are covered, while a 4xx / 5xx returned by the upstream is passed through. When no eligible cache exists, 504 is returned.
 - `warmupCache()` is intended to prepare fallback responses in advance, not to optimize normal online browsing.
 
 The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. `redirectHandled` includes fields such as `redirectStatusCode`, `locationHeader`, `redirectAction`, `resolvedProxyUrl`, and `externalUrl`.

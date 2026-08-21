@@ -18,7 +18,7 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 
 ### Data Processing Strategy
 
-- **Cache**: Store successful GET responses in file-based storage. Do not use proxy cache to suppress online requests, and limit its use to offline or timeout fallback
+- **Cache**: Store successful GET responses in file-based storage. Do not use proxy cache to suppress online requests, and limit its use to offline or upstream-unreachable fallback
 - **Queue**: Manage POST/PUT/DELETE requests in FIFO (First In First Out). Send sequentially when network recovers
 - **Offline Response**: Return cache when cache hit, display fallback page when uncached
 - **Static Resources**: Index files under `assets/static/` that are declared in `pubspec.yaml` and listed in `AssetManifest.json`. The current response is still the 404 placeholder
@@ -283,7 +283,7 @@ Use idempotency keys to prevent duplicate execution of the same request.
 
 - **Upstream first**: When online, the proxy forwards requests including GET/HEAD to the upstream server
 - **Browser-driven request suppression**: Whether a request is skipped because of Cache-Control is delegated to the WebView / browser HTTP cache
-- **Role of proxy cache**: The proxy cache is not an online optimization layer. It is limited to offline or timeout fallback
+- **Role of proxy cache**: The proxy cache is not an online optimization layer. It is limited to substitute responses while offline or while the upstream is unreachable (connection failure or timeout)
 
 #### Storage Policy
 
@@ -296,10 +296,11 @@ Use idempotency keys to prevent duplicate execution of the same request.
 #### Fallback Eligibility
 
 1. **When offline**: Return cached entries only when they are fresh or stale
-2. **On request timeout**: Use a fresh or stale cached entry as a substitute response only when the upstream request exceeds the request timeout
+2. **When the upstream is unreachable**: Use a fresh or stale cached entry as a substitute response when the upstream could not be reached. Connection refused, name resolution failure, a connection dropped mid-request, a TLS handshake failure, and exceeding the request timeout are all covered. It does not apply when the upstream returned a response
 3. **On HTTP 4xx**: Return the upstream 4xx response as-is and do not switch to proxy cache
 4. **On HTTP 5xx**: Return the upstream 5xx response as-is and do not switch to proxy cache
 5. **When expired**: Do not return entries whose stale period has also elapsed
+6. **Upstream unreachable with no eligible cache**: GET/HEAD returns 504 (the body can be replaced with `ProxyConfig.gatewayTimeoutHtml`). Mutating requests are queued as before
 
 #### Cache Expiration Calculation Priority
 
@@ -473,7 +474,7 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ### Response Types and Headers
 
-This section describes offline responses. Timeout fallback follows the same cache selection rules, but the debug header contract is defined only for offline responses.
+This section describes offline responses. Upstream-unreachable fallback follows the same cache selection rules, but the debug header contract is defined only for offline responses.
 
 Add custom headers for debugging to offline responses:
 
@@ -580,7 +581,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **sendTimeout**: 15 seconds (request send time limit)
 - **receiveTimeout**: 30 seconds (response receive time limit)
 - **requestTimeout**: 60 seconds (entire request time limit)
-- **Timeout fallback**: GET/HEAD may fall back to persisted cache only when the request exceeds `requestTimeout`
+- **Upstream-unreachable fallback**: GET/HEAD may fall back to persisted cache when the connection to the upstream fails or the request exceeds `requestTimeout`
 
 ### Backoff Strategy
 
@@ -617,7 +618,7 @@ Manage TTL and stale periods as internal state for fallback decisions while cons
 
 #### Cache State Management
 
-Cache is managed in the following 3 states and these states are used for offline or timeout fallback decisions rather than online request suppression:
+Cache is managed in the following 3 states and these states are used for offline or upstream-unreachable fallback decisions rather than online request suppression:
 
 ##### 1. Fresh
 
@@ -630,7 +631,7 @@ Cache is managed in the following 3 states and these states are used for offline
 - **Condition**: TTL expired, but within stale period
 - **Behavior**:
   - **When Online**: Forward upstream and do not substitute from proxy cache
-  - **When Offline / On Timeout**: Eligible for substitute response from stale cache
+  - **When Offline / When Upstream Unreachable**: Eligible for substitute response from stale cache
 - **Header**: `X-Cache-Status: stale`
 
 ##### 3. Expired
@@ -694,7 +695,7 @@ Decision order during request processing:
 
 1. **Normal flow**: Forward to upstream
 2. **304 response**: Pass through as part of the browser's normal cache flow
-3. **Request timeout**: Use a fresh or stale cached entry as a substitute response, otherwise return a timeout error
+3. **Upstream unreachable (connection failure / request timeout)**: Use a fresh or stale cached entry as a substitute response, otherwise return 504
 4. **HTTP 4xx**: Return the upstream response as-is
 5. **HTTP 5xx**: Return the upstream response as-is
 
@@ -708,7 +709,7 @@ Decision order during request processing:
 
 - **Purge Execution**: Automatically execute Expired cache deletion and LRU cleanup every 1 hour
 - **State Refresh**: Periodically re-evaluate TTL / stale state of saved cache
-- **Statistics**: Log cache hit rate, stale usage rate, timeout fallback count, etc.
+- **Statistics**: Log cache hit rate, stale usage rate, upstream-unreachable fallback count, etc.
 
 ### Configuration Example
 
@@ -742,7 +743,7 @@ proxy:
 
     # Startup warmup settings
     startup:
-      enabled: false # Prepare substitute responses for offline or timeout
+      enabled: false # Prepare substitute responses for offline or unreachable upstream
       paths: [] # Path list to fetch in advance (default is empty)
         # - "/config"
         # - "/user/profile"

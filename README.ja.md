@@ -7,12 +7,12 @@
 
 offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシです。既存の Web アプリをモバイルアプリ内で扱う際に、接続が不安定な場合や一時的に利用できない場合でも動作を継続しやすくすることを目的にしています。
 
-127.0.0.1 上で動作し、オンライン時は設定済みの上流 origin へ転送します。proxy キャッシュはオフライン時またはリクエストタイムアウト時の代替応答に限定して利用し、更新系リクエストはキューに保持します。加えて、WebView の遷移判定、Cookie 再利用、統計取得、イベント監視の API を提供します。
+127.0.0.1 上で動作し、オンライン時は設定済みの上流 origin へ転送します。proxy キャッシュはオフライン時または上流到達不能時（接続失敗・リクエストタイムアウト）の代替応答に限定して利用し、更新系リクエストはキューに保持します。加えて、WebView の遷移判定、Cookie 再利用、統計取得、イベント監視の API を提供します。
 
 ## 主な機能
 
 - Flutter WebView 向けローカルプロキシサーバ
-- オフライン時とリクエストタイムアウト時に限定したフォールバックキャッシュ
+- オフライン時と上流到達不能時（接続失敗・リクエストタイムアウト）に限定したフォールバックキャッシュ
 - POST、PUT、DELETE のオフラインキューイング
 - AES-256 による Cookie 永続化と復元 API
 - same-origin、外部委譲、新規 window 判定のための WebView 補助 API
@@ -191,7 +191,7 @@ const config = ProxyConfig(
 - `origin` は必須で、絶対 HTTP URL または HTTPS URL である必要があります。
 - `port: 0` を指定すると、OS が空きポートを自動割り当てします。
 - `preferredPort` を指定すると、まずそのポートを試し、使えない場合は自動割り当てへフォールバックします。直前に成功したポートも次回起動時に再利用されるため、WebView の origin をより安定させやすくなります。
-- `startupPaths` は `warmupCache()` で、オフライン時またはタイムアウト時の代替応答を事前準備したいパスに使います。
+- `startupPaths` は `warmupCache()` で、オフライン時または上流到達不能時の代替応答を事前準備したいパスに使います。
 - `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。Web アプリのルートと衝突する場合に変更します。
 - `healthCheckInterval` に 0 より大きい値を指定すると定期的に稼働確認を行います。既定は無効で、復帰時の確認（`ProxyLifecycleGuard`）を主経路とします。
 - `offlineFallbackHtml` と `gatewayTimeoutHtml` を指定すると、オフライン応答とタイムアウト応答の HTML をアプリ側の文言へ差し替えられます。
@@ -358,7 +358,7 @@ proxy.events.listen((event) {
 補足:
 
 - オンライン時の GET/HEAD は upstream へ転送し、proxy キャッシュで応答を省略しません。
-- proxy キャッシュはオフライン時、または request timeout を超過した GET/HEAD の代替応答に使います。
+- proxy キャッシュはオフライン時、または上流へ到達できない GET/HEAD の代替応答に使います。接続拒否や接続切断、request timeout の超過が対象で、upstream が応答した 4xx / 5xx はそのまま返します。代替キャッシュが無い場合は 504 を返します。
 - `warmupCache()` は通常時の高速化ではなく、フォールバック用レスポンスの事前取得が目的です。
 
 イベントストリームでは、キャッシュヒット、キュー処理、URL 解決メタ情報に加え、redirect 処理結果も監視できます。`redirectHandled` では `redirectStatusCode`、`locationHeader`、`redirectAction`、`resolvedProxyUrl`、`externalUrl` などを参照できます。

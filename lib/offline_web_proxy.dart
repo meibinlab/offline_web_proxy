@@ -2250,8 +2250,9 @@ window.__offline_web_proxy_web_storage_bridge = {
       // ボディを含む新しいレスポンスを返す
       return finalResponse;
     } catch (e) {
-      // timeout の read系だけキャッシュフォールバックを許可
-      if (_isReadRequestMethod(request.method) && _isRequestTimeoutError(e)) {
+      // 上流へ到達できなかった read 系だけキャッシュフォールバックを許可
+      if (_isReadRequestMethod(request.method) &&
+          _isUpstreamUnreachableError(e)) {
         final cachedEntry = await _loadCachedFallbackEntry(cacheKey);
         if (cachedEntry != null &&
             _shouldServeCachedFallback(cachedEntry.status)) {
@@ -2264,7 +2265,7 @@ window.__offline_web_proxy_web_storage_bridge = {
           );
         }
 
-        return _buildTimeoutErrorResponse(request.method);
+        return _buildUpstreamUnreachableResponse(request.method);
       } else if (!_isReadRequestMethod(request.method)) {
         await _queueRequest(request, bodyBytes: requestBodyBytes);
         return shelf.Response.ok('リクエストを再試行のためキューに保存しました', headers: {
@@ -2293,8 +2294,22 @@ window.__offline_web_proxy_web_storage_bridge = {
     return normalizedMethod == 'GET' || normalizedMethod == 'HEAD';
   }
 
-  /// タイムアウト起因の失敗かどうかを判定します。
-  bool _isRequestTimeoutError(Object error) => error is TimeoutException;
+  /// 上流へ到達できなかった失敗かどうかを判定します。
+  ///
+  /// 接続拒否、名前解決失敗、接続中の切断、TLS ハンドシェイク失敗、
+  /// request timeout の超過を対象とします。upstream が応答を返した場合
+  /// （4xx / 5xx を含む）は該当しません。
+  ///
+  /// [error] 上流リクエストで発生した例外。
+  ///
+  /// Returns: 上流へ到達できなかった場合は `true`。
+  bool _isUpstreamUnreachableError(Object error) {
+    return error is TimeoutException ||
+        error is SocketException ||
+        error is HandshakeException ||
+        error is HttpException ||
+        error is http.ClientException;
+  }
 
   /// フォールバックに利用可能なキャッシュエントリを読み込みます。
   Future<
@@ -2373,8 +2388,12 @@ window.__offline_web_proxy_web_storage_bridge = {
           });
   }
 
-  /// タイムアウト時にキャッシュが使えない場合のレスポンスを返します。
-  shelf.Response _buildTimeoutErrorResponse(String method) {
+  /// 上流へ到達できずキャッシュも使えない場合のレスポンスを返します。
+  ///
+  /// [method] リクエストメソッド。
+  ///
+  /// Returns: 504 応答。HEAD の場合は本文を持ちません。
+  shelf.Response _buildUpstreamUnreachableResponse(String method) {
     if (method.toUpperCase() == 'HEAD') {
       return shelf.Response(HttpStatus.gatewayTimeout, headers: {
         'Connection': 'close',
