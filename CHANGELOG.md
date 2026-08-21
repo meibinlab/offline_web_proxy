@@ -4,17 +4,18 @@
 
 - **接続復旧 API を追加**: `probe()`、`ensureRunning()`、`recoverFromWebResourceError()`、`resolveReloadUri()`、`getDiagnostics()`、`port`、`baseUri` を追加し、サスペンド復帰後にソケットが応答しない状態を検知して同一ポート優先で再バインドできるように改善
 - **ライフサイクル連動を追加**: `ProxyLifecycleGuard` を追加し、アプリ復帰時の稼働確認と自動復旧、再読込先 URL の通知を行えるように改善
-- **ヘルスチェックを追加**: `ProxyConfig.healthCheckPath` の稼働確認エンドポイント（204 応答、上流転送なし、統計対象外）と `ProxyConfig.healthCheckInterval` の定期確認を追加
-- **旧ポート URL の救済を追加**: ポートのみが異なる loopback URL を現行ポートへ読み替え、遷移判定でも `ProxyNavigationReason.stalePortUrl` として扱うように改善
+- **ヘルスチェックを追加**: `ProxyConfig.healthCheckPath` の稼働確認エンドポイント（GET / HEAD のみ、204 応答、上流転送なし、統計対象外）と `ProxyConfig.healthCheckInterval` の定期確認を追加。パスは起動時に検証し、`/` 始まりでない値やパスパラメータ記法を含む値は `ProxyStartException` で拒否
+- **旧ポート URL の救済を追加**: ポートのみが異なる loopback URL を現行ポートへ読み替え、遷移判定でも `ProxyNavigationReason.stalePortUrl` として扱うように改善。読み替え対象は自インスタンスがバインドしたポート、永続化された直前のポート、`preferredPort` に限定し、別ポートで動作する他のローカルサーバへの遷移は従来どおり扱う
 - **復旧イベントを追加**: `ProxyEventType.serverRecovered` と `ProxyEventType.serverUnavailable` を追加
 - **応答本文の差し替えを追加**: `ProxyConfig.offlineFallbackHtml` と `ProxyConfig.gatewayTimeoutHtml` により、オフライン応答とタイムアウト応答の文言をアプリ側で指定できるように改善
 - **アイドルタイムアウト設定を追加**: `ProxyConfig.serverIdleTimeout` を追加
+- **診断情報の精度を改善**: 復旧結果の `downtimeMs` は呼び出し時に渡された停止推定時間のみを反映し、定期ヘルスチェックの稼働確認タイムアウトは確認間隔に連動（500 ミリ秒〜2 秒）するように改善
 
 ### 改善
 
 - **上流到達不能時のフォールバックを拡張**: 接続拒否、名前解決失敗、接続中の切断、TLS ハンドシェイク失敗も request timeout と同様にキャッシュ代替応答の対象とし、代替キャッシュが無い場合は 504 を返すように改善（従来は接続失敗時に 500 を返し、キャッシュを利用しなかった）
 - **復旧の暴走を抑止**: 復旧処理の同時実行を 1 件に集約し、連続失敗時のバックオフと `ProxyConfig.maxRestartAttemptsPerMinute` による上限を追加
-- **停止処理の状態整合を改善**: `stop()` が途中で失敗した場合でも稼働中フラグを残さないように修正
+- **停止処理の状態整合を改善**: `stop()` が途中で失敗した場合でも稼働中フラグを残さないように修正。停止時は復旧の実行制御状態のみを初期化し、再バインド回数などの診断値は次回起動まで保持
 
 ### 破壊的変更の注意
 
@@ -29,6 +30,7 @@
 ### テスト
 
 - **上流到達不能時のフォールバックテストを追加**: 接続失敗時のキャッシュ代替応答、キャッシュ無し時の 504、HEAD の応答、upstream 4xx / 5xx の透過、更新系リクエストのキュー保存を検証
+- **カバレッジ計測範囲を修正**: codecov の除外設定から実装本体（`lib/offline_web_proxy.dart`）を外し、計測が実態を反映するように修正
 - **接続復旧テストを追加**: ヘルスチェック応答、ソケット死亡検知、同一ポート再バインド、復旧試行の抑制、旧ポート URL 読み替え、遷移判定、診断情報、定期ヘルスチェック、アイドルタイムアウト、ライフサイクル連動を検証
 
 ---

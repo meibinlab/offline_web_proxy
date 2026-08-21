@@ -304,6 +304,10 @@ class OfflineWebProxy {
   /// 直近の停止推定時間（ミリ秒）。
   int? _lastDowntimeMs;
 
+  /// この proxy が使用したポートの集合。
+  /// 旧ポート URL の読み替え対象を自インスタンスのポートに限定するために使う。
+  final Set<int> _knownProxyPorts = <int>{};
+
   /// プロキシサーバを起動します。
   ///
   /// [config] 設定オブジェクト。省略時はデフォルト設定を使用します。
@@ -330,9 +334,17 @@ class OfflineWebProxy {
 
       // 設定を読み込み
       _config = config ?? await _loadDefaultConfig();
+      _validateHealthCheckPath();
+      _resetRecoveryState();
 
       // ストレージを初期化
       await _initializeStorage();
+
+      // 旧ポート URL の読み替え対象として、直前のバインドポートを記録
+      final persistedPort = await _loadPersistedPortForHost(_config!.host);
+      if (persistedPort != null && persistedPort > 0) {
+        _knownProxyPorts.add(persistedPort);
+      }
 
       // 静的リソース一覧を初期化
       await _initializeStaticResourceIndex();
@@ -354,11 +366,11 @@ class OfflineWebProxy {
       final server = await _bindServer(handler);
       _server = server;
       _boundPort = server.port;
+      _knownProxyPorts.add(server.port);
       server.idleTimeout = _config!.serverIdleTimeout;
 
       _isRunning = true;
       _startedAt = DateTime.now();
-      _resetRecoveryState();
 
       // サーバ起動イベントを発行
       _emitEvent(ProxyEventType.serverStarted, '', {
@@ -370,6 +382,9 @@ class OfflineWebProxy {
       _startBackgroundTasks();
 
       return server.port;
+    } on ProxyStartException {
+      // 設定検証などで既に理由が確定している場合はそのまま伝播する
+      rethrow;
     } catch (e) {
       throw ProxyStartException(
           'Failed to start proxy server: $e', e is Exception ? e : null);
@@ -418,7 +433,8 @@ class OfflineWebProxy {
       _server = null;
       _boundPort = null;
       _handler = null;
-      _resetRecoveryState();
+      // 障害解析のため診断値は残し、実行制御状態のみ初期化する
+      _resetRecoveryControlState();
     }
 
     if (failure != null) {
@@ -584,6 +600,12 @@ class OfflineWebProxy {
       return null;
     }
 
+    // 別ポートで動作する他のローカルサーバへの遷移を奪わないため、
+    // この proxy が使用したポートに限って読み替える
+    if (!_isKnownProxyPort(_effectivePort(targetUri))) {
+      return null;
+    }
+
     // ホスト表記は設定ホストへ揃え、パス以降はそのまま保持する
     return targetUri.replace(host: _effectiveHost, port: boundPort);
   }
@@ -646,7 +668,14 @@ class OfflineWebProxy {
   }
 
   /// 稼働確認要求かどうかを返します。
+  ///
+  /// 稼働確認として扱うのは `GET` と `HEAD` のみです。
   bool _isHealthCheckRequest(shelf.Request request) {
+    final method = request.method.toUpperCase();
+    if (method != 'GET' && method != 'HEAD') {
+      return false;
+    }
+
     final requestPath = request.url.path;
     final normalizedPath =
         requestPath.startsWith('/') ? requestPath : '/$requestPath';
@@ -663,6 +692,50 @@ class OfflineWebProxy {
       HttpStatus.noContent,
       headers: {'Cache-Control': 'no-store'},
     );
+  }
+
+  /// この proxy が使用した可能性のあるポートかどうかを返します。
+  ///
+  /// 起動後にバインドしたポート、永続化された直前のバインドポート、
+  /// および `preferredPort` を対象とします。
+  bool _isKnownProxyPort(int port) {
+    if (port <= 0) {
+      return false;
+    }
+
+    if (port == _boundPort || _knownProxyPorts.contains(port)) {
+      return true;
+    }
+
+    final preferredPort = _config?.preferredPort ?? 0;
+    return preferredPort > 0 && port == preferredPort;
+  }
+
+  /// ヘルスチェックパスの設定値を検証します。
+  ///
+  /// Throws:
+  ///   * [ProxyStartException] パスとして使用できない値が指定された場合。
+  void _validateHealthCheckPath() {
+    final configuredPath = _config?.healthCheckPath.trim() ?? '';
+    if (configuredPath.isEmpty) {
+      return;
+    }
+
+    if (!configuredPath.startsWith('/')) {
+      throw ProxyStartException(
+        'healthCheckPath must start with "/": $configuredPath',
+        null,
+      );
+    }
+
+    // shelf_router のパスパラメータ記法を含むと業務ルートを広く奪うため拒否する
+    if (RegExp(r'[<>?#\s]').hasMatch(configuredPath)) {
+      throw ProxyStartException(
+        'healthCheckPath must not contain "<", ">", "?", "#" or whitespace: '
+        '$configuredPath',
+        null,
+      );
+    }
   }
 
   /// 復旧対象として扱える URL かどうかを返します。
@@ -715,8 +788,10 @@ class OfflineWebProxy {
     int? webResourceErrorCode,
     bool? isMainFrame,
   }) async {
-    if (downtime != null) {
-      _lastDowntimeMs = downtime.inMilliseconds;
+    // 停止推定時間は呼び出し単位の値として扱い、他の復旧結果へ引き継がない
+    final downtimeMs = downtime?.inMilliseconds;
+    if (downtimeMs != null) {
+      _lastDowntimeMs = downtimeMs;
     }
 
     if (!_isRunning || _config == null || _handler == null) {
@@ -724,7 +799,7 @@ class OfflineWebProxy {
       return ProxyRecoveryResult(
         cause: ProxyRecoveryCause.notStarted,
         port: _boundPort,
-        downtimeMs: _lastDowntimeMs,
+        downtimeMs: downtimeMs,
       );
     }
 
@@ -733,7 +808,7 @@ class OfflineWebProxy {
       return ProxyRecoveryResult(
         cause: ProxyRecoveryCause.healthy,
         port: _boundPort,
-        downtimeMs: _lastDowntimeMs,
+        downtimeMs: downtimeMs,
       );
     }
 
@@ -747,7 +822,7 @@ class OfflineWebProxy {
       final limitResult = ProxyRecoveryResult(
         cause: ProxyRecoveryCause.recoveryFailed,
         port: previousPort,
-        downtimeMs: _lastDowntimeMs,
+        downtimeMs: downtimeMs,
         error: StateError(limitMessage),
       );
       _emitRecoveryEvent(
@@ -775,7 +850,7 @@ class OfflineWebProxy {
         restarted: true,
         port: newPort,
         portChanged: previousPort != null && previousPort != newPort,
-        downtimeMs: _lastDowntimeMs,
+        downtimeMs: downtimeMs,
       );
       _emitRecoveryEvent(
         ProxyEventType.serverRecovered,
@@ -793,7 +868,7 @@ class OfflineWebProxy {
       final failedResult = ProxyRecoveryResult(
         cause: ProxyRecoveryCause.recoveryFailed,
         port: _boundPort,
-        downtimeMs: _lastDowntimeMs,
+        downtimeMs: downtimeMs,
         error: e,
       );
       _emitRecoveryEvent(
@@ -884,11 +959,19 @@ class OfflineWebProxy {
     _lastProbeSucceeded = succeeded;
   }
 
-  /// 復旧関連の状態を初期化します。
-  void _resetRecoveryState() {
-    _restartCount = 0;
+  /// 復旧の実行制御に関する状態のみを初期化します。
+  ///
+  /// 停止時に呼び出し、診断値は次回起動まで保持します。
+  void _resetRecoveryControlState() {
     _restartAttempts.clear();
     _consecutiveRecoveryFailures = 0;
+    _knownProxyPorts.clear();
+  }
+
+  /// 復旧関連の状態と診断値をすべて初期化します。
+  void _resetRecoveryState() {
+    _resetRecoveryControlState();
+    _restartCount = 0;
     _lastProbeAt = null;
     _lastProbeSucceeded = null;
     _lastRecoveryCause = null;
@@ -940,7 +1023,24 @@ class OfflineWebProxy {
       return;
     }
 
-    await ensureRunning();
+    await ensureRunning(probeTimeout: _periodicProbeTimeout);
+  }
+
+  /// 定期ヘルスチェックで使用する稼働確認タイムアウトを返します。
+  ///
+  /// 確認間隔に連動させ、500 ミリ秒以上 2 秒以下にクランプします。
+  Duration get _periodicProbeTimeout {
+    const minimumTimeout = Duration(milliseconds: 500);
+    const maximumTimeout = Duration(seconds: 2);
+    final interval = _config?.healthCheckInterval ?? Duration.zero;
+
+    if (interval <= minimumTimeout) {
+      return minimumTimeout;
+    }
+    if (interval >= maximumTimeout) {
+      return maximumTimeout;
+    }
+    return interval;
   }
 
   /// 全キャッシュを即座に削除します。
@@ -1876,8 +1976,9 @@ class OfflineWebProxy {
   Router _createRouter() {
     final router = Router();
 
-    // 稼働確認用のエンドポイント（上流へは転送しない）
-    router.all(_healthCheckPath, _handleHealthCheck);
+    // 稼働確認用のエンドポイント（GET / HEAD のみ、上流へは転送しない）
+    router.add('GET', _healthCheckPath, _handleHealthCheck);
+    router.add('HEAD', _healthCheckPath, _handleHealthCheck);
 
     // 全てのリクエストをプロキシするキャッチオールハンドラ
     router.all('/<path|.*>', _handleRequest);
@@ -2297,8 +2398,9 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// 上流へ到達できなかった失敗かどうかを判定します。
   ///
   /// 接続拒否、名前解決失敗、接続中の切断、TLS ハンドシェイク失敗、
-  /// request timeout の超過を対象とします。upstream が応答を返した場合
-  /// （4xx / 5xx を含む）は該当しません。
+  /// 上流応答の解析失敗、request timeout の超過を対象とします。
+  /// upstream がステータス行とヘッダを返し終えた応答（4xx / 5xx を含む）は
+  /// 該当しません。
   ///
   /// [error] 上流リクエストで発生した例外。
   ///

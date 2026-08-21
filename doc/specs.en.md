@@ -43,7 +43,8 @@ Relays to the upstream origin server (e.g., https://sample.com). Supports a sing
 ### Health Monitoring
 
 - The proxy exposes a health check endpoint. The default path is `/__offline_web_proxy/health` and can be changed with `ProxyConfig.healthCheckPath`.
-- Health check requests are answered with `204 No Content` and `Cache-Control: no-store`.
+- Health checks accept only `GET` and `HEAD` and are answered with `204 No Content` and `Cache-Control: no-store`. Any other method is handled through the normal proxy path.
+- `healthCheckPath` must be a fixed path starting with `/`. Values containing route parameter syntax (`<`, `>`), `?`, `#`, or whitespace are rejected at startup with `ProxyStartException`. An empty value falls back to the default path.
 - Health check requests are never forwarded upstream and are excluded from cache, queue, cookie processing, and statistics counters.
 - `probe()` sends a request to the health check path on the currently bound port and reports the server as running only when `204` is received. The default timeout is 2 seconds. Connection failure, timeout, and unexpected status are all treated as not running.
 - `isRunning` only returns the internal flag and does not guarantee that the socket actually responds. Use `probe()` to verify actual responsiveness.
@@ -64,6 +65,7 @@ Device suspension or process resume can leave the socket unresponsive even thoug
 - `ensureRunning(force: true)` rebinds regardless of the probe result.
 - When called before `start()`, no rebind is attempted and `cause` is reported as `notStarted`.
 - A successful recovery emits the `serverRecovered` event; a failed recovery emits `serverUnavailable`.
+- `downtimeMs` in the result and the event is set only when `downtime` was supplied to that call. It is never carried over to other recovery results. The `lastDowntimeMs` diagnostic keeps the most recently supplied value.
 
 Figure: Recovery decision flow
 
@@ -88,7 +90,9 @@ flowchart TD
 - Wait time for consecutive failures increases as 0, 1, 2, 5, 10 seconds and stays at 10 seconds afterwards.
 - Rebinds are limited to 5 per minute by default. Exceeding the limit skips the rebind and returns `recoveryFailed`. The limit is configurable with `ProxyConfig.maxRestartAttemptsPerMinute`.
 - A successful recovery resets the consecutive failure count and the wait time.
+- Setting `maxRestartAttemptsPerMinute` to zero or less disables rebinding entirely and always returns `recoveryFailed`.
 - When `stop()` completes while a recovery is running, the rebound socket is closed, the recovery is aborted, and `recoveryFailed` is returned.
+- `stop()` resets only the recovery control state (attempt history, consecutive failure count, in-flight recovery). Diagnostics such as the rebind count and the last recovery cause are reset on the next `start()`.
 
 ### Stale Port URL Rewriting
 
@@ -97,7 +101,8 @@ An app restart or automatic port assignment can leave the WebView holding a URL 
 - `resolveReloadUri(String lastUrl)` returns the URL rewritten to the current port when the target URL uses a loopback host (`127.0.0.1` or `localhost`) and only the port differs. Path, query, and fragment are preserved.
 - When the port already matches the current port, the URL is returned unchanged.
 - The rewritten host is normalized to `ProxyConfig.host`. A URL held with the `localhost` spelling is aligned to the configured host spelling.
-- `null` is returned for non-loopback hosts, non-`http` schemes, unparsable strings, and while the server is stopped (current port unknown).
+- Only ports this instance has bound since startup, the persisted previously bound port, and `ProxyConfig.preferredPort` (when greater than zero) are eligible for rewriting. This keeps navigation to other local servers on different ports intact.
+- `null` is returned for non-loopback hosts, non-`http` schemes, unparsable strings, ports outside the eligible set, and while the server is stopped (current port unknown).
 - The navigation APIs (`resolveNavigationTarget`, `recommendMainFrameNavigation`, `recommendNewWindowNavigation`) also treat a loopback URL that differs only by port as `ProxyNavigationReason.stalePortUrl` and recommend loading (`loadProxyUrl`) the proxy URL rewritten to the current port.
 
 ### Recovery from WebView Errors
@@ -122,6 +127,7 @@ An app restart or automatic port assignment can leave the WebView holding a URL 
 ### Periodic Health Check
 
 - When `ProxyConfig.healthCheckInterval` is greater than zero, `probe()` runs at that interval and recovery is attempted on failure. The default is zero (disabled).
+- The responsiveness-check timeout for the periodic check follows `healthCheckInterval`, clamped between 500 milliseconds and 2 seconds.
 - Timers are assumed not to fire while the app is in the background, so recovery after a long idle period relies primarily on the `resumed` check performed by `ProxyLifecycleGuard`.
 
 ### Keep-Alive and Idle Timeout
@@ -296,7 +302,7 @@ Use idempotency keys to prevent duplicate execution of the same request.
 #### Fallback Eligibility
 
 1. **When offline**: Return cached entries only when they are fresh or stale
-2. **When the upstream is unreachable**: Use a fresh or stale cached entry as a substitute response when the upstream could not be reached. Connection refused, name resolution failure, a connection dropped mid-request, a TLS handshake failure, and exceeding the request timeout are all covered. It does not apply when the upstream returned a response
+2. **When the upstream is unreachable**: Use a fresh or stale cached entry as a substitute response when the upstream could not be reached. Connection refused, name resolution failure, a connection dropped mid-request, a TLS handshake failure, a failure to parse the upstream response, and exceeding the request timeout are all covered. It does not apply once the upstream has returned a complete status line and headers (including 4xx / 5xx)
 3. **On HTTP 4xx**: Return the upstream 4xx response as-is and do not switch to proxy cache
 4. **On HTTP 5xx**: Return the upstream 5xx response as-is and do not switch to proxy cache
 5. **When expired**: Do not return entries whose stale period has also elapsed

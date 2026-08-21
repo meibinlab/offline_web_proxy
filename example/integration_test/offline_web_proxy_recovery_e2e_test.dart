@@ -160,6 +160,21 @@ void main() {
       return port;
     }
 
+    /// 指定ポートとは異なる空きポート番号を取得する。
+    ///
+    /// [excludedPort] は除外するポート番号です。
+    ///
+    /// Returns: 使用されていないポート番号。
+    Future<int> findFreePortExcluding(int excludedPort) async {
+      for (var attempt = 0; attempt < 10; attempt++) {
+        final port = await findFreePort();
+        if (port != excludedPort) {
+          return port;
+        }
+      }
+      throw StateError('空きポートを確保できませんでした');
+    }
+
     /// アプリのライフサイクル状態変化を発生させる。
     ///
     /// [tester] はウィジェットテスターです。
@@ -236,18 +251,25 @@ void main() {
         final proxy = OfflineWebProxy();
 
         try {
-          final proxyPort = await proxy.start(
+          // 直前の起動で使っていたポートを作る
+          final stalePort = await proxy.start(
             config: ProxyConfig(origin: 'http://127.0.0.1:${upstream.port}'),
           );
           final harness = await pumpWebView(tester);
-          await harness.loadAndWait(
-            Uri.parse('http://127.0.0.1:$proxyPort/page'),
+          final staleUri = Uri.parse('http://127.0.0.1:$stalePort/page');
+          await harness.loadAndWait(staleUri);
+          await proxy.stop();
+
+          // アプリ再起動でポートが変わった状況を再現する
+          final currentPort = await findFreePortExcluding(stalePort);
+          await proxy.start(
+            config: ProxyConfig(
+              origin: 'http://127.0.0.1:${upstream.port}',
+              port: currentPort,
+            ),
           );
 
-          // アプリ再起動でポートが変わった直後の URL を再現する
-          final stalePort = await findFreePort();
-          final staleUri = Uri.parse('http://127.0.0.1:$stalePort/page');
-
+          // WebView が保持している旧ポート URL は接続に失敗すること
           final error = await harness.loadAndWaitForError(staleUri);
 
           final result = await proxy.recoverFromWebResourceError(
@@ -259,7 +281,7 @@ void main() {
           expect(result.cause, equals(ProxyRecoveryCause.stalePort));
           expect(result.restarted, isFalse);
           // 現行ポートへ読み替えた URL を返すこと
-          expect(result.reloadUri?.port, equals(proxyPort));
+          expect(result.reloadUri?.port, equals(currentPort));
           expect(result.reloadUri?.path, equals('/page'));
 
           await harness.loadAndWait(result.reloadUri!);

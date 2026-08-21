@@ -24,7 +24,6 @@ coverage:
   ignore:
     - "test/**/*"
     - "lib/src/models/**/*"  # データクラスは除外
-    - "lib/offline_web_proxy.dart"  # エクスポートファイルは除外
 
 comment:
   layout: "reach, diff, flags, files"

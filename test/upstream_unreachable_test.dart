@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -72,6 +73,18 @@ Future<int> _findClosedPort() async {
   final port = server.port;
   await server.close(force: true);
   return port;
+}
+
+/// connectivity_plus の状態変化イベントを擬似送信する。
+///
+/// [statuses] は `['none']` や `['wifi']` のような接続状態一覧です。
+Future<void> _emitConnectivity(List<String> statuses) async {
+  await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .handlePlatformMessage(
+    'dev.fluttercommunity.plus/connectivity_status',
+    const StandardMethodCodec().encodeSuccessEnvelope(statuses),
+    (ByteData? _) {},
+  );
 }
 
 /// 実 HttpClient でリクエストを実行し、ステータスと本文を返す。
@@ -275,6 +288,40 @@ void main() {
         // 4xx もそのまま返すこと
         expect(result.statusCode, equals(HttpStatus.notFound));
         expect(result.body, equals('not-found'));
+      });
+    });
+
+    /// オフライン時のフォールバック HTML をアプリ側の文言へ差し替えられること
+    test('offlineFallbackHtml replaces the offline response body', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            offlineFallbackHtml: '<html>offline-page</html>',
+          ),
+        );
+
+        final wentOffline = Completer<void>();
+        final subscription = proxy.events.listen((ProxyEvent event) {
+          if (event.type == ProxyEventType.networkOffline &&
+              !wentOffline.isCompleted) {
+            wentOffline.complete();
+          }
+        });
+
+        // 接続状態をオフラインへ変化させる
+        await _emitConnectivity(<String>['none']);
+        await wentOffline.future.timeout(const Duration(seconds: 5));
+
+        final result = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/never-cached'),
+        );
+        await subscription.cancel();
+
+        // オフライン応答として指定した HTML を返すこと
+        expect(result.statusCode, equals(HttpStatus.ok));
+        expect(result.body, equals('<html>offline-page</html>'));
       });
     });
 

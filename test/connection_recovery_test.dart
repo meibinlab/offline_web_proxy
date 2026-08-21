@@ -77,6 +77,33 @@ Future<int> _findFreePort() async {
   return port;
 }
 
+/// 条件が成立するまで待機する。並列実行時のタイミング差を吸収する。
+Future<bool> _waitUntil(
+  Future<bool> Function() condition, {
+  Duration timeout = const Duration(seconds: 8),
+  Duration interval = const Duration(milliseconds: 200),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(deadline)) {
+    if (await condition()) {
+      return true;
+    }
+    await Future<void>.delayed(interval);
+  }
+  return false;
+}
+
+/// 指定ポートとは異なる空きポート番号を取得する。
+Future<int> _findFreePortExcluding(int excludedPort) async {
+  for (var attempt = 0; attempt < 10; attempt++) {
+    final port = await _findFreePort();
+    if (port != excludedPort) {
+      return port;
+    }
+  }
+  throw StateError('空きポートを確保できませんでした');
+}
+
 /// 実 HttpClient で GET を実行し、ステータス、ヘッダ、本文を返す。
 Future<_HttpResult> _performGet(Uri uri) async {
   final client = HttpClient();
@@ -146,6 +173,24 @@ void main() {
       body,
       createHttpClient: _RealHttpOverrides().createHttpClient,
     );
+  }
+
+  /// アプリ再起動でポートが変わった状況を再現する。
+  ///
+  /// 一度起動して停止し、直前のバインドポートを永続化させたうえで、
+  /// 別のポートで起動し直す。読み替え対象ポートの仕様
+  /// （doc/specs.ja.md 【2】旧ポート URL の読み替え）に合わせた前提条件を作る。
+  ///
+  /// Returns: 旧ポートと現行ポート。
+  Future<({int stalePort, int currentPort})> restartWithChangedPort() async {
+    final origin = upstream!.origin;
+    final stalePort = await proxy.start(config: ProxyConfig(origin: origin));
+    await proxy.stop();
+
+    final currentPort = await _findFreePortExcluding(stalePort);
+    await proxy.start(config: ProxyConfig(origin: origin, port: currentPort));
+
+    return (stalePort: stalePort, currentPort: currentPort);
   }
 
   group('死活監視（doc/specs.ja.md 【2】死活監視）', () {
@@ -599,10 +644,9 @@ void main() {
         'fragment', () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
-        final port = await proxy.start(
-          config: ProxyConfig(origin: upstream!.origin),
-        );
-        final stalePort = port + 1;
+        final ports = await restartWithChangedPort();
+        final port = ports.currentPort;
+        final stalePort = ports.stalePort;
 
         final resolved = proxy.resolveReloadUri(
           'http://127.0.0.1:$stalePort/app/index.html?a=1#top',
@@ -622,10 +666,9 @@ void main() {
         () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
-        final port = await proxy.start(
-          config: ProxyConfig(origin: upstream!.origin),
-        );
-        final stalePort = port + 1;
+        final ports = await restartWithChangedPort();
+        final port = ports.currentPort;
+        final stalePort = ports.stalePort;
 
         final resolved =
             proxy.resolveReloadUri('http://localhost:$stalePort/app');
@@ -648,6 +691,12 @@ void main() {
         expect(proxy.resolveReloadUri('https://127.0.0.1:9999/app'), isNull);
         // 解析できない文字列は対象外であること
         expect(proxy.resolveReloadUri('::::'), isNull);
+        // このインスタンスが使っていないポートは対象外であること
+        final unknownPort = await _findFreePortExcluding(proxy.port!);
+        expect(
+          proxy.resolveReloadUri('http://127.0.0.1:$unknownPort/app'),
+          isNull,
+        );
       });
     });
 
@@ -667,10 +716,9 @@ void main() {
         () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
-        final port = await proxy.start(
-          config: ProxyConfig(origin: upstream!.origin),
-        );
-        final stalePort = port + 1;
+        final ports = await restartWithChangedPort();
+        final port = ports.currentPort;
+        final stalePort = ports.stalePort;
 
         final resolution = proxy.resolveNavigationTarget(
           targetUrl: 'http://127.0.0.1:$stalePort/app',
@@ -693,10 +741,9 @@ void main() {
         () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
-        final port = await proxy.start(
-          config: ProxyConfig(origin: upstream!.origin),
-        );
-        final stalePort = port + 1;
+        final ports = await restartWithChangedPort();
+        final port = ports.currentPort;
+        final stalePort = ports.stalePort;
 
         final recommendation = proxy.recommendMainFrameNavigation(
           targetUrl: 'http://127.0.0.1:$stalePort/app',
@@ -763,10 +810,9 @@ void main() {
         () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
-        final port = await proxy.start(
-          config: ProxyConfig(origin: upstream!.origin),
-        );
-        final stalePort = port + 1;
+        final ports = await restartWithChangedPort();
+        final port = ports.currentPort;
+        final stalePort = ports.stalePort;
 
         final result = await proxy.recoverFromWebResourceError(
           failingUrl: 'http://127.0.0.1:$stalePort/app',
@@ -965,10 +1011,12 @@ void main() {
         );
 
         await proxy.closeServerSocketForTesting();
-        await Future<void>.delayed(const Duration(milliseconds: 1200));
 
-        // 定期確認により自動で復旧すること
-        expect(await proxy.probe(), isTrue);
+        // 定期確認により、明示的な復旧要求なしで復旧すること
+        final recovered = await _waitUntil(
+          () => proxy.probe(timeout: const Duration(milliseconds: 500)),
+        );
+        expect(recovered, isTrue);
       });
     });
 
@@ -1027,6 +1075,222 @@ void main() {
           completes,
         );
         socket.destroy();
+      });
+    });
+  });
+
+  group('設定値の検証（doc/specs.ja.md 【2】死活監視）', () {
+    /// ルート記法を含む healthCheckPath は起動時に拒否されること
+    test('start rejects a healthCheckPath containing route syntax', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+
+        // パスパラメータ記法は業務ルートを奪う恐れがあるため拒否すること
+        await expectLater(
+          proxy.start(
+            config: ProxyConfig(
+              origin: upstream!.origin,
+              healthCheckPath: '/api/<id>',
+            ),
+          ),
+          throwsA(isA<ProxyStartException>()),
+        );
+        // 起動に失敗した状態が残らないこと
+        expect(proxy.isRunning, isFalse);
+      });
+    });
+
+    /// 相対パスの healthCheckPath は起動時に拒否されること
+    test('start rejects a healthCheckPath without a leading slash', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+
+        // `/` 始まりでないパスは拒否すること
+        await expectLater(
+          proxy.start(
+            config: ProxyConfig(
+              origin: upstream!.origin,
+              healthCheckPath: 'health',
+            ),
+          ),
+          throwsA(isA<ProxyStartException>()),
+        );
+      });
+    });
+
+    /// ヘルスチェックパスへの POST は上流へ転送されること
+    test('health check path forwards non-read methods upstream', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+
+        final result = await _performGet(
+          Uri.parse('http://127.0.0.1:$port$_defaultHealthCheckPath'),
+        );
+        // GET は稼働確認として 204 を返すこと
+        expect(result.statusCode, equals(HttpStatus.noContent));
+
+        final client = HttpClient();
+        try {
+          final request = await client.postUrl(
+            Uri.parse('http://127.0.0.1:$port$_defaultHealthCheckPath'),
+          );
+          request.write('payload');
+          final response = await request.close();
+          await response.drain<void>();
+          // POST は稼働確認として扱わず上流へ転送すること
+          expect(response.statusCode, equals(HttpStatus.ok));
+        } finally {
+          client.close(force: true);
+        }
+
+        expect(upstream!.receivedPaths, contains(_defaultHealthCheckPath));
+      });
+    });
+  });
+
+  group('復旧結果と診断の整合（doc/specs.ja.md 【2】ソケット死亡と自動復旧）', () {
+    /// 停止推定時間が他の復旧結果へ引き継がれないこと
+    test('downtimeMs is not carried over to later recovery results', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        await proxy.start(config: ProxyConfig(origin: upstream!.origin));
+
+        await proxy.closeServerSocketForTesting();
+        final withDowntime = await proxy.ensureRunning(
+          probeTimeout: const Duration(milliseconds: 300),
+          downtime: const Duration(seconds: 30),
+        );
+        // 渡された停止推定時間が結果に反映されること
+        expect(withDowntime.downtimeMs, equals(30000));
+
+        final withoutDowntime = await proxy.ensureRunning(
+          probeTimeout: const Duration(milliseconds: 300),
+        );
+        // 次の復旧結果へは引き継がれないこと
+        expect(withoutDowntime.downtimeMs, isNull);
+
+        final diagnostics = await proxy.getDiagnostics();
+        // 診断情報は最後に渡された値を保持すること
+        expect(diagnostics.lastDowntimeMs, equals(30000));
+      });
+    });
+
+    /// 上限を 0 にした場合は常に復旧を行わないこと
+    test('a zero restart limit disables rebinding', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            maxRestartAttemptsPerMinute: 0,
+          ),
+        );
+        await proxy.closeServerSocketForTesting();
+
+        final result = await proxy.ensureRunning(
+          probeTimeout: const Duration(milliseconds: 300),
+        );
+
+        // 再バインドを行わず失敗として返すこと
+        expect(result.cause, equals(ProxyRecoveryCause.recoveryFailed));
+        expect(result.restarted, isFalse);
+      });
+    });
+
+    /// 再バインド失敗が連続した場合は待機してから再試行すること
+    test('consecutive failures wait before the next rebind attempt', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final fixedPort = await _findFreePort();
+        await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin, port: fixedPort),
+        );
+
+        await proxy.closeServerSocketForTesting();
+        // 復旧先ポートを占有して再バインドを失敗させる
+        final occupier = await HttpServer.bind(
+          InternetAddress.loopbackIPv4,
+          fixedPort,
+        );
+
+        try {
+          final first = await proxy.ensureRunning(
+            probeTimeout: const Duration(milliseconds: 300),
+          );
+          // 1 回目は待機なしで失敗すること
+          expect(first.cause, equals(ProxyRecoveryCause.recoveryFailed));
+
+          final stopwatch = Stopwatch()..start();
+          final second = await proxy.ensureRunning(
+            probeTimeout: const Duration(milliseconds: 300),
+          );
+          stopwatch.stop();
+
+          // 2 回目は 1 秒の待機を挟むこと
+          expect(second.cause, equals(ProxyRecoveryCause.recoveryFailed));
+          expect(stopwatch.elapsedMilliseconds, greaterThanOrEqualTo(900));
+        } finally {
+          await occupier.close(force: true);
+        }
+      });
+    });
+
+    /// 停止後も診断情報が保持されること
+    test('getDiagnostics keeps recovery history after stop', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        await proxy.start(config: ProxyConfig(origin: upstream!.origin));
+        await proxy.closeServerSocketForTesting();
+        await proxy.ensureRunning(
+          probeTimeout: const Duration(milliseconds: 300),
+        );
+        await proxy.stop();
+
+        final diagnostics = await proxy.getDiagnostics();
+
+        // 停止しても再バインド回数と復旧種別を参照できること
+        expect(diagnostics.isRunning, isFalse);
+        expect(diagnostics.restartCount, equals(1));
+        expect(
+          diagnostics.lastRecoveryCause,
+          equals(ProxyRecoveryCause.socketDead),
+        );
+      });
+    });
+
+    /// 永続化された直前のバインドポートを診断情報から取得できること
+    test('getDiagnostics reports the persisted port', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+
+        final diagnostics = await proxy.getDiagnostics();
+
+        // 現在のバインドポートが永続化されていること
+        expect(diagnostics.persistedPort, equals(port));
+      });
+    });
+
+    /// 復旧結果と診断情報が内容を読み取れる文字列を返すこと
+    test('recovery models expose readable toString output', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        await proxy.start(config: ProxyConfig(origin: upstream!.origin));
+
+        final result = await proxy.ensureRunning();
+        // 判定種別を含む文字列であること
+        expect(result.toString(), contains('ProxyRecoveryResult'));
+        expect(result.toString(), contains(ProxyRecoveryCause.healthy.name));
+
+        final diagnostics = await proxy.getDiagnostics();
+        // ポート情報を含む文字列であること
+        expect(diagnostics.toString(), contains('ProxyDiagnostics'));
+        expect(diagnostics.toString(), contains('${proxy.port}'));
       });
     });
   });
@@ -1122,10 +1386,8 @@ void main() {
     test('guard rewrites the current URL for reload', () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
-        final port = await proxy.start(
-          config: ProxyConfig(origin: upstream!.origin),
-        );
-        final stalePort = port + 1;
+        final ports = await restartWithChangedPort();
+        final stalePort = ports.stalePort;
 
         final recovered = Completer<ProxyRecoveryResult>();
         final guard = ProxyLifecycleGuard(
