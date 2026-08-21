@@ -16,6 +16,7 @@ It runs on 127.0.0.1, forwards requests to one configured upstream origin while 
 - Offline queue for POST, PUT, and DELETE requests
 - AES-256 encrypted cookie persistence with restore support
 - WebView navigation helper APIs for same-origin, external, and new-window flows
+- Connection recovery that verifies responsiveness on resume and rebinds automatically
 - Runtime stats and event stream for monitoring and debugging
 
 ## Requirements
@@ -177,6 +178,11 @@ const config = ProxyConfig(
   enableAdminApi: false,
   logLevel: 'info',
   startupPaths: ['/app/config'],
+  preferredPort: 8787,
+  healthCheckPath: '/__offline_web_proxy/health',
+  healthCheckInterval: Duration.zero,
+  serverIdleTimeout: Duration(seconds: 120),
+  maxRestartAttemptsPerMinute: 5,
 );
 ```
 
@@ -186,6 +192,9 @@ Notes:
 - `port: 0` lets the OS assign a free local port.
 - `preferredPort` tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.
 - `startupPaths` is used by `warmupCache()` for paths whose fallback responses should be prepared in advance for offline or timeout scenarios.
+- `healthCheckPath` is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.
+- Setting `healthCheckInterval` above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by `ProxyLifecycleGuard` is the primary path.
+- `offlineFallbackHtml` and `gatewayTimeoutHtml` replace the built-in offline and timeout response bodies with wording supplied by your app.
 - The supported configuration entry point is `ProxyConfig`. The package does not currently load an external YAML file automatically.
 
 ## WebView Navigation Helper APIs
@@ -223,6 +232,66 @@ Relative URLs and scheme-relative URLs depend on `sourceUrl`. If `sourceUrl` is 
 At startup, the proxy scans `AssetManifest.json` for files under `assets/static/` and exposes only those entries as proxy-local static resources. For example, `assets/static/app.css` is matched by the proxy URL `/app.css`, while an unlisted `/test.css` still resolves upstream.
 If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.
 For upstream `301`, `302`, `303`, `307`, and `308` responses returned to WebView, the proxy resolves `Location` explicitly instead of relying on `HttpClient` auto-follow. Same-origin redirects are rewritten to proxy URLs, relative `Location` values are resolved against the upstream request URL, and external-launch redirects are surfaced through `ProxyEventType.redirectHandled`.
+
+## Connection Recovery APIs
+
+After device suspension or a process resume, the socket can stop responding even though the internal state still reports the server as running. In that state the WebView shows its own native error page (a message about not being able to connect to `127.0.0.1:...`), so the proxy verifies responsiveness and rebinds when the app resumes.
+
+```dart
+// Hook into the app lifecycle
+final guard = ProxyLifecycleGuard(
+  proxy: proxy,
+  currentUrlProvider: () => currentPageUrl,
+  onRecovered: (result) {
+    final reloadUri = result.reloadUri;
+    if (reloadUri != null) {
+      controller.loadRequest(reloadUri);
+    } else {
+      controller.reload();
+    }
+  },
+  onFailed: (result) => showAppNotice(),
+);
+WidgetsBinding.instance.addObserver(guard);
+
+// Route WebView resource errors into recovery
+onWebResourceError: (error) async {
+  final result = await proxy.recoverFromWebResourceError(
+    errorCode: error.errorCode,
+    failingUrl: error.url,
+    isMainFrame: error.isForMainFrame ?? true,
+  );
+  if (result.cause == ProxyRecoveryCause.recoveryFailed ||
+      result.cause == ProxyRecoveryCause.unrelated) {
+    showAppNotice();
+    return;
+  }
+  final reloadUri = result.reloadUri;
+  if (reloadUri != null) {
+    await controller.loadRequest(reloadUri);
+  } else {
+    await controller.reload();
+  }
+}
+
+// Check whenever you need to
+if (!await proxy.probe()) {
+  await proxy.ensureRunning();
+}
+
+final diagnostics = await proxy.getDiagnostics();
+print('port=${diagnostics.port} restarts=${diagnostics.restartCount}');
+```
+
+Notes:
+
+- `isRunning` only returns the internal flag. Use `probe()` to verify that the server actually responds.
+- `ensureRunning()` rebinds only when there is no response and keeps cache, queue, and cookie storage open. It never throws; the outcome is carried in `ProxyRecoveryResult`.
+- A rebind prioritizes keeping the port the WebView already holds. When the port changes, read `portChanged` and `port`.
+- A URL that differs only by port can be rewritten with `resolveReloadUri()`. The navigation APIs treat it as `ProxyNavigationReason.stalePortUrl` and recommend loading the current port.
+- To prevent a restart-and-reload loop, consecutive failures wait before retrying and rebinds are limited by `maxRestartAttemptsPerMinute`.
+- This package carries no end-user wording. Decide what to show from `onFailed` or from the result of `recoverFromWebResourceError()`.
+- See `example/lib/main.dart` for a working integration.
 
 ## Cookie APIs
 
@@ -293,6 +362,7 @@ Notes:
 - `warmupCache()` is intended to prepare fallback responses in advance, not to optimize normal online browsing.
 
 The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. `redirectHandled` includes fields such as `redirectStatusCode`, `locationHeader`, `redirectAction`, `resolvedProxyUrl`, and `externalUrl`.
+Connection recovery emits `serverRecovered` and `serverUnavailable`, which carry `cause`, `previousPort`, `newPort`, `downtimeMs`, `restartCount`, and `probeError`.
 
 ## Platform Setup
 

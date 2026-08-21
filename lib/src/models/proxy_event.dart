@@ -68,4 +68,10 @@ enum ProxyEventType {
 
   /// エラー発生
   errorOccurred,
+
+  /// 稼働確認に失敗し復旧できなかった
+  serverUnavailable,
+
+  /// 再バインドにより復旧した
+  serverRecovered,
 }

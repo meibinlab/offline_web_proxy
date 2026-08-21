@@ -167,6 +167,54 @@ class ProxyConfig {
   /// **Default**: `[]` (no warmup)
   final List<String> startupPaths;
 
+  /// Path used to check whether the proxy actually responds.
+  ///
+  /// Requests to this path are answered locally with `204 No Content` and are
+  /// never forwarded upstream. Change it when the path collides with a route
+  /// of the proxied web application.
+  ///
+  /// **Default**: `'/__offline_web_proxy/health'`
+  final String healthCheckPath;
+
+  /// Interval of the periodic health check performed while the app runs.
+  ///
+  /// [Duration.zero] disables the periodic check. Timers do not fire while the
+  /// app is in the background, so recovery after a long idle period relies on
+  /// the `resumed` check performed by `ProxyLifecycleGuard`.
+  ///
+  /// **Default**: [Duration.zero] (disabled)
+  final Duration healthCheckInterval;
+
+  /// Idle timeout applied to the internal HTTP server.
+  ///
+  /// Keep-alive connections that receive no request within this duration are
+  /// closed by the server.
+  ///
+  /// **Default**: `Duration(seconds: 120)`
+  final Duration serverIdleTimeout;
+
+  /// Maximum number of rebinds allowed per minute during recovery.
+  ///
+  /// Exceeding this limit skips the rebind and reports a failed recovery,
+  /// which prevents an endless restart and reload loop.
+  ///
+  /// **Default**: `5`
+  final int maxRestartAttemptsPerMinute;
+
+  /// HTML body returned instead of the built-in offline fallback page.
+  ///
+  /// Supply the wording that suits your app. `null` keeps the built-in page.
+  ///
+  /// **Default**: `null`
+  final String? offlineFallbackHtml;
+
+  /// HTML body returned instead of the built-in upstream timeout page.
+  ///
+  /// Supply the wording that suits your app. `null` keeps the built-in page.
+  ///
+  /// **Default**: `null`
+  final String? gatewayTimeoutHtml;
+
   const ProxyConfig({
     required this.origin,
     this.host = '127.0.0.1',
@@ -193,6 +241,12 @@ class ProxyConfig {
     this.enableWebStorageInheritance = false,
     this.logLevel = 'info',
     this.startupPaths = const [],
+    this.healthCheckPath = '/__offline_web_proxy/health',
+    this.healthCheckInterval = Duration.zero,
+    this.serverIdleTimeout = const Duration(seconds: 120),
+    this.maxRestartAttemptsPerMinute = 5,
+    this.offlineFallbackHtml,
+    this.gatewayTimeoutHtml,
   });
 
   @override

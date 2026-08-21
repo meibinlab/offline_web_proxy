@@ -58,6 +58,7 @@ import 'dart:typed_data';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -75,8 +76,10 @@ import 'src/models/cookie_record.dart';
 import 'src/models/cookie_restore_entry.dart';
 import 'src/models/dropped_request.dart';
 import 'src/models/proxy_config.dart';
+import 'src/models/proxy_diagnostics.dart';
 import 'src/models/proxy_event.dart';
 import 'src/models/proxy_navigation_resolution.dart';
+import 'src/models/proxy_recovery_result.dart';
 import 'src/models/proxy_stats.dart';
 import 'src/models/proxy_webview_navigation_recommendation.dart';
 import 'src/models/queued_request.dart';
@@ -84,14 +87,17 @@ import 'src/models/response_header_snapshot.dart';
 import 'src/models/warmup_result.dart';
 
 export 'src/exceptions/exceptions.dart';
+export 'src/lifecycle/proxy_lifecycle_guard.dart';
 export 'src/models/cache_entry.dart';
 export 'src/models/cache_stats.dart';
 export 'src/models/cookie_info.dart';
 export 'src/models/cookie_restore_entry.dart';
 export 'src/models/dropped_request.dart';
 export 'src/models/proxy_config.dart';
+export 'src/models/proxy_diagnostics.dart';
 export 'src/models/proxy_event.dart';
 export 'src/models/proxy_navigation_resolution.dart';
+export 'src/models/proxy_recovery_result.dart';
 export 'src/models/proxy_stats.dart';
 export 'src/models/proxy_webview_navigation_recommendation.dart';
 export 'src/models/queued_request.dart';
@@ -112,6 +118,11 @@ const String _cookieEncryptionKeyStorageKey =
 const int _cookieEncryptionKeyLength = 32;
 const String _droppedRequestBoxName = 'proxy_dropped_requests';
 const Set<String> _loopbackHosts = {'127.0.0.1', 'localhost'};
+const String _defaultHealthCheckPath = '/__offline_web_proxy/health';
+const String _defaultLoopbackHost = '127.0.0.1';
+
+/// 復旧の連続失敗時に挟む待機秒数。末尾の値は以降も維持されます。
+const List<int> _recoveryBackoffSeconds = [0, 1, 2, 5, 10];
 const Set<int> _redirectStatusCodes = {
   HttpStatus.movedPermanently,
   HttpStatus.found,
@@ -256,6 +267,43 @@ class OfflineWebProxy {
   /// WebView が短時間に多数のリクエストを投げた場合にネイティブ側のソケット枯渇を防ぐ。
   final Semaphore _upstreamSemaphore = Semaphore(50);
 
+  /// 現在バインドしているポート番号。
+  /// サスペンドでソケットが無効化された後も参照できるよう、サーバとは別に保持する。
+  int? _boundPort;
+
+  /// 再バインドで再利用する shelf ハンドラ。
+  shelf.Handler? _handler;
+
+  /// 死活監視用タイマー（定期ヘルスチェックが有効な場合のみ動作する）。
+  Timer? _healthCheckTimer;
+
+  /// 進行中の復旧処理。多重実行を防ぐために保持する。
+  Future<ProxyRecoveryResult>? _recoveryOperation;
+
+  /// 再バインドを実行した回数。
+  int _restartCount = 0;
+
+  /// 再バインドを試行した時刻の履歴（1 分あたりの上限判定に使用）。
+  final List<DateTime> _restartAttempts = [];
+
+  /// 連続した復旧失敗回数（待機時間の算出に使用）。
+  int _consecutiveRecoveryFailures = 0;
+
+  /// 最終稼働確認の日時。
+  DateTime? _lastProbeAt;
+
+  /// 最終稼働確認の結果。
+  bool? _lastProbeSucceeded;
+
+  /// 最終復旧処理の判定種別。
+  ProxyRecoveryCause? _lastRecoveryCause;
+
+  /// 最終復旧処理が失敗した場合の内容。
+  String? _lastRecoveryError;
+
+  /// 直近の停止推定時間（ミリ秒）。
+  int? _lastDowntimeMs;
+
   /// プロキシサーバを起動します。
   ///
   /// [config] 設定オブジェクト。省略時はデフォルト設定を使用します。
@@ -292,7 +340,7 @@ class OfflineWebProxy {
       // 接続状態の監視を開始
       _startConnectivityMonitoring();
 
-      // ルーターとミドルウェアを作成
+      // ルーターとミドルウェアを作成し、再バインドで再利用できるよう保持する
       final router = _createRouter();
       final handler = const shelf.Pipeline()
           .addMiddleware(_errorHandlingMiddleware)
@@ -300,23 +348,28 @@ class OfflineWebProxy {
           .addMiddleware(_corsMiddleware)
           .addMiddleware(_statisticsMiddleware)
           .addHandler(router.call);
+      _handler = handler;
 
       // サーバを起動
-      _server = await _bindServer(handler);
+      final server = await _bindServer(handler);
+      _server = server;
+      _boundPort = server.port;
+      server.idleTimeout = _config!.serverIdleTimeout;
 
       _isRunning = true;
       _startedAt = DateTime.now();
+      _resetRecoveryState();
 
       // サーバ起動イベントを発行
       _emitEvent(ProxyEventType.serverStarted, '', {
-        'port': _server!.port,
+        'port': server.port,
         'host': _config!.host,
       });
 
       // バックグラウンドタスクを開始
       _startBackgroundTasks();
 
-      return _server!.port;
+      return server.port;
     } catch (e) {
       throw ProxyStartException(
           'Failed to start proxy server: $e', e is Exception ? e : null);
@@ -332,11 +385,14 @@ class OfflineWebProxy {
       return;
     }
 
+    Object? failure;
     try {
       _queueDrainTimer?.cancel();
       _queueDrainTimer = null;
       _cachePurgeTimer?.cancel();
       _cachePurgeTimer = null;
+      _healthCheckTimer?.cancel();
+      _healthCheckTimer = null;
 
       await _server?.close();
       await _connectivitySubscription.cancel();
@@ -354,15 +410,23 @@ class OfflineWebProxy {
       _httpClient?.close(force: true);
       _httpClient = null;
       _staticResourceAssetMap.clear();
-
+    } catch (e) {
+      failure = e;
+    } finally {
+      // 途中で失敗しても「稼働中だが実体なし」の状態を残さない
       _isRunning = false;
       _server = null;
-
-      _emitEvent(ProxyEventType.serverStopped, '', {});
-    } catch (e) {
-      throw ProxyStopException(
-          'Failed to stop proxy server: $e', e is Exception ? e : null);
+      _boundPort = null;
+      _handler = null;
+      _resetRecoveryState();
     }
+
+    if (failure != null) {
+      throw ProxyStopException('Failed to stop proxy server: $failure',
+          failure is Exception ? failure : null);
+    }
+
+    _emitEvent(ProxyEventType.serverStopped, '', {});
   }
 
   /// プロキシサーバの動作状態を取得します。
@@ -376,6 +440,508 @@ class OfflineWebProxy {
   ///
   /// Returns: プロキシイベントのストリーム。
   Stream<ProxyEvent> get events => _eventController.stream;
+
+  /// 現在バインドしているポート番号を取得します。
+  ///
+  /// Returns: 稼働中はポート番号。未起動時は `null`。
+  int? get port => _boundPort;
+
+  /// WebView から読み込む proxy のベース URI を取得します。
+  ///
+  /// Returns: `http://<host>:<port>` 形式の URI。未起動時は `null`。
+  Uri? get baseUri {
+    final boundPort = _boundPort;
+    if (boundPort == null) {
+      return null;
+    }
+
+    return Uri.parse('http://$_effectiveHost:$boundPort');
+  }
+
+  /// ヘルスチェックパスへ要求を送り、proxy が実際に応答するかを確認します。
+  ///
+  /// [timeout] は応答待ちの上限時間です。
+  ///
+  /// Returns: `204` を受け取った場合は `true`。接続失敗、タイムアウト、
+  /// 想定外のステータスの場合は `false`。
+  Future<bool> probe({Duration timeout = const Duration(seconds: 2)}) async {
+    final boundPort = _boundPort;
+    if (boundPort == null) {
+      _recordProbeResult(false);
+      return false;
+    }
+
+    // 死んだ keep-alive 接続を再利用しないよう、確認専用のクライアントを使う
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final uri = Uri.parse('http://$_effectiveHost:$boundPort$_healthCheckPath');
+      final request = await client.getUrl(uri).timeout(timeout);
+      final response = await request.close().timeout(timeout);
+      await response.drain<void>();
+
+      final succeeded = response.statusCode == HttpStatus.noContent;
+      _recordProbeResult(succeeded);
+      return succeeded;
+    } catch (_) {
+      _recordProbeResult(false);
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// 稼働確認を行い、応答しない場合のみサーバを再バインドします。
+  ///
+  /// [probeTimeout] は稼働確認のタイムアウトです。
+  /// [force] を `true` にすると稼働確認の結果にかかわらず再バインドします。
+  /// [downtime] は停止推定時間です。イベントと診断情報へ記録します。
+  ///
+  /// Returns: 復旧結果。例外は送出せず、失敗内容は結果に含めます。
+  Future<ProxyRecoveryResult> ensureRunning({
+    Duration probeTimeout = const Duration(seconds: 2),
+    bool force = false,
+    Duration? downtime,
+  }) {
+    return _beginRecovery(
+      probeTimeout: probeTimeout,
+      force: force,
+      downtime: downtime,
+    );
+  }
+
+  /// WebView が報告したリソースエラーを起点に復旧を試みます。
+  ///
+  /// [errorCode] は WebView が報告したエラーコードです（診断情報として記録）。
+  /// [failingUrl] は失敗した URL です。
+  /// [isMainFrame] はメインフレームの失敗かどうかです（判定には使用しません）。
+  ///
+  /// Returns: 復旧結果。proxy と無関係な URL の場合は `unrelated` を返します。
+  Future<ProxyRecoveryResult> recoverFromWebResourceError({
+    int? errorCode,
+    String? failingUrl,
+    bool isMainFrame = true,
+  }) async {
+    final trimmedUrl = failingUrl?.trim();
+    if (trimmedUrl == null || trimmedUrl.isEmpty) {
+      return ProxyRecoveryResult(
+        cause: ProxyRecoveryCause.unrelated,
+        port: _boundPort,
+      );
+    }
+
+    final targetUri = Uri.tryParse(trimmedUrl);
+    if (targetUri == null || !_isRecoverableProxyUri(targetUri)) {
+      return ProxyRecoveryResult(
+        cause: ProxyRecoveryCause.unrelated,
+        port: _boundPort,
+      );
+    }
+
+    final previousPort = _boundPort;
+    final result = await _beginRecovery(
+      probeTimeout: const Duration(seconds: 2),
+      force: false,
+      webResourceErrorCode: errorCode,
+      isMainFrame: isMainFrame,
+    );
+
+    if (result.cause == ProxyRecoveryCause.notStarted ||
+        result.cause == ProxyRecoveryCause.recoveryFailed) {
+      return result;
+    }
+
+    // ポートのみが異なる場合は再バインドせず URL の読み替えで復帰させる
+    final hasStalePort =
+        previousPort != null && _effectivePort(targetUri) != previousPort;
+    final cause = result.restarted
+        ? result.cause
+        : (hasStalePort ? ProxyRecoveryCause.stalePort : result.cause);
+
+    return ProxyRecoveryResult(
+      cause: cause,
+      restarted: result.restarted,
+      port: result.port,
+      portChanged: result.portChanged,
+      reloadUri: resolveReloadUri(trimmedUrl),
+      downtimeMs: result.downtimeMs,
+      error: result.error,
+    );
+  }
+
+  /// WebView が保持していた URL を、現行ポートで読み込める URL へ読み替えます。
+  ///
+  /// [lastUrl] は WebView が保持していた URL です。
+  ///
+  /// Returns: 読み替え後の URI。読み替え対象外の場合は `null`。
+  Uri? resolveReloadUri(String lastUrl) {
+    final boundPort = _boundPort;
+    if (boundPort == null) {
+      return null;
+    }
+
+    final targetUri = Uri.tryParse(lastUrl.trim());
+    if (targetUri == null || !_isRecoverableProxyUri(targetUri)) {
+      return null;
+    }
+
+    // ホスト表記は設定ホストへ揃え、パス以降はそのまま保持する
+    return targetUri.replace(host: _effectiveHost, port: boundPort);
+  }
+
+  /// 死活監視と復旧に関する診断情報を取得します。
+  ///
+  /// Returns: 診断情報。
+  Future<ProxyDiagnostics> getDiagnostics() async {
+    final persistedPort = await _loadPersistedPortForHost(_effectiveHost);
+
+    return ProxyDiagnostics(
+      isRunning: _isRunning,
+      port: _boundPort,
+      preferredPort: _config?.preferredPort ?? 0,
+      persistedPort: persistedPort,
+      startedAt: _startedAt,
+      lastProbeAt: _lastProbeAt,
+      lastProbeSucceeded: _lastProbeSucceeded,
+      restartCount: _restartCount,
+      lastRecoveryCause: _lastRecoveryCause,
+      lastRecoveryError: _lastRecoveryError,
+      lastDowntimeMs: _lastDowntimeMs,
+    );
+  }
+
+  /// 内部状態を変更せずサーバのソケットのみを閉じます。
+  ///
+  /// 端末のサスペンドでソケットが無効化された「ソケット死亡」状態を
+  /// テストで再現するための入口です。テスト以外では使用しません。
+  ///
+  /// Returns: 処理完了を表す Future。
+  @visibleForTesting
+  Future<void> closeServerSocketForTesting() async {
+    final server = _server;
+    if (server == null) {
+      return;
+    }
+
+    try {
+      await server.close(force: true);
+    } catch (_) {
+      // 既に閉じられている場合は無視する
+    }
+  }
+
+  /// 稼働確認に使用するパスを返します。
+  String get _healthCheckPath {
+    final configuredPath = _config?.healthCheckPath.trim() ?? '';
+    if (configuredPath.isEmpty) {
+      return _defaultHealthCheckPath;
+    }
+
+    return configuredPath.startsWith('/') ? configuredPath : '/$configuredPath';
+  }
+
+  /// バインド対象のホスト名を返します。
+  String get _effectiveHost {
+    final configuredHost = _config?.host ?? '';
+    return configuredHost.isNotEmpty ? configuredHost : _defaultLoopbackHost;
+  }
+
+  /// 稼働確認要求かどうかを返します。
+  bool _isHealthCheckRequest(shelf.Request request) {
+    final requestPath = request.url.path;
+    final normalizedPath =
+        requestPath.startsWith('/') ? requestPath : '/$requestPath';
+    return normalizedPath == _healthCheckPath;
+  }
+
+  /// 稼働確認要求に応答します。
+  ///
+  /// [request] は受信した稼働確認要求です。
+  ///
+  /// Returns: 本文を持たない 204 応答。
+  shelf.Response _handleHealthCheck(shelf.Request request) {
+    return shelf.Response(
+      HttpStatus.noContent,
+      headers: {'Cache-Control': 'no-store'},
+    );
+  }
+
+  /// 復旧対象として扱える URL かどうかを返します。
+  bool _isRecoverableProxyUri(Uri uri) {
+    if (uri.scheme.toLowerCase() != 'http' || uri.host.isEmpty) {
+      return false;
+    }
+
+    if (uri.host.toLowerCase() == _effectiveHost.toLowerCase()) {
+      return true;
+    }
+
+    return _isLoopbackHost(uri.host) && _isLoopbackHost(_effectiveHost);
+  }
+
+  /// 復旧処理を開始します。実行中の場合は進行中の結果を共有します。
+  Future<ProxyRecoveryResult> _beginRecovery({
+    required Duration probeTimeout,
+    required bool force,
+    Duration? downtime,
+    int? webResourceErrorCode,
+    bool? isMainFrame,
+  }) async {
+    final pendingOperation = _recoveryOperation;
+    if (pendingOperation != null) {
+      return pendingOperation;
+    }
+
+    final operation = _runRecovery(
+      probeTimeout: probeTimeout,
+      force: force,
+      downtime: downtime,
+      webResourceErrorCode: webResourceErrorCode,
+      isMainFrame: isMainFrame,
+    );
+    _recoveryOperation = operation;
+
+    try {
+      return await operation;
+    } finally {
+      _recoveryOperation = null;
+    }
+  }
+
+  /// 稼働確認と再バインドの本体処理です。
+  Future<ProxyRecoveryResult> _runRecovery({
+    required Duration probeTimeout,
+    required bool force,
+    Duration? downtime,
+    int? webResourceErrorCode,
+    bool? isMainFrame,
+  }) async {
+    if (downtime != null) {
+      _lastDowntimeMs = downtime.inMilliseconds;
+    }
+
+    if (!_isRunning || _config == null || _handler == null) {
+      _lastRecoveryCause = ProxyRecoveryCause.notStarted;
+      return ProxyRecoveryResult(
+        cause: ProxyRecoveryCause.notStarted,
+        port: _boundPort,
+        downtimeMs: _lastDowntimeMs,
+      );
+    }
+
+    if (!force && await probe(timeout: probeTimeout)) {
+      _lastRecoveryCause = ProxyRecoveryCause.healthy;
+      return ProxyRecoveryResult(
+        cause: ProxyRecoveryCause.healthy,
+        port: _boundPort,
+        downtimeMs: _lastDowntimeMs,
+      );
+    }
+
+    final previousPort = _boundPort;
+
+    if (!_canAttemptRestart()) {
+      const limitMessage = 'Restart attempts exceeded the configured limit';
+      _lastRecoveryCause = ProxyRecoveryCause.recoveryFailed;
+      _lastRecoveryError = limitMessage;
+
+      final limitResult = ProxyRecoveryResult(
+        cause: ProxyRecoveryCause.recoveryFailed,
+        port: previousPort,
+        downtimeMs: _lastDowntimeMs,
+        error: StateError(limitMessage),
+      );
+      _emitRecoveryEvent(
+        ProxyEventType.serverUnavailable,
+        limitResult,
+        previousPort,
+        webResourceErrorCode: webResourceErrorCode,
+        isMainFrame: isMainFrame,
+      );
+      return limitResult;
+    }
+
+    await _awaitRecoveryBackoff();
+    _restartAttempts.add(DateTime.now());
+
+    try {
+      final newPort = await _rebindServer(priorPort: previousPort);
+      _restartCount++;
+      _consecutiveRecoveryFailures = 0;
+      _lastRecoveryCause = ProxyRecoveryCause.socketDead;
+      _lastRecoveryError = null;
+
+      final recoveredResult = ProxyRecoveryResult(
+        cause: ProxyRecoveryCause.socketDead,
+        restarted: true,
+        port: newPort,
+        portChanged: previousPort != null && previousPort != newPort,
+        downtimeMs: _lastDowntimeMs,
+      );
+      _emitRecoveryEvent(
+        ProxyEventType.serverRecovered,
+        recoveredResult,
+        previousPort,
+        webResourceErrorCode: webResourceErrorCode,
+        isMainFrame: isMainFrame,
+      );
+      return recoveredResult;
+    } catch (e) {
+      _consecutiveRecoveryFailures++;
+      _lastRecoveryCause = ProxyRecoveryCause.recoveryFailed;
+      _lastRecoveryError = e.toString();
+
+      final failedResult = ProxyRecoveryResult(
+        cause: ProxyRecoveryCause.recoveryFailed,
+        port: _boundPort,
+        downtimeMs: _lastDowntimeMs,
+        error: e,
+      );
+      _emitRecoveryEvent(
+        ProxyEventType.serverUnavailable,
+        failedResult,
+        previousPort,
+        webResourceErrorCode: webResourceErrorCode,
+        isMainFrame: isMainFrame,
+      );
+      return failedResult;
+    }
+  }
+
+  /// サーバのソケットのみを作り直します。
+  ///
+  /// キャッシュ、キュー、Cookie の永続化領域は閉じずに維持します。
+  Future<int> _rebindServer({int? priorPort}) async {
+    final handler = _handler;
+    if (handler == null) {
+      throw ProxyStartException('Proxy handler is not initialized', null);
+    }
+
+    final previousServer = _server;
+    _server = null;
+    if (previousServer != null) {
+      try {
+        await previousServer.close(force: true);
+      } catch (_) {
+        // OS 側で既に閉じられている場合は無視する
+      }
+    }
+
+    final server = await _bindServer(handler, priorPort: priorPort);
+    if (_handler == null) {
+      // 復旧中に stop() が完了した場合は、作り直したソケットを閉じて中止する
+      try {
+        await server.close(force: true);
+      } catch (_) {
+        // 閉じられない場合も復旧は中止する
+      }
+      throw ProxyStopException('Proxy was stopped during recovery', null);
+    }
+
+    server.idleTimeout = _config!.serverIdleTimeout;
+    _server = server;
+    _boundPort = server.port;
+    _isRunning = true;
+    _startBackgroundTasks();
+
+    return server.port;
+  }
+
+  /// 1 分あたりの再バインド上限に達していないかを返します。
+  bool _canAttemptRestart() {
+    final limit = _config?.maxRestartAttemptsPerMinute ?? 5;
+    if (limit <= 0) {
+      return false;
+    }
+
+    final threshold = DateTime.now().subtract(const Duration(minutes: 1));
+    _restartAttempts.removeWhere((DateTime attemptedAt) {
+      return attemptedAt.isBefore(threshold);
+    });
+
+    return _restartAttempts.length < limit;
+  }
+
+  /// 連続失敗回数に応じた待機を行います。
+  Future<void> _awaitRecoveryBackoff() async {
+    if (_consecutiveRecoveryFailures <= 0) {
+      return;
+    }
+
+    final index = _consecutiveRecoveryFailures < _recoveryBackoffSeconds.length
+        ? _consecutiveRecoveryFailures
+        : _recoveryBackoffSeconds.length - 1;
+    final waitSeconds = _recoveryBackoffSeconds[index];
+    if (waitSeconds <= 0) {
+      return;
+    }
+
+    await Future<void>.delayed(Duration(seconds: waitSeconds));
+  }
+
+  /// 稼働確認の実施結果を記録します。
+  void _recordProbeResult(bool succeeded) {
+    _lastProbeAt = DateTime.now();
+    _lastProbeSucceeded = succeeded;
+  }
+
+  /// 復旧関連の状態を初期化します。
+  void _resetRecoveryState() {
+    _restartCount = 0;
+    _restartAttempts.clear();
+    _consecutiveRecoveryFailures = 0;
+    _lastProbeAt = null;
+    _lastProbeSucceeded = null;
+    _lastRecoveryCause = null;
+    _lastRecoveryError = null;
+    _lastDowntimeMs = null;
+  }
+
+  /// 復旧結果をイベントとして発行します。
+  void _emitRecoveryEvent(
+    ProxyEventType type,
+    ProxyRecoveryResult result,
+    int? previousPort, {
+    int? webResourceErrorCode,
+    bool? isMainFrame,
+  }) {
+    _emitEvent(type, '', {
+      'cause': result.cause.name,
+      'previousPort': previousPort,
+      'newPort': result.restarted ? result.port : null,
+      'portChanged': result.portChanged,
+      'downtimeMs': result.downtimeMs,
+      'restartCount': _restartCount,
+      'probeError': result.error?.toString(),
+      if (webResourceErrorCode != null)
+        'webResourceErrorCode': webResourceErrorCode,
+      if (isMainFrame != null) 'isMainFrame': isMainFrame,
+    });
+  }
+
+  /// 定期ヘルスチェックのタイマーを設定します。
+  void _startHealthCheckTimer() {
+    _healthCheckTimer?.cancel();
+    _healthCheckTimer = null;
+
+    final interval = _config?.healthCheckInterval ?? Duration.zero;
+    if (interval <= Duration.zero) {
+      return;
+    }
+
+    _healthCheckTimer = Timer.periodic(interval, (Timer timer) {
+      // ignore: discarded_futures
+      _runPeriodicHealthCheck();
+    });
+  }
+
+  /// 定期ヘルスチェックを実行し、応答が無い場合は復旧を試みます。
+  Future<void> _runPeriodicHealthCheck() async {
+    if (!_isRunning || _recoveryOperation != null) {
+      return;
+    }
+
+    await ensureRunning();
+  }
 
   /// 全キャッシュを即座に削除します。
   ///
@@ -1055,12 +1621,20 @@ class OfflineWebProxy {
   ///
   /// 優先ポートが指定されている場合はまずそちらを試し、失敗時は自動割当にフォールバックします。
   /// 直前の成功ポートが記録されている場合は、それも優先的に試します。
-  Future<HttpServer> _bindServer(shelf.Handler handler) async {
+  Future<HttpServer> _bindServer(
+    shelf.Handler handler, {
+    int? priorPort,
+  }) async {
     final candidates = <int>{};
 
     if (_config!.port > 0) {
       candidates.add(_config!.port);
     } else {
+      // 再バインドでは WebView が保持しているポートの維持を最優先にする
+      if (priorPort != null && priorPort > 0) {
+        candidates.add(priorPort);
+      }
+
       if (_config!.preferredPort > 0) {
         candidates.add(_config!.preferredPort);
       }
@@ -1302,6 +1876,9 @@ class OfflineWebProxy {
   Router _createRouter() {
     final router = Router();
 
+    // 稼働確認用のエンドポイント（上流へは転送しない）
+    router.all(_healthCheckPath, _handleHealthCheck);
+
     // 全てのリクエストをプロキシするキャッチオールハンドラ
     router.all('/<path|.*>', _handleRequest);
 
@@ -1363,6 +1940,11 @@ class OfflineWebProxy {
   shelf.Middleware get _statisticsMiddleware {
     return (shelf.Handler innerHandler) {
       return (shelf.Request request) async {
+        // 稼働確認は統計にもイベントにも含めない
+        if (_isHealthCheckRequest(request)) {
+          return innerHandler(request);
+        }
+
         _totalRequests++;
 
         final proxyRequestUrl = request.requestedUri.toString();
@@ -1797,6 +2379,18 @@ window.__offline_web_proxy_web_storage_bridge = {
       return shelf.Response(HttpStatus.gatewayTimeout, headers: {
         'Connection': 'close',
       });
+    }
+
+    final customContent = _config?.gatewayTimeoutHtml;
+    if (customContent != null && customContent.isNotEmpty) {
+      return shelf.Response(
+        HttpStatus.gatewayTimeout,
+        body: customContent,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Connection': 'close',
+        },
+      );
     }
 
     return shelf.Response(
@@ -2818,6 +3412,9 @@ window.__offline_web_proxy_web_storage_bridge = {
       // ignore: discarded_futures
       _purgeExpiredCache();
     });
+
+    // 定期ヘルスチェックを設定（既定では無効）
+    _startHealthCheckTimer();
   }
 
   /// キューに保存されたリクエストを消化します。
@@ -3032,6 +3629,11 @@ window.__offline_web_proxy_web_storage_bridge = {
   ///
   /// Returns: オフライン用HTMLコンテンツ。
   String _getOfflineFallbackContent() {
+    final customContent = _config?.offlineFallbackHtml;
+    if (customContent != null && customContent.isNotEmpty) {
+      return customContent;
+    }
+
     return '''
     <!DOCTYPE html>
     <html>
@@ -3321,6 +3923,28 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
 
     if (_isLoopbackHttpUri(normalizedTargetUri)) {
+      // ポートのみが現行ポートと異なる旧 proxy URL は現行ポートへ読み替える
+      final rewrittenProxyUri =
+          resolveReloadUri(normalizedTargetUri.toString());
+      if (rewrittenProxyUri != null) {
+        return _buildNavigationResolution(
+          inputUrl: targetUrl,
+          sourceUri: resolvedSourceUri,
+          normalizedTargetUri: normalizedTargetUri,
+          upstreamUri: _tryBuildUpstreamUriFromPathAndQuery(
+            path: rewrittenProxyUri.path,
+            query: rewrittenProxyUri.query,
+            fragment: rewrittenProxyUri.fragment,
+          ),
+          proxyUri: rewrittenProxyUri,
+          disposition: ProxyNavigationDisposition.inWebView,
+          reason: ProxyNavigationReason.stalePortUrl,
+          usedSourceUrl: usedSourceUrl,
+          usedLoopbackAlias: normalizedTargetUri.host.toLowerCase() !=
+              _effectiveHost.toLowerCase(),
+        );
+      }
+
       return _buildNavigationResolution(
         inputUrl: targetUrl,
         sourceUri: resolvedSourceUri,
@@ -3432,7 +4056,7 @@ window.__offline_web_proxy_web_storage_bridge = {
   }
 
   /// 現在稼働中の proxy ポートを返します。
-  int? get _activeProxyPort => _server?.port;
+  int? get _activeProxyPort => _boundPort;
 
   /// HTTP または HTTPS スキームかどうかを返します。
   bool _isHttpScheme(String scheme) {
