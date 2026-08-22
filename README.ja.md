@@ -7,15 +7,16 @@
 
 offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシです。既存の Web アプリをモバイルアプリ内で扱う際に、接続が不安定な場合や一時的に利用できない場合でも動作を継続しやすくすることを目的にしています。
 
-127.0.0.1 上で動作し、オンライン時は設定済みの上流 origin へ転送します。proxy キャッシュはオフライン時またはリクエストタイムアウト時の代替応答に限定して利用し、更新系リクエストはキューに保持します。加えて、WebView の遷移判定、Cookie 再利用、統計取得、イベント監視の API を提供します。
+127.0.0.1 上で動作し、オンライン時は設定済みの上流 origin へ転送します。proxy キャッシュはオフライン時または上流到達不能時（接続失敗・リクエストタイムアウト）の代替応答に限定して利用し、更新系リクエストはキューに保持します。加えて、WebView の遷移判定、Cookie 再利用、統計取得、イベント監視の API を提供します。
 
 ## 主な機能
 
 - Flutter WebView 向けローカルプロキシサーバ
-- オフライン時とリクエストタイムアウト時に限定したフォールバックキャッシュ
+- オフライン時と上流到達不能時（接続失敗・リクエストタイムアウト）に限定したフォールバックキャッシュ
 - POST、PUT、DELETE のオフラインキューイング
 - AES-256 による Cookie 永続化と復元 API
 - same-origin、外部委譲、新規 window 判定のための WebView 補助 API
+- サスペンド復帰時の稼働確認と自動再バインドによる接続復旧
 - 統計情報とイベントストリームによる監視とデバッグ
 
 ## 動作要件
@@ -177,6 +178,11 @@ const config = ProxyConfig(
   enableAdminApi: false,
   logLevel: 'info',
   startupPaths: ['/app/config'],
+  preferredPort: 8787,
+  healthCheckPath: '/__offline_web_proxy/health',
+  healthCheckInterval: Duration.zero,
+  serverIdleTimeout: Duration(seconds: 120),
+  maxRestartAttemptsPerMinute: 5,
 );
 ```
 
@@ -185,7 +191,10 @@ const config = ProxyConfig(
 - `origin` は必須で、絶対 HTTP URL または HTTPS URL である必要があります。
 - `port: 0` を指定すると、OS が空きポートを自動割り当てします。
 - `preferredPort` を指定すると、まずそのポートを試し、使えない場合は自動割り当てへフォールバックします。直前に成功したポートも次回起動時に再利用されるため、WebView の origin をより安定させやすくなります。
-- `startupPaths` は `warmupCache()` で、オフライン時またはタイムアウト時の代替応答を事前準備したいパスに使います。
+- `startupPaths` は `warmupCache()` で、オフライン時または上流到達不能時の代替応答を事前準備したいパスに使います。
+- `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。Web アプリのルートと衝突する場合に変更します。
+- `healthCheckInterval` に 0 より大きい値を指定すると定期的に稼働確認を行います。既定は無効で、復帰時の確認（`ProxyLifecycleGuard`）を主経路とします。
+- `offlineFallbackHtml` と `gatewayTimeoutHtml` を指定すると、オフライン応答とタイムアウト応答の HTML をアプリ側の文言へ差し替えられます。
 - 現在サポートされる設定入口は `ProxyConfig` です。外部 YAML の自動読込は実装されていません。
 
 ## WebView 遷移補助 API
@@ -223,6 +232,66 @@ final newWindowRecommendation = proxy.recommendNewWindowNavigation(
 起動時に `AssetManifest.json` を走査し、`assets/static/` 配下に存在するファイルだけを proxy ローカル静的リソースとして扱います。たとえば `assets/static/app.css` は proxy URL の `/app.css` に対応し、一覧に無い `/test.css` は upstream 解決を優先します。
 実行環境で manifest を読み込めない場合でも、proxy 起動は中断せず、静的リソース一覧を空として通常の upstream 解決へフォールバックします。
 WebView へ返す上流レスポンスが `301`、`302`、`303`、`307`、`308` の場合、proxy は `HttpClient` の自動追従に依存せず `Location` を明示解決します。same-origin redirect は proxy URL へ書き換え、relative `Location` は上流リクエスト URL 基準で解決し、外部起動 redirect は `ProxyEventType.redirectHandled` で app 側へ通知できます。
+
+## 接続復旧 API
+
+端末のサスペンドやプロセス再開の後は、内部状態が稼働中のままでもソケットが応答しなくなることがあります。この状態では WebView が端末標準のエラー画面（`127.0.0.1:...` に接続できないという表示）を出してしまうため、復帰時に稼働確認と再バインドを行います。
+
+```dart
+// アプリのライフサイクルに連動させる
+final guard = ProxyLifecycleGuard(
+  proxy: proxy,
+  currentUrlProvider: () => currentPageUrl,
+  onRecovered: (result) {
+    final reloadUri = result.reloadUri;
+    if (reloadUri != null) {
+      controller.loadRequest(reloadUri);
+    } else {
+      controller.reload();
+    }
+  },
+  onFailed: (result) => showAppNotice(),
+);
+WidgetsBinding.instance.addObserver(guard);
+
+// WebView のリソースエラーを復旧へつなぐ
+onWebResourceError: (error) async {
+  final result = await proxy.recoverFromWebResourceError(
+    errorCode: error.errorCode,
+    failingUrl: error.url,
+    isMainFrame: error.isForMainFrame ?? true,
+  );
+  if (result.cause == ProxyRecoveryCause.recoveryFailed ||
+      result.cause == ProxyRecoveryCause.unrelated) {
+    showAppNotice();
+    return;
+  }
+  final reloadUri = result.reloadUri;
+  if (reloadUri != null) {
+    await controller.loadRequest(reloadUri);
+  } else {
+    await controller.reload();
+  }
+}
+
+// 任意のタイミングで確認したい場合
+if (!await proxy.probe()) {
+  await proxy.ensureRunning();
+}
+
+final diagnostics = await proxy.getDiagnostics();
+print('port=${diagnostics.port} restarts=${diagnostics.restartCount}');
+```
+
+補足:
+
+- `isRunning` は内部フラグのみを返します。実際に応答するかは `probe()` で確認します。
+- `ensureRunning()` は応答が無い場合のみ再バインドし、キャッシュ、キュー、Cookie は保持します。例外は投げず、結果は `ProxyRecoveryResult` で返します。
+- 再バインド時は WebView が保持しているポートの維持を最優先にします。ポートが変わった場合は `portChanged` と `port` を参照してください。
+- ポートのみが異なる旧 URL は `resolveReloadUri()` で現行ポートへ読み替えられます。遷移判定 API でも `ProxyNavigationReason.stalePortUrl` として扱い、現行ポートの読み込みを推奨します。
+- 復旧の暴走を防ぐため、連続失敗時は待機時間を挟み、1 分あたりの再バインド回数は `maxRestartAttemptsPerMinute` で制限します。
+- 利用者向けの文言は本パッケージでは持ちません。`onFailed` や `recoverFromWebResourceError()` の結果を使って、アプリ側で表示内容を決めてください。
+- 実装例は `example/lib/main.dart` にあります。
 
 ## Cookie API
 
@@ -289,10 +358,11 @@ proxy.events.listen((event) {
 補足:
 
 - オンライン時の GET/HEAD は upstream へ転送し、proxy キャッシュで応答を省略しません。
-- proxy キャッシュはオフライン時、または request timeout を超過した GET/HEAD の代替応答に使います。
+- proxy キャッシュはオフライン時、または上流へ到達できない GET/HEAD の代替応答に使います。接続拒否や接続切断、request timeout の超過が対象で、upstream が応答した 4xx / 5xx はそのまま返します。代替キャッシュが無い場合は 504 を返します。
 - `warmupCache()` は通常時の高速化ではなく、フォールバック用レスポンスの事前取得が目的です。
 
 イベントストリームでは、キャッシュヒット、キュー処理、URL 解決メタ情報に加え、redirect 処理結果も監視できます。`redirectHandled` では `redirectStatusCode`、`locationHeader`、`redirectAction`、`resolvedProxyUrl`、`externalUrl` などを参照できます。
+接続復旧では `serverRecovered` と `serverUnavailable` が発行され、`cause`、`previousPort`、`newPort`、`downtimeMs`、`restartCount`、`probeError` を参照できます。
 
 ## プラットフォーム設定
 

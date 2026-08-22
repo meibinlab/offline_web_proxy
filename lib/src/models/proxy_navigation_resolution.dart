@@ -87,6 +87,9 @@ enum ProxyNavigationReason {
   /// proxy の loopback URL らしいが自インスタンスと断定できませんでした。
   unknownLoopbackUrl,
 
+  /// ポートのみが現行ポートと異なる旧 proxy URL です。現行ポートへ読み替えます。
+  stalePortUrl,
+
   /// 相対 URL の解決に必要な source URL が不足しています。
   relativeUrlWithoutSource,
 

@@ -228,7 +228,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [analyze, test]
     if: github.event_name == 'pull_request'
-    
+    permissions:
+      contents: read
+      pull-requests: write
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -245,11 +248,14 @@ jobs:
     - name: Validate package for preview
       run: dart pub publish --dry-run
 
+    # フォークからのプルリクエストでは書き込み権限が無いため失敗させない
     - name: Comment on PR
+      if: github.event.pull_request.head.repo.full_name == github.repository
+      continue-on-error: true
       uses: actions/github-script@v7
       with:
         script: |
-          github.rest.issues.createComment({
+          await github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,

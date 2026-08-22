@@ -18,7 +18,7 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 ### データ処理戦略
 
-- **キャッシュ**: GET リクエストの成功レスポンスをファイルベースで保存。オンライン時の送信抑止には使わず、オフライン時またはタイムアウト時の代替応答に限定して利用
+- **キャッシュ**: GET リクエストの成功レスポンスをファイルベースで保存。オンライン時の送信抑止には使わず、オフライン時または上流到達不能時の代替応答に限定して利用
 - **キュー**: POST/PUT/DELETE リクエストを FIFO（先入先出）で管理。ネットワーク復旧時に順次送信
 - **オフライン応答**: キャッシュヒット時はキャッシュを返却、未キャッシュ時はフォールバックページを表示
 - **静的リソース**: `pubspec.yaml` で宣言され `AssetManifest.json` に掲載された `assets/static/` 配下ファイルを一覧化して扱う。現時点の応答は 404 プレースホルダ
@@ -39,6 +39,101 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 - **HTTPS 不要**: localhost はブラウザでセキュアコンテキストとして扱われるため、HTTP でも十分
 - **外部アクセス制限**: 127.0.0.1 バインドにより、デバイス外からのアクセスを完全に遮断
+
+### 死活監視
+
+- proxy は稼働確認用のヘルスチェックエンドポイントを提供します。既定パスは `/__offline_web_proxy/health` で、`ProxyConfig.healthCheckPath` により変更できます。
+- ヘルスチェックは `GET` と `HEAD` のみを受け付け、`204 No Content` と `Cache-Control: no-store` を返します。それ以外のメソッドは通常のプロキシ経路として扱います。
+- `healthCheckPath` は `/` で始まる固定パスとします。パスパラメータ記法（`<`、`>`）、`?`、`#`、空白を含む値は起動時に `ProxyStartException` で拒否します。空文字を指定した場合は既定パスを使用します。
+- ヘルスチェック要求は上流サーバへ転送せず、キャッシュ、キュー、Cookie 処理、統計カウンタの対象外とします。
+- `probe()` は現在バインドしているポートのヘルスチェックパスへ要求を送り、`204` を受け取った場合のみ稼働中と判定します。既定タイムアウトは 2 秒です。接続失敗、タイムアウト、想定外のステータスは停止と判定します。
+- `isRunning` は内部状態のフラグのみを返し、ソケットが実際に応答するかは保証しません。実応答の確認には `probe()` を使用します。
+- 「ソケット死亡」状態を再現するため、内部状態を変更せずソケットのみを閉じる `closeServerSocketForTesting()` を `@visibleForTesting` として提供します。テスト以外の用途では使用しません。
+
+### ソケット死亡と自動復旧
+
+端末のサスペンドやプロセス再開により、内部フラグ上は稼働中でもソケットが応答しない状態が発生します。本仕様ではこの状態を「ソケット死亡」と呼びます。
+
+- `ensureRunning()` は `probe()` を実行し、失敗した場合に限りサーバを再バインドします。キャッシュ、キュー、Cookie の永続化領域は閉じずに維持します。
+- 再バインド時のポート選択順序は次のとおりです。
+  1. `ProxyConfig.port`（0 より大きい場合はこのポートのみを試行）
+  2. 直前にバインドしていたポート
+  3. `ProxyConfig.preferredPort`
+  4. 自動割当（0）
+- 再バインド後のポートが直前と異なる場合は、結果の `portChanged` を `true` とします。
+- `ensureRunning()` はアプリが表示中の URL を知らないため、`reloadUri` は常に `null` です。ポートが変化した場合は `portChanged` と `port` を参照し、読み込む URL はアプリ側で組み立てます。
+- `ensureRunning(force: true)` は `probe()` の結果にかかわらず再バインドします。
+- `start()` を実行していない状態で呼ばれた場合は再バインドを行わず、`cause` を `notStarted` として返します。
+- 復旧に成功した場合は `serverRecovered` イベント、復旧できなかった場合は `serverUnavailable` イベントを発行します。
+- 結果とイベントの `downtimeMs` は、その呼び出しで `downtime` が渡された場合にのみ設定します。他の復旧結果へは引き継ぎません。診断情報の `lastDowntimeMs` は最後に渡された値を保持します。
+
+図: 復旧判定フロー
+
+```mermaid
+flowchart TD
+    A[復旧要求] --> B{start 済みか}
+    B -- いいえ --> C[notStarted]
+    B -- はい --> D{force 指定か}
+    D -- いいえ --> E{probe が 204 か}
+    E -- はい --> F[healthy]
+    E -- いいえ --> G{再バインド上限内か}
+    D -- はい --> G
+    G -- いいえ --> H[recoveryFailed / serverUnavailable]
+    G -- はい --> I[待機してから再バインド]
+    I -- 成功 --> J[socketDead / serverRecovered]
+    I -- 失敗 --> H
+```
+
+### 復旧試行の抑制
+
+- 復旧処理は同時に 1 つだけ実行し、実行中に再要求された場合は進行中の処理の結果を共有します。
+- 連続失敗時の待機時間は 0、1、2、5、10 秒の順で増加し、以降は 10 秒を維持します。
+- 直近 1 分間の再バインド回数は既定 5 回を上限とし、超過した場合は再バインドを行わず `recoveryFailed` を返します。上限値は `ProxyConfig.maxRestartAttemptsPerMinute` で変更できます。
+- 復旧に成功した時点で、連続失敗回数と待機時間はリセットされます。
+- `maxRestartAttemptsPerMinute` に 0 以下を指定した場合は再バインドを行わず、常に `recoveryFailed` を返します。
+- 復旧処理と停止処理は排他で実行します。`stop()` が先に完了した場合は復旧を中止して `recoveryFailed` を返し、再バインドが先に完了した場合は続く `stop()` でソケットとバックグラウンドタイマーを確実に停止します。停止後に再バインドしたソケットやタイマーが残ることはありません。
+- `stop()` では復旧の実行制御状態（試行履歴、連続失敗回数、進行中の復旧）のみを初期化し、再バインド回数や最終復旧種別などの診断値は次回 `start()` で初期化します。
+
+### 旧ポート URL の読み替え
+
+アプリ再起動やポート自動割当により、WebView が保持する URL のポートが現行ポートと異なる場合があります。
+
+- `resolveReloadUri(String lastUrl)` は、対象 URL が loopback ホスト（`127.0.0.1` または `localhost`）で、ポートのみが現行ポートと異なる場合、現行ポートへ読み替えた URL を返します。パス、クエリ、フラグメントは保持します。
+- ポートが現行ポートと一致する場合は、その URL をそのまま返します。
+- 読み替え後のホストは `ProxyConfig.host` に正規化します。`localhost` 表記で保持されていた URL は設定ホストの表記へ揃えます。
+- 読み替え対象とするポートは、このインスタンスが起動後にバインドしたポート、永続化された直前のバインドポート、および `ProxyConfig.preferredPort`（0 より大きい場合）に限ります。別ポートで動作する他のローカルサーバへの遷移を奪わないための制限です。
+- loopback 以外のホスト、`http` 以外のスキーム、解析できない文字列、上記以外のポート、サーバ停止中（現行ポート不明）の場合は `null` を返します。
+- 遷移判定 API（`resolveNavigationTarget`、`recommendMainFrameNavigation`、`recommendNewWindowNavigation`）でも、ポートのみが異なる loopback URL を `ProxyNavigationReason.stalePortUrl` として扱い、現行ポートへ読み替えた proxy URL の読み込み（`loadProxyUrl`）を推奨します。
+
+### WebView エラーからの復旧
+
+- `recoverFromWebResourceError()` は WebView が報告した失敗 URL を評価し、次のいずれかに該当する場合のみ復旧を試みます。
+  - 失敗 URL のホストとポートが現行 proxy と一致する
+  - 失敗 URL が loopback ホストで、ポートのみが現行ポートと異なる
+- 上記以外の URL（上流サーバや外部サイト）では復旧を行わず、`cause` を `unrelated` として返します。`failingUrl` が未指定の場合も `unrelated` を返します。
+- `errorCode` と `isMainFrame` は診断情報として記録するだけで、復旧するかどうかの判定には使用しません。
+- 復旧を試みた場合、`reloadUri` には `failingUrl` を現行ポートへ読み替えた URL を格納します。ポートが変化していない場合も同じ URL を格納します。復旧できなかった場合は `null` とします。
+- 本 API は利用者向けの表示文言を返しません。利用者への通知内容はアプリ側の責務とします。
+
+### アプリライフサイクル連動
+
+- `ProxyLifecycleGuard` は `WidgetsBindingObserver` として登録し、アプリが `resumed` へ遷移した際に `ensureRunning()` を実行します。
+- 再バインドが発生した場合のみ `onRecovered` を呼びます。`probe()` が成功した場合はコールバックを呼びません。
+- 復旧できなかった場合は `onFailed` を呼びます。未指定の場合は何も行いません。
+- `paused` へ遷移した時刻を保持し、`resumed` までの経過時間をイベントおよび診断情報の `downtimeMs` として記録します。
+- `currentUrlProvider` を指定した場合、復旧後の `reloadUri` はその関数が返す URL を現行ポートへ読み替えた値になります。未指定でポートも変化していない場合は `reloadUri` は `null` です。
+- WebView の再読込は本ライブラリでは行いません。`onRecovered` が渡す `reloadUri` を用いて、アプリ側が読み込みを実行します。`reloadUri` が `null` の場合は、アプリ側が現在の URL を再読込します。
+
+### 定期ヘルスチェック
+
+- `ProxyConfig.healthCheckInterval` が 0 より大きい場合、その間隔で `probe()` を実行し、失敗時に自動復旧を試みます。既定は 0（無効）です。
+- 定期確認の稼働確認タイムアウトは `healthCheckInterval` に連動させ、500 ミリ秒以上 2 秒以下にクランプします。
+- バックグラウンド中はタイマーが動作しない前提とし、長時間放置後の復旧は `ProxyLifecycleGuard` による `resumed` 契機の確認を主経路とします。
+
+### keep-alive とアイドルタイムアウト
+
+- 内部 HTTP サーバのアイドルタイムアウトは `ProxyConfig.serverIdleTimeout`（既定 120 秒）で設定します。
+- 設定時間を超えて要求が来ない keep-alive 接続は、サーバ側から切断します。
 
 ## 【3】静的リソース判定
 
@@ -194,7 +289,7 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 
 - **upstream 優先**: オンライン時、proxy は GET/HEAD を含むリクエストを上流サーバへ転送
 - **ブラウザ主導**: Cache-Control に基づいてリクエスト送出を省略するかどうかは WebView / ブラウザの HTTP キャッシュに委ねる
-- **proxy キャッシュの役割**: proxy キャッシュはオンライン最適化ではなく、オフライン時またはタイムアウト時の代替応答に限定して利用
+- **proxy キャッシュの役割**: proxy キャッシュはオンライン最適化ではなく、オフライン時または上流到達不能時の代替応答に限定して利用
 
 #### 保存ポリシー
 
@@ -207,10 +302,11 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 #### フォールバック利用条件
 
 1. **オフライン時**: fresh または stale のキャッシュがあれば返却する
-2. **リクエストタイムアウト時**: 上流リクエストが request timeout を超過した場合に限り、fresh または stale のキャッシュを代替応答として返却する
+2. **上流到達不能時**: 上流へ到達できなかった場合に、fresh または stale のキャッシュを代替応答として返却する。接続拒否、名前解決失敗、接続中の切断、TLS ハンドシェイク失敗、上流応答の解析失敗、および request timeout の超過が対象。upstream がステータス行とヘッダを返し終えた応答（4xx / 5xx を含む）は本条件に該当しない
 3. **HTTP 4xx 時**: upstream が応答した 4xx はそのまま返し、proxy キャッシュへ切り替えない
 4. **HTTP 5xx 時**: upstream が応答した 5xx はそのまま返し、proxy キャッシュへ切り替えない
 5. **expired 時**: stale 期間も超過したキャッシュは返却対象にしない
+6. **上流到達不能かつ代替キャッシュ無し**: GET/HEAD は 504 を返す（本文は `ProxyConfig.gatewayTimeoutHtml` で差し替え可能）。更新系リクエストは従来どおりキューへ保存する
 
 #### キャッシュ有効期限の計算優先順位
 
@@ -384,7 +480,7 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ### レスポンス種別とヘッダ
 
-本章はオフライン時の応答を示します。request timeout 時の代替応答も同じキャッシュ選択ルールに従いますが、デバッグヘッダの契約はオフライン時のものを基準にします。
+本章はオフライン時の応答を示します。上流到達不能時の代替応答も同じキャッシュ選択ルールに従いますが、デバッグヘッダの契約はオフライン時のものを基準にします。
 
 オフライン時の応答には、デバッグ用のカスタムヘッダを付与します：
 
@@ -491,7 +587,7 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **sendTimeout**: 15 秒（リクエスト送信の制限時間）
 - **receiveTimeout**: 30 秒（レスポンス受信の制限時間）
 - **requestTimeout**: 60 秒（リクエスト全体の制限時間）
-- **タイムアウト時フォールバック**: GET/HEAD は requestTimeout 超過時のみ保存済みキャッシュへフォールバック可能
+- **上流到達不能時フォールバック**: GET/HEAD は上流への接続に失敗した場合、または requestTimeout を超過した場合に保存済みキャッシュへフォールバック可能
 
 ### バックオフ戦略
 
@@ -528,12 +624,12 @@ Cache-Control ヘッダを考慮した TTL 計算と stale 期間の設定を、
 
 #### キャッシュの状態管理
 
-キャッシュは以下の 3 つの状態で管理され、オンライン時の送信抑止ではなく、オフライン時またはタイムアウト時の返却可否判定に用います：
+キャッシュは以下の 3 つの状態で管理され、オンライン時の送信抑止ではなく、オフライン時または上流到達不能時の返却可否判定に用います：
 
 ##### 1. Fresh（新鮮）
 
 - **条件**: TTL 期限内
-- **動作**: オフライン時またはタイムアウト時の代替応答に利用可能
+- **動作**: オフライン時または上流到達不能時の代替応答に利用可能
 - **ヘッダ**: `X-Cache-Status: hit`
 
 ##### 2. Stale（期限切れ）
@@ -541,7 +637,7 @@ Cache-Control ヘッダを考慮した TTL 計算と stale 期間の設定を、
 - **条件**: TTL 期限切れ、但し stale 期間内
 - **動作**:
   - **オンライン時**: upstream へ転送し、proxy キャッシュで代替しない
-  - **オフライン時 / タイムアウト時**: stale キャッシュを代替応答として利用可能
+  - **オフライン時 / 上流到達不能時**: stale キャッシュを代替応答として利用可能
 - **ヘッダ**: `X-Cache-Status: stale`
 
 ##### 3. Expired（完全期限切れ）
@@ -605,7 +701,7 @@ cache:
 
 1. **通常系**: upstream へ転送
 2. **304 応答**: ブラウザの通常キャッシュフローとして透過
-3. **request timeout**: fresh または stale キャッシュがあれば代替応答、なければタイムアウトエラー
+3. **上流到達不能（接続失敗 / request timeout）**: fresh または stale キャッシュがあれば代替応答、なければ 504
 4. **HTTP 4xx**: upstream 応答をそのまま返却
 5. **HTTP 5xx**: upstream 応答をそのまま返却
 
@@ -619,7 +715,7 @@ cache:
 
 - **purge 実行**: 1 時間ごとに Expired キャッシュの削除と LRU 整理を自動実行
 - **状態更新**: 保存済みキャッシュの TTL / stale 状態を定期的に再評価
-- **統計情報**: キャッシュヒット率、stale 使用率、タイムアウト時フォールバック件数等をログ出力
+- **統計情報**: キャッシュヒット率、stale 使用率、上流到達不能時フォールバック件数等をログ出力
 
 ### 設定例
 
@@ -637,6 +733,14 @@ proxy:
     host: "127.0.0.1" # ローカルバインド
     origin: "" # 上流 サーバのURL（デフォルトは空、必須設定）
       # 例: "https://api.example.com"
+    preferredPort: 0 # 利用可能なら優先するポート（0=指定なし）
+    idleTimeoutSeconds: 120 # 内部サーバのアイドルタイムアウト
+
+  # 死活監視・自動復旧設定
+  health:
+    checkPath: "/__offline_web_proxy/health" # ヘルスチェックパス
+    checkIntervalSeconds: 0 # 定期ヘルスチェック間隔（0=無効）
+    maxRestartAttemptsPerMinute: 5 # 1分あたりの再バインド上限回数
 
   # キャッシュ設定
   cache:
@@ -645,7 +749,7 @@ proxy:
 
     # 起動時ウォームアップ設定
     startup:
-      enabled: false # オフライン時またはタイムアウト時の代替応答を準備するか
+      enabled: false # オフライン時または上流到達不能時の代替応答を準備するか
       paths: [] # 事前取得対象のパスリスト（デフォルトは空）
         # - "/config"
         # - "/user/profile"
@@ -816,6 +920,104 @@ await proxy.stop();
 プロキシサーバの動作状態を取得します。
 
 - **戻り値**: サーバが動作中の場合 `true`
+
+### 接続復旧
+
+#### `int? get port`
+
+現在バインドしているポート番号を取得します。
+
+- **戻り値**: 稼働中はポート番号、未起動時は `null`
+
+#### `Uri? get baseUri`
+
+WebView から読み込む proxy のベース URI を取得します。
+
+- **戻り値**: `http://<host>:<port>` 形式の URI。未起動時は `null`
+
+#### `Future<bool> probe({Duration timeout = const Duration(seconds: 2)})`
+
+ヘルスチェックパスへ要求を送り、proxy が実際に応答するかを確認します。
+
+- **パラメータ**:
+  - `timeout`: 応答待ちの上限時間（既定 2 秒）
+- **戻り値**: `204` を受け取った場合は `true`、接続失敗・タイムアウト・想定外ステータスの場合は `false`
+
+```dart
+if (!await proxy.probe()) {
+  await proxy.ensureRunning();
+}
+```
+
+#### `Future<ProxyRecoveryResult> ensureRunning({Duration probeTimeout = const Duration(seconds: 2), bool force = false, Duration? downtime})`
+
+稼働確認を行い、応答しない場合のみサーバを再バインドします。
+
+- **パラメータ**:
+  - `probeTimeout`: 稼働確認のタイムアウト
+  - `force`: `true` の場合、稼働確認の結果にかかわらず再バインドする
+  - `downtime`: 停止推定時間。イベントと診断情報の `downtimeMs` として記録する
+- **戻り値**: 復旧結果（`ProxyRecoveryResult`）
+- **例外**: 送出しません。失敗内容は戻り値の `cause` と `error` に格納します
+
+```dart
+final result = await proxy.ensureRunning();
+if (result.restarted && result.reloadUri != null) {
+  await controller.loadRequest(result.reloadUri!);
+}
+```
+
+#### `Future<ProxyRecoveryResult> recoverFromWebResourceError({int? errorCode, String? failingUrl, bool isMainFrame = true})`
+
+WebView が報告したリソースエラーを起点に復旧を試みます。
+
+- **パラメータ**:
+  - `errorCode`: WebView が報告したエラーコード（診断情報として記録）
+  - `failingUrl`: 失敗した URL
+  - `isMainFrame`: メインフレームの失敗かどうか
+- **戻り値**: 復旧結果。proxy と無関係な URL の場合は `cause` が `unrelated` で再バインドを行いません
+- **備考**: 利用者向けの表示文言は返しません。表示はアプリ側の責務です
+
+#### `Uri? resolveReloadUri(String lastUrl)`
+
+WebView が保持していた URL を、現行ポートで読み込める URL へ読み替えます。
+
+- **パラメータ**:
+  - `lastUrl`: WebView が保持していた URL
+- **戻り値**: 読み替え後の URI。読み替え対象外の場合は `null`
+
+#### `Future<ProxyDiagnostics> getDiagnostics()`
+
+死活監視と復旧に関する診断情報を取得します。
+
+- **戻り値**: 診断情報（`ProxyDiagnostics`）
+- **用途**: 障害発生時の原因切り分け、ログ出力
+
+#### `ProxyLifecycleGuard`
+
+アプリのライフサイクルに連動して稼働確認と復旧を行うオブザーバです。
+
+- **コンストラクタ引数**:
+  - `proxy`: 監視対象の `OfflineWebProxy`
+  - `onRecovered`: 再バインドが発生した場合に呼ばれるコールバック
+  - `onFailed`: 復旧できなかった場合に呼ばれるコールバック（省略可）
+  - `currentUrlProvider`: 現在表示中の URL を返す関数（省略可）。指定時は `reloadUri` の算出に使用します
+
+```dart
+final guard = ProxyLifecycleGuard(
+  proxy: proxy,
+  currentUrlProvider: () => currentPageUrl,
+  onRecovered: (result) {
+    final reloadUri = result.reloadUri;
+    if (reloadUri != null) {
+      controller.loadRequest(reloadUri);
+    } else {
+      controller.reload();
+    }
+  },
+);
+WidgetsBinding.instance.addObserver(guard);
+```
 
 ### キャッシュ管理
 
@@ -1325,6 +1527,13 @@ class ProxyConfig {
   final bool enableAdminApi; // 管理API有効化（開発時のみ）
   final String logLevel; // ログレベル（"debug", "info", "warn", "error"）
   final List<String> startupPaths; // 起動時キャッシュ更新パス
+  final int preferredPort; // 優先して利用するポート（0=指定なし）
+  final String healthCheckPath; // ヘルスチェックパス（デフォルト: "/__offline_web_proxy/health"）
+  final Duration healthCheckInterval; // 定期ヘルスチェック間隔（Duration.zero=無効）
+  final Duration serverIdleTimeout; // 内部サーバのアイドルタイムアウト（デフォルト: 120 秒）
+  final int maxRestartAttemptsPerMinute; // 1 分あたりの再バインド上限回数（デフォルト: 5）
+  final String? offlineFallbackHtml; // オフライン応答の差し替え HTML（null=内蔵ページ）
+  final String? gatewayTimeoutHtml; // タイムアウト応答の差し替え HTML（null=内蔵ページ）
 }
 ```
 
@@ -1354,9 +1563,23 @@ enum ProxyEventType {
   networkOnline, // ネットワーク復旧
   networkOffline, // ネットワーク切断
   cacheCleared, // キャッシュクリア
-  errorOccurred // エラー発生
+  errorOccurred, // エラー発生
+  serverUnavailable, // 稼働確認に失敗し復旧できなかった
+  serverRecovered // 再バインドにより復旧した
 }
 ```
+
+`serverUnavailable` と `serverRecovered` の `data` には、次のメタ情報が入ります。
+
+- `cause`: `ProxyRecoveryCause` の名前
+- `previousPort`: 復旧前のポート
+- `newPort`: 復旧後のポート（失敗時は `null`）
+- `portChanged`: ポートが変化したか
+- `downtimeMs`: 直近の停止推定時間（ミリ秒、不明な場合は `null`）
+- `restartCount`: 再バインド実行回数
+- `probeError`: 稼働確認または再バインドの失敗内容（無い場合は `null`）
+- `webResourceErrorCode`: WebView エラー起点の復旧の場合に渡されたエラーコード
+- `isMainFrame`: WebView エラー起点の復旧の場合にメインフレームの失敗だったか
 
 `requestReceived` の `data` には、次のメタ情報が入る場合があります。
 
@@ -1382,6 +1605,51 @@ enum ProxyEventType {
 - `externalUrl`: 外部起動候補として app 側へ渡す URL
 - `navigationDisposition`: `ProxyNavigationDisposition` の名前
 - `navigationReason`: `ProxyNavigationReason` の名前
+
+#### `ProxyRecoveryResult`
+
+稼働確認と復旧処理の結果を表すクラス。
+
+```dart
+class ProxyRecoveryResult {
+  final ProxyRecoveryCause cause; // 判定結果の種別
+  final bool restarted; // 再バインドを実行したか
+  final int? port; // 復旧後のポート（未起動時は null）
+  final bool portChanged; // ポートが変化したか
+  final Uri? reloadUri; // アプリが再読込すべき URI
+  final int? downtimeMs; // 直近の停止推定時間（ミリ秒）
+  final Object? error; // 復旧失敗時の原因
+}
+
+enum ProxyRecoveryCause {
+  healthy, // 応答があり再バインド不要
+  notStarted, // start() 前のため復旧対象外
+  socketDead, // 応答がなく再バインドを実行
+  stalePort, // ポート不一致のため読み替えが必要
+  unrelated, // proxy と無関係な失敗
+  recoveryFailed // 再バインドに失敗、または試行上限を超過
+}
+```
+
+#### `ProxyDiagnostics`
+
+死活監視と復旧の診断情報を表すクラス。
+
+```dart
+class ProxyDiagnostics {
+  final bool isRunning; // 内部フラグ上の稼働状態
+  final int? port; // 現在のポート
+  final int preferredPort; // 設定された優先ポート
+  final int? persistedPort; // 永続化された直前のバインドポート
+  final DateTime? startedAt; // 起動日時
+  final DateTime? lastProbeAt; // 最終稼働確認日時
+  final bool? lastProbeSucceeded; // 最終稼働確認の結果
+  final int restartCount; // 再バインド実行回数
+  final ProxyRecoveryCause? lastRecoveryCause; // 最終復旧の判定種別
+  final String? lastRecoveryError; // 最終復旧失敗の内容
+  final int? lastDowntimeMs; // 直近の停止推定時間（ミリ秒）
+}
+```
 
 #### 例外クラス
 

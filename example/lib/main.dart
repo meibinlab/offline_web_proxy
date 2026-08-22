@@ -48,11 +48,16 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
   HttpServer? _upstreamServer;
   WebViewController? _controller;
 
+  ProxyLifecycleGuard? _lifecycleGuard;
+
   int? _proxyPort;
   String? _upstreamOrigin;
   String? _homeProxyUrl;
   String? _currentPageUrl;
   String? _statusText;
+
+  /// 利用者へ表示する案内文です。文言はアプリ側の責務として持ちます。
+  String? _recoveryNoticeText;
   bool _isReady = false;
 
   @override
@@ -63,6 +68,11 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
 
   @override
   void dispose() {
+    final lifecycleGuard = _lifecycleGuard;
+    if (lifecycleGuard != null) {
+      WidgetsBinding.instance.removeObserver(lifecycleGuard);
+      _lifecycleGuard = null;
+    }
     unawaited(_eventSubscription?.cancel());
     if (_proxy.isRunning) {
       unawaited(_proxy.stop());
@@ -78,12 +88,26 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
       _startMockUpstream(_upstreamServer!, _upstreamOrigin!);
 
       _proxyPort = await _proxy.start(
-        config: ProxyConfig(origin: _upstreamOrigin!),
+        config: ProxyConfig(
+          origin: _upstreamOrigin!,
+          // ポートを固定しておくと再起動後も WebView が保持する URL が有効なままになる
+          preferredPort: 8787,
+        ),
       );
       _homeProxyUrl = 'http://127.0.0.1:$_proxyPort/app';
       _currentPageUrl = _homeProxyUrl;
 
       _eventSubscription = _proxy.events.listen(_handleProxyEvent);
+
+      // 復帰時の稼働確認と自動復旧をアプリのライフサイクルに連動させる
+      final lifecycleGuard = ProxyLifecycleGuard(
+        proxy: _proxy,
+        currentUrlProvider: () => _currentPageUrl,
+        onRecovered: _handleProxyRecovered,
+        onFailed: _handleProxyRecoveryFailed,
+      );
+      WidgetsBinding.instance.addObserver(lifecycleGuard);
+      _lifecycleGuard = lifecycleGuard;
       _controller = _createController();
       await _controller!.loadRequest(Uri.parse(_homeProxyUrl!));
 
@@ -159,6 +183,8 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
             setState(() {
               _statusText = 'WebView エラー: ${error.description}';
             });
+            // 端末が表示する生のエラー画面に頼らず proxy の復旧を試みる
+            unawaited(_handleWebResourceError(error));
           },
         ),
       );
@@ -195,6 +221,15 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
   }
 
   void _handleProxyEvent(ProxyEvent event) {
+    if (event.type == ProxyEventType.serverRecovered ||
+        event.type == ProxyEventType.serverUnavailable) {
+      _appendLog(
+        'event ${event.type.name} cause=${event.data['cause']} '
+        'port=${event.data['newPort'] ?? event.data['previousPort']}',
+      );
+      return;
+    }
+
     if (event.type != ProxyEventType.requestReceived) {
       return;
     }
@@ -205,6 +240,89 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
     _appendLog(
       'event requestReceived $disposition/$reason upstream=${resolvedUpstreamUrl ?? '-'}',
     );
+  }
+
+  /// 再バインドが発生した場合に再読込して案内を消します。
+  void _handleProxyRecovered(ProxyRecoveryResult result) {
+    _appendLog(
+      'recovered ${result.cause.name} port=${result.port} '
+      'reload=${result.reloadUri ?? '-'}',
+    );
+    unawaited(_reloadAfterRecovery(result));
+  }
+
+  /// 復旧できなかった場合にアプリ側の文言で案内します。
+  void _handleProxyRecoveryFailed(ProxyRecoveryResult result) {
+    _appendLog('recovery failed ${result.cause.name} ${result.error ?? ''}');
+    _showRecoveryNotice('通信の準備中に問題が発生しました。しばらくしてから再読み込みしてください。');
+  }
+
+  /// WebView のリソースエラーを proxy の復旧処理へつなぎます。
+  Future<void> _handleWebResourceError(WebResourceError error) async {
+    _appendLog('web error ${error.errorCode} ${error.description}');
+
+    final result = await _proxy.recoverFromWebResourceError(
+      errorCode: error.errorCode,
+      failingUrl: error.url,
+      isMainFrame: error.isForMainFrame ?? true,
+    );
+
+    switch (result.cause) {
+      case ProxyRecoveryCause.unrelated:
+        // proxy 以外の失敗はアプリ側の判断で案内する
+        _showRecoveryNotice('ページを表示できませんでした。通信状態を確認してください。');
+      case ProxyRecoveryCause.recoveryFailed:
+        _handleProxyRecoveryFailed(result);
+      case ProxyRecoveryCause.notStarted:
+        _showRecoveryNotice('proxy が停止しています。アプリを再起動してください。');
+      case ProxyRecoveryCause.healthy:
+      case ProxyRecoveryCause.socketDead:
+      case ProxyRecoveryCause.stalePort:
+        await _reloadAfterRecovery(result);
+    }
+  }
+
+  /// 復旧結果に応じて WebView を再読込します。
+  Future<void> _reloadAfterRecovery(ProxyRecoveryResult result) async {
+    final controller = _controller;
+    if (controller == null) {
+      return;
+    }
+
+    final reloadUri = result.reloadUri;
+    if (reloadUri != null) {
+      await controller.loadRequest(reloadUri);
+    } else {
+      await controller.reload();
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _recoveryNoticeText = null;
+    });
+  }
+
+  /// 案内表示からの再試行を行います。
+  Future<void> _retryRecovery() async {
+    final result = await _proxy.ensureRunning();
+    if (result.cause == ProxyRecoveryCause.recoveryFailed) {
+      _handleProxyRecoveryFailed(result);
+      return;
+    }
+
+    await _reloadAfterRecovery(result);
+  }
+
+  /// 利用者への案内文を表示します。
+  void _showRecoveryNotice(String text) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _recoveryNoticeText = text;
+    });
   }
 
   Future<void> _reloadHome() async {
@@ -366,6 +484,21 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
                       ],
                     ),
                   ),
+                  if (_recoveryNoticeText != null)
+                    Container(
+                      width: double.infinity,
+                      color: const Color(0xFFFFF3CD),
+                      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                      child: Row(
+                        children: <Widget>[
+                          Expanded(child: Text(_recoveryNoticeText!)),
+                          TextButton(
+                            onPressed: _retryRecovery,
+                            child: const Text('再試行'),
+                          ),
+                        ],
+                      ),
+                    ),
                   Expanded(
                     child: WebViewWidget(controller: controller),
                   ),

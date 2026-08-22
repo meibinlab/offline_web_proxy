@@ -18,7 +18,7 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 
 ### Data Processing Strategy
 
-- **Cache**: Store successful GET responses in file-based storage. Do not use proxy cache to suppress online requests, and limit its use to offline or timeout fallback
+- **Cache**: Store successful GET responses in file-based storage. Do not use proxy cache to suppress online requests, and limit its use to offline or upstream-unreachable fallback
 - **Queue**: Manage POST/PUT/DELETE requests in FIFO (First In First Out). Send sequentially when network recovers
 - **Offline Response**: Return cache when cache hit, display fallback page when uncached
 - **Static Resources**: Index files under `assets/static/` that are declared in `pubspec.yaml` and listed in `AssetManifest.json`. The current response is still the 404 placeholder
@@ -39,6 +39,101 @@ Relays to the upstream origin server (e.g., https://sample.com). Supports a sing
 
 - **HTTPS Not Required**: localhost is treated as a secure context by browsers, so HTTP is sufficient
 - **External Access Restriction**: Completely blocks access from outside the device by binding to 127.0.0.1
+
+### Health Monitoring
+
+- The proxy exposes a health check endpoint. The default path is `/__offline_web_proxy/health` and can be changed with `ProxyConfig.healthCheckPath`.
+- Health checks accept only `GET` and `HEAD` and are answered with `204 No Content` and `Cache-Control: no-store`. Any other method is handled through the normal proxy path.
+- `healthCheckPath` must be a fixed path starting with `/`. Values containing route parameter syntax (`<`, `>`), `?`, `#`, or whitespace are rejected at startup with `ProxyStartException`. An empty value falls back to the default path.
+- Health check requests are never forwarded upstream and are excluded from cache, queue, cookie processing, and statistics counters.
+- `probe()` sends a request to the health check path on the currently bound port and reports the server as running only when `204` is received. The default timeout is 2 seconds. Connection failure, timeout, and unexpected status are all treated as not running.
+- `isRunning` only returns the internal flag and does not guarantee that the socket actually responds. Use `probe()` to verify actual responsiveness.
+- To reproduce the "dead socket" state, `closeServerSocketForTesting()` is provided as `@visibleForTesting`. It closes only the socket without changing internal state and is not intended for production use.
+
+### Dead Socket and Automatic Recovery
+
+Device suspension or process resume can leave the socket unresponsive even though the internal flag still reports running. This specification calls that state a "dead socket".
+
+- `ensureRunning()` runs `probe()` and rebinds the server only when the probe fails. Cache, queue, and cookie storage stay open.
+- Port selection order on rebind:
+  1. `ProxyConfig.port` (when greater than 0, only this port is attempted)
+  2. The previously bound port
+  3. `ProxyConfig.preferredPort`
+  4. Automatic assignment (0)
+- When the rebound port differs from the previous one, the result reports `portChanged` as `true`.
+- `ensureRunning()` does not know which URL the app is displaying, so `reloadUri` is always `null`. When the port changed, read `portChanged` and `port` and let the app compose the URL to load.
+- `ensureRunning(force: true)` rebinds regardless of the probe result.
+- When called before `start()`, no rebind is attempted and `cause` is reported as `notStarted`.
+- A successful recovery emits the `serverRecovered` event; a failed recovery emits `serverUnavailable`.
+- `downtimeMs` in the result and the event is set only when `downtime` was supplied to that call. It is never carried over to other recovery results. The `lastDowntimeMs` diagnostic keeps the most recently supplied value.
+
+Figure: Recovery decision flow
+
+```mermaid
+flowchart TD
+    A[Recovery requested] --> B{Started?}
+    B -- No --> C[notStarted]
+    B -- Yes --> D{force set?}
+    D -- No --> E{probe returns 204?}
+    E -- Yes --> F[healthy]
+    E -- No --> G{Within rebind limit?}
+    D -- Yes --> G
+    G -- No --> H[recoveryFailed / serverUnavailable]
+    G -- Yes --> I[Wait, then rebind]
+    I -- Success --> J[socketDead / serverRecovered]
+    I -- Failure --> H
+```
+
+### Recovery Attempt Throttling
+
+- Only one recovery runs at a time. Concurrent requests share the result of the in-flight recovery.
+- Wait time for consecutive failures increases as 0, 1, 2, 5, 10 seconds and stays at 10 seconds afterwards.
+- Rebinds are limited to 5 per minute by default. Exceeding the limit skips the rebind and returns `recoveryFailed`. The limit is configurable with `ProxyConfig.maxRestartAttemptsPerMinute`.
+- A successful recovery resets the consecutive failure count and the wait time.
+- Setting `maxRestartAttemptsPerMinute` to zero or less disables rebinding entirely and always returns `recoveryFailed`.
+- Recovery and shutdown are mutually exclusive. When `stop()` completes first the recovery is aborted and `recoveryFailed` is returned; when the rebind completes first the following `stop()` reliably closes the socket and the background timers. No rebound socket or timer is ever left running after shutdown.
+- `stop()` resets only the recovery control state (attempt history, consecutive failure count, in-flight recovery). Diagnostics such as the rebind count and the last recovery cause are reset on the next `start()`.
+
+### Stale Port URL Rewriting
+
+An app restart or automatic port assignment can leave the WebView holding a URL whose port differs from the current one.
+
+- `resolveReloadUri(String lastUrl)` returns the URL rewritten to the current port when the target URL uses a loopback host (`127.0.0.1` or `localhost`) and only the port differs. Path, query, and fragment are preserved.
+- When the port already matches the current port, the URL is returned unchanged.
+- The rewritten host is normalized to `ProxyConfig.host`. A URL held with the `localhost` spelling is aligned to the configured host spelling.
+- Only ports this instance has bound since startup, the persisted previously bound port, and `ProxyConfig.preferredPort` (when greater than zero) are eligible for rewriting. This keeps navigation to other local servers on different ports intact.
+- `null` is returned for non-loopback hosts, non-`http` schemes, unparsable strings, ports outside the eligible set, and while the server is stopped (current port unknown).
+- The navigation APIs (`resolveNavigationTarget`, `recommendMainFrameNavigation`, `recommendNewWindowNavigation`) also treat a loopback URL that differs only by port as `ProxyNavigationReason.stalePortUrl` and recommend loading (`loadProxyUrl`) the proxy URL rewritten to the current port.
+
+### Recovery from WebView Errors
+
+- `recoverFromWebResourceError()` evaluates the failing URL reported by the WebView and attempts recovery only when one of the following holds:
+  - The failing URL host and port match the current proxy
+  - The failing URL uses a loopback host and only the port differs from the current port
+- For any other URL (upstream server or external site) no recovery is attempted and `cause` is reported as `unrelated`. A missing `failingUrl` also yields `unrelated`.
+- `errorCode` and `isMainFrame` are only recorded as diagnostics and are not used to decide whether to recover.
+- When recovery was attempted, `reloadUri` carries `failingUrl` rewritten to the current port. The same URL is carried even when the port did not change. It is `null` when recovery was not possible.
+- This API returns no end-user message. Presenting information to the end user is the responsibility of the host app.
+
+### App Lifecycle Integration
+
+- `ProxyLifecycleGuard` is registered as a `WidgetsBindingObserver` and runs `ensureRunning()` when the app transitions to `resumed`.
+- `onRecovered` is invoked only when a rebind happened. It is not invoked when `probe()` succeeds.
+- `onFailed` is invoked when recovery was not possible. Nothing happens when it is omitted.
+- The time of the transition to `paused` is retained, and the elapsed time until `resumed` is recorded as `downtimeMs` in events and diagnostics.
+- When `currentUrlProvider` is supplied, `reloadUri` after recovery is that URL rewritten to the current port. When it is omitted and the port did not change, `reloadUri` is `null`.
+- This library never reloads the WebView. The host app performs the load using the `reloadUri` supplied to `onRecovered`. When `reloadUri` is `null`, the host app reloads the current URL itself.
+
+### Periodic Health Check
+
+- When `ProxyConfig.healthCheckInterval` is greater than zero, `probe()` runs at that interval and recovery is attempted on failure. The default is zero (disabled).
+- The responsiveness-check timeout for the periodic check follows `healthCheckInterval`, clamped between 500 milliseconds and 2 seconds.
+- Timers are assumed not to fire while the app is in the background, so recovery after a long idle period relies primarily on the `resumed` check performed by `ProxyLifecycleGuard`.
+
+### Keep-Alive and Idle Timeout
+
+- The internal HTTP server idle timeout is configured with `ProxyConfig.serverIdleTimeout` (default 120 seconds).
+- Keep-alive connections that receive no request within the configured time are closed by the server.
 
 ## [3] Static Resource Detection
 
@@ -194,7 +289,7 @@ Use idempotency keys to prevent duplicate execution of the same request.
 
 - **Upstream first**: When online, the proxy forwards requests including GET/HEAD to the upstream server
 - **Browser-driven request suppression**: Whether a request is skipped because of Cache-Control is delegated to the WebView / browser HTTP cache
-- **Role of proxy cache**: The proxy cache is not an online optimization layer. It is limited to offline or timeout fallback
+- **Role of proxy cache**: The proxy cache is not an online optimization layer. It is limited to substitute responses while offline or while the upstream is unreachable (connection failure or timeout)
 
 #### Storage Policy
 
@@ -207,10 +302,11 @@ Use idempotency keys to prevent duplicate execution of the same request.
 #### Fallback Eligibility
 
 1. **When offline**: Return cached entries only when they are fresh or stale
-2. **On request timeout**: Use a fresh or stale cached entry as a substitute response only when the upstream request exceeds the request timeout
+2. **When the upstream is unreachable**: Use a fresh or stale cached entry as a substitute response when the upstream could not be reached. Connection refused, name resolution failure, a connection dropped mid-request, a TLS handshake failure, a failure to parse the upstream response, and exceeding the request timeout are all covered. It does not apply once the upstream has returned a complete status line and headers (including 4xx / 5xx)
 3. **On HTTP 4xx**: Return the upstream 4xx response as-is and do not switch to proxy cache
 4. **On HTTP 5xx**: Return the upstream 5xx response as-is and do not switch to proxy cache
 5. **When expired**: Do not return entries whose stale period has also elapsed
+6. **Upstream unreachable with no eligible cache**: GET/HEAD returns 504 (the body can be replaced with `ProxyConfig.gatewayTimeoutHtml`). Mutating requests are queued as before
 
 #### Cache Expiration Calculation Priority
 
@@ -384,7 +480,7 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ### Response Types and Headers
 
-This section describes offline responses. Timeout fallback follows the same cache selection rules, but the debug header contract is defined only for offline responses.
+This section describes offline responses. Upstream-unreachable fallback follows the same cache selection rules, but the debug header contract is defined only for offline responses.
 
 Add custom headers for debugging to offline responses:
 
@@ -491,7 +587,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **sendTimeout**: 15 seconds (request send time limit)
 - **receiveTimeout**: 30 seconds (response receive time limit)
 - **requestTimeout**: 60 seconds (entire request time limit)
-- **Timeout fallback**: GET/HEAD may fall back to persisted cache only when the request exceeds `requestTimeout`
+- **Upstream-unreachable fallback**: GET/HEAD may fall back to persisted cache when the connection to the upstream fails or the request exceeds `requestTimeout`
 
 ### Backoff Strategy
 
@@ -528,7 +624,7 @@ Manage TTL and stale periods as internal state for fallback decisions while cons
 
 #### Cache State Management
 
-Cache is managed in the following 3 states and these states are used for offline or timeout fallback decisions rather than online request suppression:
+Cache is managed in the following 3 states and these states are used for offline or upstream-unreachable fallback decisions rather than online request suppression:
 
 ##### 1. Fresh
 
@@ -541,7 +637,7 @@ Cache is managed in the following 3 states and these states are used for offline
 - **Condition**: TTL expired, but within stale period
 - **Behavior**:
   - **When Online**: Forward upstream and do not substitute from proxy cache
-  - **When Offline / On Timeout**: Eligible for substitute response from stale cache
+  - **When Offline / When Upstream Unreachable**: Eligible for substitute response from stale cache
 - **Header**: `X-Cache-Status: stale`
 
 ##### 3. Expired
@@ -605,7 +701,7 @@ Decision order during request processing:
 
 1. **Normal flow**: Forward to upstream
 2. **304 response**: Pass through as part of the browser's normal cache flow
-3. **Request timeout**: Use a fresh or stale cached entry as a substitute response, otherwise return a timeout error
+3. **Upstream unreachable (connection failure / request timeout)**: Use a fresh or stale cached entry as a substitute response, otherwise return 504
 4. **HTTP 4xx**: Return the upstream response as-is
 5. **HTTP 5xx**: Return the upstream response as-is
 
@@ -619,7 +715,7 @@ Decision order during request processing:
 
 - **Purge Execution**: Automatically execute Expired cache deletion and LRU cleanup every 1 hour
 - **State Refresh**: Periodically re-evaluate TTL / stale state of saved cache
-- **Statistics**: Log cache hit rate, stale usage rate, timeout fallback count, etc.
+- **Statistics**: Log cache hit rate, stale usage rate, upstream-unreachable fallback count, etc.
 
 ### Configuration Example
 
@@ -637,6 +733,14 @@ proxy:
     host: "127.0.0.1" # Local bind
     origin: "" # Upstream server URL (default is empty, required setting)
       # Example: "https://api.example.com"
+    preferredPort: 0 # Port to prefer when available (0=unspecified)
+    idleTimeoutSeconds: 120 # Internal server idle timeout
+
+  # Health monitoring and automatic recovery settings
+  health:
+    checkPath: "/__offline_web_proxy/health" # Health check path
+    checkIntervalSeconds: 0 # Periodic health check interval (0=disabled)
+    maxRestartAttemptsPerMinute: 5 # Rebind limit per minute
 
   # Cache settings
   cache:
@@ -645,7 +749,7 @@ proxy:
 
     # Startup warmup settings
     startup:
-      enabled: false # Prepare substitute responses for offline or timeout
+      enabled: false # Prepare substitute responses for offline or unreachable upstream
       paths: [] # Path list to fetch in advance (default is empty)
         # - "/config"
         # - "/user/profile"
@@ -816,6 +920,104 @@ await proxy.stop();
 Gets the operational state of the proxy server.
 
 - **Return Value**: `true` if server is running
+
+### Connection Recovery
+
+#### `int? get port`
+
+Returns the currently bound port number.
+
+- **Return Value**: Port number while running, `null` when not started
+
+#### `Uri? get baseUri`
+
+Returns the proxy base URI that the WebView loads.
+
+- **Return Value**: URI in `http://<host>:<port>` form, `null` when not started
+
+#### `Future<bool> probe({Duration timeout = const Duration(seconds: 2)})`
+
+Sends a request to the health check path to verify that the proxy actually responds.
+
+- **Parameters**:
+  - `timeout`: Maximum time to wait for a response (default 2 seconds)
+- **Return Value**: `true` when `204` is received, `false` on connection failure, timeout, or unexpected status
+
+```dart
+if (!await proxy.probe()) {
+  await proxy.ensureRunning();
+}
+```
+
+#### `Future<ProxyRecoveryResult> ensureRunning({Duration probeTimeout = const Duration(seconds: 2), bool force = false, Duration? downtime})`
+
+Verifies responsiveness and rebinds the server only when it does not respond.
+
+- **Parameters**:
+  - `probeTimeout`: Timeout for the responsiveness check
+  - `force`: When `true`, rebinds regardless of the check result
+  - `downtime`: Estimated downtime, recorded as `downtimeMs` in events and diagnostics
+- **Return Value**: Recovery result (`ProxyRecoveryResult`)
+- **Exceptions**: None. Failure details are carried in `cause` and `error` of the result
+
+```dart
+final result = await proxy.ensureRunning();
+if (result.restarted && result.reloadUri != null) {
+  await controller.loadRequest(result.reloadUri!);
+}
+```
+
+#### `Future<ProxyRecoveryResult> recoverFromWebResourceError({int? errorCode, String? failingUrl, bool isMainFrame = true})`
+
+Attempts recovery triggered by a resource error reported by the WebView.
+
+- **Parameters**:
+  - `errorCode`: Error code reported by the WebView (recorded as diagnostics)
+  - `failingUrl`: URL that failed
+  - `isMainFrame`: Whether the failure occurred in the main frame
+- **Return Value**: Recovery result. For URLs unrelated to the proxy, `cause` is `unrelated` and no rebind is performed
+- **Note**: No end-user message is returned. Presentation is the responsibility of the host app
+
+#### `Uri? resolveReloadUri(String lastUrl)`
+
+Rewrites a URL held by the WebView into one loadable on the current port.
+
+- **Parameters**:
+  - `lastUrl`: URL held by the WebView
+- **Return Value**: Rewritten URI, or `null` when the URL is out of scope
+
+#### `Future<ProxyDiagnostics> getDiagnostics()`
+
+Returns diagnostics about health monitoring and recovery.
+
+- **Return Value**: Diagnostics (`ProxyDiagnostics`)
+- **Purpose**: Root cause analysis and logging when a failure occurs
+
+#### `ProxyLifecycleGuard`
+
+Observer that verifies responsiveness and recovers in step with the app lifecycle.
+
+- **Constructor Arguments**:
+  - `proxy`: `OfflineWebProxy` instance to watch
+  - `onRecovered`: Callback invoked when a rebind happened
+  - `onFailed`: Callback invoked when recovery was not possible (optional)
+  - `currentUrlProvider`: Function returning the currently displayed URL (optional). Used to compute `reloadUri`
+
+```dart
+final guard = ProxyLifecycleGuard(
+  proxy: proxy,
+  currentUrlProvider: () => currentPageUrl,
+  onRecovered: (result) {
+    final reloadUri = result.reloadUri;
+    if (reloadUri != null) {
+      controller.loadRequest(reloadUri);
+    } else {
+      controller.reload();
+    }
+  },
+);
+WidgetsBinding.instance.addObserver(guard);
+```
 
 ### Cache Management
 
@@ -1325,6 +1527,13 @@ class ProxyConfig {
   final bool enableAdminApi; // Enable admin API (development only)
   final String logLevel; // Log level ("debug", "info", "warn", "error")
   final List<String> startupPaths; // Startup cache update paths
+  final int preferredPort; // Port to use when available (0=unspecified)
+  final String healthCheckPath; // Health check path (default: "/__offline_web_proxy/health")
+  final Duration healthCheckInterval; // Periodic health check interval (Duration.zero=disabled)
+  final Duration serverIdleTimeout; // Internal server idle timeout (default: 120 seconds)
+  final int maxRestartAttemptsPerMinute; // Rebind limit per minute (default: 5)
+  final String? offlineFallbackHtml; // Replacement HTML for offline responses (null=built-in page)
+  final String? gatewayTimeoutHtml; // Replacement HTML for timeout responses (null=built-in page)
 }
 ```
 
@@ -1354,9 +1563,23 @@ enum ProxyEventType {
   networkOnline, // Network restored
   networkOffline, // Network disconnected
   cacheCleared, // Cache cleared
-  errorOccurred // Error occurred
+  errorOccurred, // Error occurred
+  serverUnavailable, // Responsiveness check failed and recovery was not possible
+  serverRecovered // Recovered by rebinding
 }
 ```
+
+The `data` of `serverUnavailable` and `serverRecovered` carries the following metadata.
+
+- `cause`: Name of the `ProxyRecoveryCause`
+- `previousPort`: Port before recovery
+- `newPort`: Port after recovery (`null` on failure)
+- `portChanged`: Whether the port changed
+- `downtimeMs`: Estimated recent downtime in milliseconds (`null` when unknown)
+- `restartCount`: Number of rebinds performed
+- `probeError`: Detail of the responsiveness check or rebind failure (`null` when absent)
+- `webResourceErrorCode`: Error code passed in when recovery was triggered by a WebView error
+- `isMainFrame`: Whether the WebView failure was in the main frame, when recovery was triggered by a WebView error
 
 For `requestReceived`, `data` may include the following metadata:
 
@@ -1382,6 +1605,51 @@ For `redirectHandled`, `data` may include the following metadata:
 - `externalUrl`: URL to hand to the app for external launch
 - `navigationDisposition`: `ProxyNavigationDisposition` name
 - `navigationReason`: `ProxyNavigationReason` name
+
+#### `ProxyRecoveryResult`
+
+Class representing the result of a responsiveness check and recovery.
+
+```dart
+class ProxyRecoveryResult {
+  final ProxyRecoveryCause cause; // Result category
+  final bool restarted; // Whether a rebind was performed
+  final int? port; // Port after recovery (null when not started)
+  final bool portChanged; // Whether the port changed
+  final Uri? reloadUri; // URI the app should reload
+  final int? downtimeMs; // Estimated recent downtime in milliseconds
+  final Object? error; // Cause of a recovery failure
+}
+
+enum ProxyRecoveryCause {
+  healthy, // Responded, no rebind needed
+  notStarted, // Called before start(), out of scope
+  socketDead, // No response, rebind performed
+  stalePort, // Port mismatch, rewriting required
+  unrelated, // Failure unrelated to the proxy
+  recoveryFailed // Rebind failed or attempt limit exceeded
+}
+```
+
+#### `ProxyDiagnostics`
+
+Class representing diagnostics for health monitoring and recovery.
+
+```dart
+class ProxyDiagnostics {
+  final bool isRunning; // Running state according to the internal flag
+  final int? port; // Current port
+  final int preferredPort; // Configured preferred port
+  final int? persistedPort; // Persisted previously bound port
+  final DateTime? startedAt; // Start time
+  final DateTime? lastProbeAt; // Last responsiveness check time
+  final bool? lastProbeSucceeded; // Result of the last responsiveness check
+  final int restartCount; // Number of rebinds performed
+  final ProxyRecoveryCause? lastRecoveryCause; // Category of the last recovery
+  final String? lastRecoveryError; // Detail of the last recovery failure
+  final int? lastDowntimeMs; // Estimated recent downtime in milliseconds
+}
+```
 
 #### Exception Classes
 
