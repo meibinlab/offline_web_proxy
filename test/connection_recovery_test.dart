@@ -104,6 +104,21 @@ Future<int> _findFreePortExcluding(int excludedPort) async {
   throw StateError('空きポートを確保できませんでした');
 }
 
+/// 指定ポートへ TCP 接続できるかどうかを返す。
+Future<bool> _canConnect(int port) async {
+  try {
+    final socket = await Socket.connect(
+      '127.0.0.1',
+      port,
+      timeout: const Duration(milliseconds: 500),
+    );
+    socket.destroy();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// 実 HttpClient で GET を実行し、ステータス、ヘッダ、本文を返す。
 Future<_HttpResult> _performGet(Uri uri) async {
   final client = HttpClient();
@@ -564,26 +579,67 @@ void main() {
       });
     });
 
-    /// 復旧処理中に stop() が完了した場合は復旧を中止すること
-    test('recovery is aborted when stop completes during recovery', () async {
+    /// 復旧処理と停止処理が競合しても停止状態が維持されること
+    test('recovery does not resurrect the proxy when stop completes', () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
-        await proxy.start(config: ProxyConfig(origin: upstream!.origin));
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
         await proxy.closeServerSocketForTesting();
 
-        // 稼働確認の待機中に停止を完了させる
+        // 復旧の実行中に停止を完了させる
         final recovery = proxy.ensureRunning(
           probeTimeout: const Duration(milliseconds: 500),
         );
         await proxy.stop();
         final result = await recovery;
 
-        // 復旧は中止され失敗として返ること
-        expect(result.cause, equals(ProxyRecoveryCause.recoveryFailed));
-        expect(result.restarted, isFalse);
-        // 停止状態が維持されること（再バインドしたソケットを残さないこと）
+        // どちらが先に完了するかは環境に依存する。停止が先なら復旧は中止され、
+        // 再バインドが先でも停止処理で片付けられること
+        expect(
+          result.cause,
+          anyOf(
+            equals(ProxyRecoveryCause.recoveryFailed),
+            equals(ProxyRecoveryCause.socketDead),
+          ),
+        );
+        // 停止状態が維持されること
         expect(proxy.isRunning, isFalse);
         expect(proxy.port, isNull);
+        // 停止後にソケットが残っていないこと
+        expect(await _canConnect(port), isFalse);
+      });
+    });
+
+    /// 再バインドが先に完了した場合でも停止処理で確実に片付けられること
+    test('stop cleans up after a rebind that already completed', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+        await proxy.closeServerSocketForTesting();
+
+        // force 指定で稼働確認を省略し、再バインドを先に完了させる
+        final recovery = proxy.ensureRunning(force: true);
+        await proxy.stop();
+        final result = await recovery;
+
+        // 停止状態が維持されること
+        expect(proxy.isRunning, isFalse);
+        expect(proxy.port, isNull);
+        // 旧ポートと再バインド後のポートのいずれもソケットが残っていないこと
+        expect(await _canConnect(port), isFalse);
+        final rebindPort = result.port;
+        if (rebindPort != null) {
+          expect(await _canConnect(rebindPort), isFalse);
+        }
+
+        // キュー消化タイマーが残っていると、閉じたボックスへのアクセスで
+        // テスト完了後に非同期エラーが発生する。消化間隔を超えて待機し、
+        // タイマーが残っていないことを確認する
+        await Future<void>.delayed(const Duration(seconds: 6));
       });
     });
 

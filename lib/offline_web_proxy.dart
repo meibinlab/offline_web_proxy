@@ -308,6 +308,10 @@ class OfflineWebProxy {
   /// 旧ポート URL の読み替え対象を自インスタンスのポートに限定するために使う。
   final Set<int> _knownProxyPorts = <int>{};
 
+  /// 停止処理と再バインドを排他にするためのロック。
+  /// 停止後にソケットやバックグラウンドタイマーが残らないようにする。
+  final Semaphore _lifecycleLock = Semaphore(1);
+
   /// プロキシサーバを起動します。
   ///
   /// [config] 設定オブジェクト。省略時はデフォルト設定を使用します。
@@ -400,6 +404,13 @@ class OfflineWebProxy {
       return;
     }
 
+    // 復旧処理と同時に実行されないよう排他制御する
+    await _lifecycleLock.acquire();
+    if (!_isRunning) {
+      _lifecycleLock.release();
+      return;
+    }
+
     Object? failure;
     try {
       _queueDrainTimer?.cancel();
@@ -435,6 +446,7 @@ class OfflineWebProxy {
       _handler = null;
       // 障害解析のため診断値は残し、実行制御状態のみ初期化する
       _resetRecoveryControlState();
+      _lifecycleLock.release();
     }
 
     if (failure != null) {
@@ -887,39 +899,37 @@ class OfflineWebProxy {
   ///
   /// キャッシュ、キュー、Cookie の永続化領域は閉じずに維持します。
   Future<int> _rebindServer({int? priorPort}) async {
-    final handler = _handler;
-    if (handler == null) {
-      throw ProxyStartException('Proxy handler is not initialized', null);
-    }
-
-    final previousServer = _server;
-    _server = null;
-    if (previousServer != null) {
-      try {
-        await previousServer.close(force: true);
-      } catch (_) {
-        // OS 側で既に閉じられている場合は無視する
+    // 停止処理と同時に実行されないよう排他制御する
+    await _lifecycleLock.acquire();
+    try {
+      final handler = _handler;
+      if (handler == null || !_isRunning) {
+        // ロック取得を待つ間に stop() が完了した場合は復旧を中止する
+        throw ProxyStopException('Proxy was stopped during recovery', null);
       }
-    }
 
-    final server = await _bindServer(handler, priorPort: priorPort);
-    if (_handler == null) {
-      // 復旧中に stop() が完了した場合は、作り直したソケットを閉じて中止する
-      try {
-        await server.close(force: true);
-      } catch (_) {
-        // 閉じられない場合も復旧は中止する
+      final previousServer = _server;
+      _server = null;
+      if (previousServer != null) {
+        try {
+          await previousServer.close(force: true);
+        } catch (_) {
+          // OS 側で既に閉じられている場合は無視する
+        }
       }
-      throw ProxyStopException('Proxy was stopped during recovery', null);
+
+      final server = await _bindServer(handler, priorPort: priorPort);
+      server.idleTimeout = _config!.serverIdleTimeout;
+      _server = server;
+      _boundPort = server.port;
+      _knownProxyPorts.add(server.port);
+      _isRunning = true;
+      _startBackgroundTasks();
+
+      return server.port;
+    } finally {
+      _lifecycleLock.release();
     }
-
-    server.idleTimeout = _config!.serverIdleTimeout;
-    _server = server;
-    _boundPort = server.port;
-    _isRunning = true;
-    _startBackgroundTasks();
-
-    return server.port;
   }
 
   /// 1 分あたりの再バインド上限に達していないかを返します。
@@ -3544,11 +3554,17 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// オンライン時にキュー内のリクエストを順次上流サーバに送信し、
   /// 成功時はキューから削除、失敗時はバックオフで再試行します。
   Future<void> _drainQueue() async {
-    if (!_isOnline || _queueBox == null || _isDrainingQueue) {
+    // 停止直後にタイマーが発火した場合でも閉じたボックスへ触らない
+    final queueBox = _queueBox;
+    if (!_isRunning ||
+        !_isOnline ||
+        queueBox == null ||
+        !queueBox.isOpen ||
+        _isDrainingQueue) {
       return;
     }
 
-    if (_queueBox!.isEmpty) {
+    if (queueBox.isEmpty) {
       return;
     }
 
