@@ -139,6 +139,18 @@ mutexロックを使用してシリアライズされ、データの一貫性が
       id="instance-properties">
     <h2>Properties</h2>
     <dl class="properties">
+        <dt id="baseUri" class="property">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/baseUri.html">baseUri</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Uri-class.html">Uri</a>?</span>
+  
+
+</dt>
+<dd>
+  WebView から読み込む proxy のベース URI を取得します。
+  <div class="features"><span class="feature">no setter</span></div>
+
+</dd>
+
         <dt id="events" class="property">
   <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/events.html">events</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Stream-class.html">Stream</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/ProxyEvent-class.html">ProxyEvent</a></span>&gt;</span></span>
@@ -171,6 +183,18 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 </dt>
 <dd>
   プロキシサーバの動作状態を取得します。
+  <div class="features"><span class="feature">no setter</span></div>
+
+</dd>
+
+        <dt id="port" class="property">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/port.html">port</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span>
+  
+
+</dt>
+<dd>
+  現在バインドしているポート番号を取得します。
   <div class="features"><span class="feature">no setter</span></div>
 
 </dd>
@@ -260,6 +284,32 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 
 </dd>
 
+        <dt id="closeServerSocketForTesting" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/closeServerSocketForTesting.html">closeServerSocketForTesting</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  内部状態を変更せずサーバのソケットのみを閉じます。
+  
+
+</dd>
+
+        <dt id="ensureRunning" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/ensureRunning.html">ensureRunning</a></span><span class="signature">(<wbr>{<span class="parameter" id="ensureRunning-param-probeTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">probeTimeout</span> = <span class="default-value">const Duration(seconds: 2)</span>, </span><span class="parameter" id="ensureRunning-param-force"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">force</span> = <span class="default-value">false</span>, </span><span class="parameter" id="ensureRunning-param-downtime"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a>?</span> <span class="parameter-name">downtime</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/ProxyRecoveryResult-class.html">ProxyRecoveryResult</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  稼働確認を行い、応答しない場合のみサーバを再バインドします。
+  
+
+</dd>
+
         <dt id="getCacheList" class="callable">
   <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/getCacheList.html">getCacheList</a></span><span class="signature">(<wbr>{<span class="parameter" id="getCacheList-param-limit"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">limit</span>, </span><span class="parameter" id="getCacheList-param-offset"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">offset</span></span>})
     <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/CacheEntry-class.html">CacheEntry</a></span>&gt;</span></span>&gt;</span></span>
@@ -308,6 +358,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 </dt>
 <dd>
   保存されているCookieの一覧を取得します。
+  
+
+</dd>
+
+        <dt id="getDiagnostics" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/getDiagnostics.html">getDiagnostics</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/ProxyDiagnostics-class.html">ProxyDiagnostics</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  死活監視と復旧に関する診断情報を取得します。
   
 
 </dd>
@@ -364,6 +427,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 
 </dd>
 
+        <dt id="probe" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/probe.html">probe</a></span><span class="signature">(<wbr>{<span class="parameter" id="probe-param-timeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">timeout</span> = <span class="default-value">const Duration(seconds: 2)</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  ヘルスチェックパスへ要求を送り、proxy が実際に応答するかを確認します。
+  
+
+</dd>
+
         <dt id="recommendMainFrameNavigation" class="callable">
   <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/recommendMainFrameNavigation.html">recommendMainFrameNavigation</a></span><span class="signature">(<wbr>{<span class="parameter" id="recommendMainFrameNavigation-param-targetUrl"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">targetUrl</span>, </span><span class="parameter" id="recommendMainFrameNavigation-param-sourceUrl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">sourceUrl</span></span>})
     <span class="returntype parameter">&#8594; <a href="../offline_web_proxy/ProxyWebViewNavigationRecommendation-class.html">ProxyWebViewNavigationRecommendation</a></span>
@@ -390,6 +466,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 
 </dd>
 
+        <dt id="recoverFromWebResourceError" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/recoverFromWebResourceError.html">recoverFromWebResourceError</a></span><span class="signature">(<wbr>{<span class="parameter" id="recoverFromWebResourceError-param-errorCode"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">errorCode</span>, </span><span class="parameter" id="recoverFromWebResourceError-param-failingUrl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">failingUrl</span>, </span><span class="parameter" id="recoverFromWebResourceError-param-isMainFrame"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">isMainFrame</span> = <span class="default-value">true</span></span>})
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/ProxyRecoveryResult-class.html">ProxyRecoveryResult</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  WebView が報告したリソースエラーを起点に復旧を試みます。
+  
+
+</dd>
+
         <dt id="resolveNavigationTarget" class="callable">
   <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/resolveNavigationTarget.html">resolveNavigationTarget</a></span><span class="signature">(<wbr>{<span class="parameter" id="resolveNavigationTarget-param-targetUrl"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">targetUrl</span>, </span><span class="parameter" id="resolveNavigationTarget-param-sourceUrl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">sourceUrl</span></span>})
     <span class="returntype parameter">&#8594; <a href="../offline_web_proxy/ProxyNavigationResolution-class.html">ProxyNavigationResolution</a></span>
@@ -399,6 +488,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 </dt>
 <dd>
   WebView 遷移前に target URL を解決します。
+  
+
+</dd>
+
+        <dt id="resolveReloadUri" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/resolveReloadUri.html">resolveReloadUri</a></span><span class="signature">(<wbr><span class="parameter" id="resolveReloadUri-param-lastUrl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">lastUrl</span></span>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Uri-class.html">Uri</a>?</span>
+  </span>
+  
+
+</dt>
+<dd>
+  WebView が保持していた URL を、現行ポートで読み込める URL へ読み替えます。
   
 
 </dd>
@@ -538,7 +640,7 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.1
+      0.9.0
   </span>
 
   

@@ -57,14 +57,15 @@
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
 <a href="https://codecov.io/gh/meibinlab/offline_web_proxy"><img src="https://codecov.io/gh/meibinlab/offline_web_proxy/branch/main/graph/badge.svg" alt="Coverage"></a></p>
 <p>offline_web_proxy is a local HTTP proxy for Flutter WebView that keeps existing web applications usable inside a mobile app even when connectivity becomes unstable or temporarily unavailable.</p>
-<p>It runs on 127.0.0.1, forwards requests to one configured upstream origin while online, and limits proxy-cache usage to substitute responses when offline or when a request times out. Mutating requests are queued, and helper APIs are provided for WebView navigation, cookie reuse, and runtime monitoring.</p>
+<p>It runs on 127.0.0.1, forwards requests to one configured upstream origin while online, and limits proxy-cache usage to substitute responses when offline or when the upstream is unreachable (connection failure or request timeout). Mutating requests are queued, and helper APIs are provided for WebView navigation, cookie reuse, and runtime monitoring.</p>
 <h2 id="highlights">Highlights</h2>
 <ul>
 <li>Local proxy server for Flutter WebView</li>
-<li>Fallback cache limited to offline and request-timeout recovery</li>
+<li>Fallback cache limited to offline and unreachable-upstream recovery</li>
 <li>Offline queue for POST, PUT, and DELETE requests</li>
 <li>AES-256 encrypted cookie persistence with restore support</li>
 <li>WebView navigation helper APIs for same-origin, external, and new-window flows</li>
+<li>Connection recovery that verifies responsiveness on resume and rebinds automatically</li>
 <li>Runtime stats and event stream for monitoring and debugging</li>
 </ul>
 <h2 id="requirements">Requirements</h2>
@@ -211,6 +212,11 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
   enableAdminApi: false,
   logLevel: 'info',
   startupPaths: ['/app/config'],
+  preferredPort: 8787,
+  healthCheckPath: '/__offline_web_proxy/health',
+  healthCheckInterval: Duration.zero,
+  serverIdleTimeout: Duration(seconds: 120),
+  maxRestartAttemptsPerMinute: 5,
 );
 </code></pre>
 <p>Notes:</p>
@@ -218,7 +224,10 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>origin</code> is required and must be an absolute HTTP or HTTPS URL.</li>
 <li><code>port: 0</code> lets the OS assign a free local port.</li>
 <li><code>preferredPort</code> tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.</li>
-<li><code>startupPaths</code> is used by <code>warmupCache()</code> for paths whose fallback responses should be prepared in advance for offline or timeout scenarios.</li>
+<li><code>startupPaths</code> is used by <code>warmupCache()</code> for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.</li>
+<li><code>healthCheckPath</code> is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.</li>
+<li>Setting <code>healthCheckInterval</code> above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by <code>ProxyLifecycleGuard</code> is the primary path.</li>
+<li><code>offlineFallbackHtml</code> and <code>gatewayTimeoutHtml</code> replace the built-in offline and timeout response bodies with wording supplied by your app.</li>
 <li>The supported configuration entry point is <code>ProxyConfig</code>. The package does not currently load an external YAML file automatically.</li>
 </ul>
 <h2 id="webview-navigation-helper-apis">WebView Navigation Helper APIs</h2>
@@ -252,6 +261,62 @@ final newWindowRecommendation = proxy.recommendNewWindowNavigation(
 At startup, the proxy scans <code>AssetManifest.json</code> for files under <code>assets/static/</code> and exposes only those entries as proxy-local static resources. For example, <code>assets/static/app.css</code> is matched by the proxy URL <code>/app.css</code>, while an unlisted <code>/test.css</code> still resolves upstream.
 If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.
 For upstream <code>301</code>, <code>302</code>, <code>303</code>, <code>307</code>, and <code>308</code> responses returned to WebView, the proxy resolves <code>Location</code> explicitly instead of relying on <code>HttpClient</code> auto-follow. Same-origin redirects are rewritten to proxy URLs, relative <code>Location</code> values are resolved against the upstream request URL, and external-launch redirects are surfaced through <code>ProxyEventType.redirectHandled</code>.</p>
+<h2 id="connection-recovery-apis">Connection Recovery APIs</h2>
+<p>After device suspension or a process resume, the socket can stop responding even though the internal state still reports the server as running. In that state the WebView shows its own native error page (a message about not being able to connect to <code>127.0.0.1:...</code>), so the proxy verifies responsiveness and rebinds when the app resumes.</p>
+<pre class="language-dart"><code class="language-dart">// Hook into the app lifecycle
+final guard = ProxyLifecycleGuard(
+  proxy: proxy,
+  currentUrlProvider: () =&gt; currentPageUrl,
+  onRecovered: (result) {
+    final reloadUri = result.reloadUri;
+    if (reloadUri != null) {
+      controller.loadRequest(reloadUri);
+    } else {
+      controller.reload();
+    }
+  },
+  onFailed: (result) =&gt; showAppNotice(),
+);
+WidgetsBinding.instance.addObserver(guard);
+
+// Route WebView resource errors into recovery
+onWebResourceError: (error) async {
+  final result = await proxy.recoverFromWebResourceError(
+    errorCode: error.errorCode,
+    failingUrl: error.url,
+    isMainFrame: error.isForMainFrame ?? true,
+  );
+  if (result.cause == ProxyRecoveryCause.recoveryFailed ||
+      result.cause == ProxyRecoveryCause.unrelated) {
+    showAppNotice();
+    return;
+  }
+  final reloadUri = result.reloadUri;
+  if (reloadUri != null) {
+    await controller.loadRequest(reloadUri);
+  } else {
+    await controller.reload();
+  }
+}
+
+// Check whenever you need to
+if (!await proxy.probe()) {
+  await proxy.ensureRunning();
+}
+
+final diagnostics = await proxy.getDiagnostics();
+print('port=${diagnostics.port} restarts=${diagnostics.restartCount}');
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li><code>isRunning</code> only returns the internal flag. Use <code>probe()</code> to verify that the server actually responds.</li>
+<li><code>ensureRunning()</code> rebinds only when there is no response and keeps cache, queue, and cookie storage open. It never throws; the outcome is carried in <code>ProxyRecoveryResult</code>.</li>
+<li>A rebind prioritizes keeping the port the WebView already holds. When the port changes, read <code>portChanged</code> and <code>port</code>.</li>
+<li>A URL that differs only by port can be rewritten with <code>resolveReloadUri()</code>. The navigation APIs treat it as <code>ProxyNavigationReason.stalePortUrl</code> and recommend loading the current port.</li>
+<li>To prevent a restart-and-reload loop, consecutive failures wait before retrying and rebinds are limited by <code>maxRestartAttemptsPerMinute</code>.</li>
+<li>This package carries no end-user wording. Decide what to show from <code>onFailed</code> or from the result of <code>recoverFromWebResourceError()</code>.</li>
+<li>See <code>example/lib/main.dart</code> for a working integration.</li>
+</ul>
 <h2 id="cookie-apis">Cookie APIs</h2>
 <p>Cookies are persisted in encrypted storage and can be restored before the proxy starts.</p>
 <pre class="language-dart"><code class="language-dart">await proxy.restoreCookies([
@@ -310,10 +375,11 @@ proxy.events.listen((event) {
 <p>Notes:</p>
 <ul>
 <li>Online GET/HEAD requests are forwarded upstream and are not short-circuited by the proxy cache.</li>
-<li>The proxy cache is used only as a substitute response for offline requests or GET/HEAD requests that exceed <code>requestTimeout</code>.</li>
+<li>The proxy cache is used only as a substitute response for offline requests or GET/HEAD requests that could not reach the upstream. Connection refused, a dropped connection, and exceeding <code>requestTimeout</code> are covered, while a 4xx / 5xx returned by the upstream is passed through. When no eligible cache exists, 504 is returned.</li>
 <li><code>warmupCache()</code> is intended to prepare fallback responses in advance, not to optimize normal online browsing.</li>
 </ul>
-<p>The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. <code>redirectHandled</code> includes fields such as <code>redirectStatusCode</code>, <code>locationHeader</code>, <code>redirectAction</code>, <code>resolvedProxyUrl</code>, and <code>externalUrl</code>.</p>
+<p>The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. <code>redirectHandled</code> includes fields such as <code>redirectStatusCode</code>, <code>locationHeader</code>, <code>redirectAction</code>, <code>resolvedProxyUrl</code>, and <code>externalUrl</code>.
+Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailable</code>, which carry <code>cause</code>, <code>previousPort</code>, <code>newPort</code>, <code>downtimeMs</code>, <code>restartCount</code>, and <code>probeError</code>.</p>
 <h2 id="platform-setup">Platform Setup</h2>
 <h3 id="ios">iOS</h3>
 <p>Allow local networking in <code>ios/Runner/Info.plist</code>:</p>
@@ -415,7 +481,7 @@ proxy.events.listen((event) {
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.1
+      0.9.0
   </span>
 
   

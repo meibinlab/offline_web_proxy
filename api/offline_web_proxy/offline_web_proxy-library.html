@@ -177,6 +177,14 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   Configuration settings for the <a href="../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a> server.
 </dd>
 
+          <dt id="ProxyDiagnostics">
+  <span class="name "><a href="../offline_web_proxy/ProxyDiagnostics-class.html">ProxyDiagnostics</a></span> 
+
+</dt>
+<dd>
+  死活監視と復旧の診断情報を表すクラスです。
+</dd>
+
           <dt id="ProxyEvent">
   <span class="name "><a href="../offline_web_proxy/ProxyEvent-class.html">ProxyEvent</a></span> 
 
@@ -185,12 +193,28 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   プロキシサーバのイベント情報を表すクラス（リアルタイム監視用）
 </dd>
 
+          <dt id="ProxyLifecycleGuard">
+  <span class="name "><a href="../offline_web_proxy/ProxyLifecycleGuard-class.html">ProxyLifecycleGuard</a></span> 
+
+</dt>
+<dd>
+  アプリのライフサイクルに連動して proxy の稼働確認と復旧を行うオブザーバです。
+</dd>
+
           <dt id="ProxyNavigationResolution">
   <span class="name "><a href="../offline_web_proxy/ProxyNavigationResolution-class.html">ProxyNavigationResolution</a></span> 
 
 </dt>
 <dd>
   WebView 遷移先の解決結果を表すクラスです。
+</dd>
+
+          <dt id="ProxyRecoveryResult">
+  <span class="name "><a href="../offline_web_proxy/ProxyRecoveryResult-class.html">ProxyRecoveryResult</a></span> 
+
+</dt>
+<dd>
+  稼働確認と復旧処理の結果を表すクラスです。
 </dd>
 
           <dt id="ProxyStats">
@@ -280,6 +304,14 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   WebView 遷移先の判定理由です。
 </dd>
 
+          <dt id="ProxyRecoveryCause">
+  <span class="name "><a href="../offline_web_proxy/ProxyRecoveryCause.html">ProxyRecoveryCause</a></span> 
+
+</dt>
+<dd>
+  稼働確認と復旧処理の判定種別です。
+</dd>
+
           <dt id="ProxyWebViewNavigationAction">
   <span class="name "><a href="../offline_web_proxy/ProxyWebViewNavigationAction.html">ProxyWebViewNavigationAction</a></span> 
 
@@ -301,6 +333,34 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
       <h2>Typedefs</h2>
 
       <dl>
+          
+  <dt id="ProxyCurrentUrlProvider" class="callable">
+    <span class="name"><a href="../offline_web_proxy/ProxyCurrentUrlProvider.html">ProxyCurrentUrlProvider</a></span><span class="signature">
+      <span class="returntype parameter">= <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>? Function<span class="signature">()</span></span>
+    </span>
+    
+
+  </dt>
+  <dd>
+    現在表示中の URL を返すコールバック関数です。
+    
+
+  </dd>
+
+          
+  <dt id="ProxyRecoveryCallback" class="callable">
+    <span class="name"><a href="../offline_web_proxy/ProxyRecoveryCallback.html">ProxyRecoveryCallback</a></span><span class="signature">
+      <span class="returntype parameter">= void Function<span class="signature">(<span class="parameter" id="param-result"><span class="type-annotation"><a href="../offline_web_proxy/ProxyRecoveryResult-class.html">ProxyRecoveryResult</a></span> <span class="parameter-name">result</span></span>)</span></span>
+    </span>
+    
+
+  </dt>
+  <dd>
+    復旧結果を受け取るコールバック関数です。
+    
+
+  </dd>
+
           
   <dt id="WarmupErrorCallback" class="callable">
     <span class="name"><a href="../offline_web_proxy/WarmupErrorCallback.html">WarmupErrorCallback</a></span><span class="signature">
@@ -444,7 +504,7 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.1
+      0.9.0
   </span>
 
   

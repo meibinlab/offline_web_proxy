@@ -103,9 +103,17 @@
 
     &#47;&#47; 設定を読み込み
     _config = config ?? await _loadDefaultConfig();
+    _validateHealthCheckPath();
+    _resetRecoveryState();
 
     &#47;&#47; ストレージを初期化
     await _initializeStorage();
+
+    &#47;&#47; 旧ポート URL の読み替え対象として、直前のバインドポートを記録
+    final persistedPort = await _loadPersistedPortForHost(_config!.host);
+    if (persistedPort != null &amp;&amp; persistedPort &gt; 0) {
+      _knownProxyPorts.add(persistedPort);
+    }
 
     &#47;&#47; 静的リソース一覧を初期化
     await _initializeStaticResourceIndex();
@@ -113,7 +121,7 @@
     &#47;&#47; 接続状態の監視を開始
     _startConnectivityMonitoring();
 
-    &#47;&#47; ルーターとミドルウェアを作成
+    &#47;&#47; ルーターとミドルウェアを作成し、再バインドで再利用できるよう保持する
     final router = _createRouter();
     final handler = const shelf.Pipeline()
         .addMiddleware(_errorHandlingMiddleware)
@@ -121,23 +129,31 @@
         .addMiddleware(_corsMiddleware)
         .addMiddleware(_statisticsMiddleware)
         .addHandler(router.call);
+    _handler = handler;
 
     &#47;&#47; サーバを起動
-    _server = await _bindServer(handler);
+    final server = await _bindServer(handler);
+    _server = server;
+    _boundPort = server.port;
+    _knownProxyPorts.add(server.port);
+    server.idleTimeout = _config!.serverIdleTimeout;
 
     _isRunning = true;
     _startedAt = DateTime.now();
 
     &#47;&#47; サーバ起動イベントを発行
     _emitEvent(ProxyEventType.serverStarted, &#39;&#39;, {
-      &#39;port&#39;: _server!.port,
+      &#39;port&#39;: server.port,
       &#39;host&#39;: _config!.host,
     });
 
     &#47;&#47; バックグラウンドタスクを開始
     _startBackgroundTasks();
 
-    return _server!.port;
+    return server.port;
+  } on ProxyStartException {
+    &#47;&#47; 設定検証などで既に理由が確定している場合はそのまま伝播する
+    rethrow;
   } catch (e) {
     throw ProxyStartException(
         &#39;Failed to start proxy server: $e&#39;, e is Exception ? e : null);
@@ -176,7 +192,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.1
+      0.9.0
   </span>
 
   

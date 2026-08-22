@@ -87,11 +87,21 @@
     return;
   }
 
+  &#47;&#47; 復旧処理と同時に実行されないよう排他制御する
+  await _lifecycleLock.acquire();
+  if (!_isRunning) {
+    _lifecycleLock.release();
+    return;
+  }
+
+  Object? failure;
   try {
     _queueDrainTimer?.cancel();
     _queueDrainTimer = null;
     _cachePurgeTimer?.cancel();
     _cachePurgeTimer = null;
+    _healthCheckTimer?.cancel();
+    _healthCheckTimer = null;
 
     await _server?.close();
     await _connectivitySubscription.cancel();
@@ -109,15 +119,25 @@
     _httpClient?.close(force: true);
     _httpClient = null;
     _staticResourceAssetMap.clear();
-
+  } catch (e) {
+    failure = e;
+  } finally {
+    &#47;&#47; 途中で失敗しても「稼働中だが実体なし」の状態を残さない
     _isRunning = false;
     _server = null;
-
-    _emitEvent(ProxyEventType.serverStopped, &#39;&#39;, {});
-  } catch (e) {
-    throw ProxyStopException(
-        &#39;Failed to stop proxy server: $e&#39;, e is Exception ? e : null);
+    _boundPort = null;
+    _handler = null;
+    &#47;&#47; 障害解析のため診断値は残し、実行制御状態のみ初期化する
+    _resetRecoveryControlState();
+    _lifecycleLock.release();
   }
+
+  if (failure != null) {
+    throw ProxyStopException(&#39;Failed to stop proxy server: $failure&#39;,
+        failure is Exception ? failure : null);
+  }
+
+  _emitEvent(ProxyEventType.serverStopped, &#39;&#39;, {});
 }</code></pre>
 </section>
 
@@ -152,7 +172,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.8.1
+      0.9.0
   </span>
 
   
