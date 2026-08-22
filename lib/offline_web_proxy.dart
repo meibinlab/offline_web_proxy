@@ -490,7 +490,8 @@ class OfflineWebProxy {
     // 死んだ keep-alive 接続を再利用しないよう、確認専用のクライアントを使う
     final client = HttpClient()..connectionTimeout = timeout;
     try {
-      final uri = Uri.parse('http://$_effectiveHost:$boundPort$_healthCheckPath');
+      final uri =
+          Uri.parse('http://$_effectiveHost:$boundPort$_healthCheckPath');
       final request = await client.getUrl(uri).timeout(timeout);
       final response = await request.close().timeout(timeout);
       await response.drain<void>();

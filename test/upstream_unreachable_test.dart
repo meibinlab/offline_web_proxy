@@ -162,8 +162,7 @@ void main() {
     );
   }
 
-  group('上流到達不能時のフォールバック（doc/specs.ja.md 【8】フォールバック利用条件）',
-      () {
+  group('上流到達不能時のフォールバック（doc/specs.ja.md 【8】フォールバック利用条件）', () {
     /// 上流へ接続できない場合、保存済みキャッシュを代替応答として返すこと
     test('serves cached response when the upstream connection fails', () async {
       await withRealHttpClient(() async {

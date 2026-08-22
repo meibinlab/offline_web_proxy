@@ -620,8 +620,7 @@ void main() {
     });
   });
 
-  group('旧ポート URL の読み替え（doc/specs.ja.md 【2】旧ポート URL の読み替え）',
-      () {
+  group('旧ポート URL の読み替え（doc/specs.ja.md 【2】旧ポート URL の読み替え）', () {
     /// 現行ポートと一致する URL はそのまま返すこと
     test('resolveReloadUri keeps a URL that already uses the current port',
         () async {
@@ -635,12 +634,14 @@ void main() {
             proxy.resolveReloadUri('http://127.0.0.1:$port/app/index.html');
 
         // 読み替え不要な URL は変化しないこと
-        expect(resolved, equals(Uri.parse('http://127.0.0.1:$port/app/index.html')));
+        expect(resolved,
+            equals(Uri.parse('http://127.0.0.1:$port/app/index.html')));
       });
     });
 
     /// ポートのみ異なる URL を現行ポートへ読み替え、パス以降を保持すること
-    test('resolveReloadUri rewrites a stale port and keeps path, query, and '
+    test(
+        'resolveReloadUri rewrites a stale port and keeps path, query, and '
         'fragment', () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
@@ -709,8 +710,7 @@ void main() {
     });
   });
 
-  group('遷移判定の stalePortUrl（doc/specs.ja.md 【2】旧ポート URL の読み替え）',
-      () {
+  group('遷移判定の stalePortUrl（doc/specs.ja.md 【2】旧ポート URL の読み替え）', () {
     /// ポートのみ異なる loopback URL が stalePortUrl として解決されること
     test('resolveNavigationTarget reports stalePortUrl for a stale port',
         () async {
@@ -776,8 +776,7 @@ void main() {
     });
   });
 
-  group('WebView エラーからの復旧（doc/specs.ja.md 【2】WebView エラーからの復旧）',
-      () {
+  group('WebView エラーからの復旧（doc/specs.ja.md 【2】WebView エラーからの復旧）', () {
     /// proxy 宛の失敗でソケット死亡時に復旧し、失敗 URL を再読込先に返すこと
     test('recoverFromWebResourceError recovers a dead socket for a proxy URL',
         () async {
@@ -1035,8 +1034,7 @@ void main() {
     });
   });
 
-  group('アイドルタイムアウト（doc/specs.ja.md 【2】keep-alive とアイドルタイムアウト）',
-      () {
+  group('アイドルタイムアウト（doc/specs.ja.md 【2】keep-alive とアイドルタイムアウト）', () {
     /// 設定時間を超えた keep-alive 接続がサーバ側から切断されること
     test('serverIdleTimeout closes an idle keep-alive connection', () async {
       await withRealHttpClient(() async {
