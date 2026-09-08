@@ -123,6 +123,19 @@ const String _defaultLoopbackHost = '127.0.0.1';
 
 /// 復旧の連続失敗時に挟む待機秒数。末尾の値は以降も維持されます。
 const List<int> _recoveryBackoffSeconds = [0, 1, 2, 5, 10];
+
+/// 起動時に接続状態の取得を待つ上限時間。
+/// プラットフォーム応答が遅い場合でも起動を止めないために設けています。
+const Duration _initialConnectivityTimeout = Duration(milliseconds: 500);
+
+/// 保存領域のキーに使うタイムスタンプの桁数。
+/// マイクロ秒値をゼロ埋めし、辞書順と時系列順を一致させます。
+const int _storageKeyTimestampDigits = 19;
+
+/// 保存領域のキーに使う連番の桁数。
+/// 同一マイクロ秒内で採番するため、この桁数を超えることは実質ありません。
+const int _storageKeySequenceDigits = 6;
+
 const Set<int> _redirectStatusCodes = {
   HttpStatus.movedPermanently,
   HttpStatus.found,
@@ -226,6 +239,10 @@ class OfflineWebProxy {
   /// 現在のオンライン状態。
   bool _isOnline = true;
 
+  /// 接続状態の変化イベントを受信済みかを示すフラグ。
+  /// 起動時の初期化が、より新しい変化イベントを上書きしないようにするために使う。
+  bool _hasReceivedConnectivityEvent = false;
+
   /// キュー消化が実行中かを示すフラグ（重複実行防止）。
   bool _isDrainingQueue = false;
 
@@ -266,6 +283,14 @@ class OfflineWebProxy {
   /// 上流サーバへの同時接続数を制限するセマフォ。
   /// WebView が短時間に多数のリクエストを投げた場合にネイティブ側のソケット枯渇を防ぐ。
   final Semaphore _upstreamSemaphore = Semaphore(50);
+
+  /// 直前に保存領域のキーへ使用したマイクロ秒。
+  /// 同一マイクロ秒内での連番採番に使う。
+  int _lastStorageKeyMicroseconds = -1;
+
+  /// 同一マイクロ秒内で採番する連番。
+  /// マイクロ秒が変わるたびに 0 へ戻す。
+  int _storageKeySequence = 0;
 
   /// 現在バインドしているポート番号。
   /// サスペンドでソケットが無効化された後も参照できるよう、サーバとは別に保持する。
@@ -353,8 +378,9 @@ class OfflineWebProxy {
       // 静的リソース一覧を初期化
       await _initializeStaticResourceIndex();
 
-      // 接続状態の監視を開始
+      // 接続状態の監視を開始し、起動時の実状態で初期値を確定する
       _startConnectivityMonitoring();
+      await _initializeOnlineState();
 
       // ルーターとミドルウェアを作成し、再バインドで再利用できるよう保持する
       final router = _createRouter();
@@ -1949,18 +1975,13 @@ class OfflineWebProxy {
   /// オンライン/オフラインの切り替わりを検知し、
   /// オンライン復帰時にキューの消化を自動実行します。
   void _startConnectivityMonitoring() {
+    _hasReceivedConnectivityEvent = false;
     _connectivitySubscription =
         Connectivity().onConnectivityChanged.listen((dynamic results) {
-      final wasOnline = _isOnline;
+      _hasReceivedConnectivityEvent = true;
 
-      // プラグインのバージョンによってConnectivityResultまたは
-      // List<ConnectivityResult>のどちらかの型で送られてくる場合がある
-      _isOnline = switch (results) {
-        List list when list.isNotEmpty =>
-          !list.every((r) => r == ConnectivityResult.none),
-        ConnectivityResult result => result != ConnectivityResult.none,
-        _ => true, // 不明な型の場合はフォールバックでオンラインと見なす（安全側）
-      };
+      final wasOnline = _isOnline;
+      _isOnline = _resolveOnlineState(results);
 
       if (wasOnline != _isOnline) {
         _emitEvent(
@@ -1976,6 +1997,53 @@ class OfflineWebProxy {
         }
       }
     });
+  }
+
+  /// 起動時のオンライン状態を実際の接続状態で初期化します。
+  ///
+  /// `onConnectivityChanged` は状態が変化したときしか通知しないため、
+  /// 機内モードや圏外で起動した場合に初期値のままオンラインと誤判定します。
+  /// これを防ぐため、起動時の接続状態を取得して初期値を確定します。
+  ///
+  /// 取得に時間がかかっても起動を止めないよう待ち時間の上限を設け、
+  /// 取得できない場合は従来どおりオンラインとみなして実リクエストの結果に委ねます。
+  Future<void> _initializeOnlineState() async {
+    try {
+      final results = await Connectivity()
+          .checkConnectivity()
+          .timeout(_initialConnectivityTimeout);
+
+      // 取得を待つ間に変化イベントを受信していた場合は、より新しいイベントを優先する
+      if (_hasReceivedConnectivityEvent) {
+        return;
+      }
+
+      _isOnline = _resolveOnlineState(results);
+    } catch (e) {
+      // 取得に失敗した場合も、変化イベントを受信済みならそちらを優先する
+      if (_hasReceivedConnectivityEvent) {
+        return;
+      }
+
+      // 取得できない環境では安全側に倒し、オンラインのまま起動を継続する
+      _isOnline = true;
+    }
+  }
+
+  /// 接続状態の通知内容からオンラインかどうかを判定します。
+  ///
+  /// [results] `connectivity_plus` から受け取った接続状態。
+  /// プラグインのバージョンによって [ConnectivityResult] または
+  /// `List<ConnectivityResult>` のどちらかで渡されるため両方を受け付けます。
+  ///
+  /// Returns: オンラインと判定した場合は `true`。
+  bool _resolveOnlineState(dynamic results) {
+    return switch (results) {
+      List list when list.isNotEmpty =>
+        !list.every((r) => r == ConnectivityResult.none),
+      ConnectivityResult result => result != ConnectivityResult.none,
+      _ => true, // 不明な型や空の通知はフォールバックでオンラインと見なす（安全側）
+    };
   }
 
   /// HTTPリクエストルーティング用のRouterを作成します。
@@ -2380,11 +2448,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         return _buildUpstreamUnreachableResponse(request.method);
       } else if (!_isReadRequestMethod(request.method)) {
         await _queueRequest(request, bodyBytes: requestBodyBytes);
-        return shelf.Response.ok('リクエストを再試行のためキューに保存しました', headers: {
-          // クライアント側で脆弱な接続を開いたままにするのを避けるため
-          // キューされたレスポンスでは接続を閉じる
-          'Connection': 'close',
-        });
+        return _buildQueuedResponse('リクエストを再試行のためキューに保存しました');
       }
 
       return shelf.Response.internalServerError(
@@ -2551,6 +2615,18 @@ window.__offline_web_proxy_web_storage_bridge = {
     );
   }
 
+  /// キューへ保存したことを伝えるレスポンスを生成します。
+  ///
+  /// クライアント側で脆弱な接続を開いたままにするのを避けるため、
+  /// オンライン経路とオフライン経路のどちらでも接続を閉じます。
+  ///
+  /// [message] 応答本文。
+  ///
+  /// Returns: キュー投入を伝えるレスポンス。
+  shelf.Response _buildQueuedResponse(String message) {
+    return shelf.Response.ok(message, headers: {'Connection': 'close'});
+  }
+
   /// オフライン時のHTTPリクエストを処理します。
   ///
   /// read系リクエストはキャッシュから配信し、ミスの場合はオフラインフォールバック。
@@ -2589,7 +2665,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       await _queueRequest(request);
       _emitEvent(ProxyEventType.requestQueued, request.url.toString(), {});
 
-      return shelf.Response.ok('オンライン復帰時に再試行するためキューに保存しました');
+      return _buildQueuedResponse('オンライン復帰時に再試行するためキューに保存しました');
     }
   }
 
@@ -3433,6 +3509,42 @@ window.__offline_web_proxy_web_storage_bridge = {
         DateTime.now().add(Duration(seconds: backoffSeconds)).toIso8601String();
   }
 
+  /// 保存領域内で重複しない一意なキーを生成します。
+  ///
+  /// マイクロ秒精度のタイムスタンプへ同一マイクロ秒内の連番を付与します。
+  /// ミリ秒精度のキーでは同一ミリ秒に保存したデータが上書きで失われるため、
+  /// 精度と連番の両方で衝突を防ぎます。
+  ///
+  /// Hive はキーの辞書順で列挙するため、タイムスタンプと連番はゼロ埋めして
+  /// 辞書順と時系列順を一致させます。既存キーと衝突した場合は連番を進めて
+  /// 再生成するため、処理は必ず終了します。
+  ///
+  /// [box] 重複を確認する保存領域。`null` の場合は確認を省略します。
+  ///
+  /// Returns: 生成された一意なキー。
+  String _generateUniqueStorageKey(Box? box) {
+    while (true) {
+      final microseconds = DateTime.now().microsecondsSinceEpoch;
+      if (microseconds == _lastStorageKeyMicroseconds) {
+        _storageKeySequence++;
+      } else {
+        _lastStorageKeyMicroseconds = microseconds;
+        _storageKeySequence = 0;
+      }
+
+      final timestampPart =
+          microseconds.toString().padLeft(_storageKeyTimestampDigits, '0');
+      final sequencePart = _storageKeySequence
+          .toString()
+          .padLeft(_storageKeySequenceDigits, '0');
+      final key = '$timestampPart-$sequencePart';
+
+      if (box == null || !box.containsKey(key)) {
+        return key;
+      }
+    }
+  }
+
   /// HTTPリクエストをキューに保存します。
   ///
   /// オフライン時や上流サーバエラー時に非-GETリクエストを
@@ -3464,7 +3576,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       'nextRetryAt': DateTime.now().toIso8601String(),
     };
 
-    final key = DateTime.now().millisecondsSinceEpoch.toString();
+    final key = _generateUniqueStorageKey(_queueBox);
     await _queueBox?.put(key, queueData);
   }
 
@@ -3570,9 +3682,14 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     _isDrainingQueue = true;
     try {
-      final keys = _queueBox!.keys.toList();
+      final keys = _sortQueueKeysByQueuedAt(queueBox);
       for (var i = 0; i < keys.length; i++) {
-        await _processQueuedItem(keys[i]);
+        // 消化中に stop() が実行された場合は閉じた保存領域へ触れない
+        if (!_isRunning || !queueBox.isOpen) {
+          break;
+        }
+
+        await _processQueuedItem(queueBox, keys[i]);
         if (i % 10 == 0) {
           await Future.delayed(Duration.zero); // UIフリーズ防止
         }
@@ -3582,9 +3699,47 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
   }
 
+  /// キューのキーを保存日時の昇順に並べ替えて返します。
+  ///
+  /// Hive はキーの辞書順で列挙するため、旧バージョンで保存したキー形式が
+  /// 残っている場合は辞書順と時系列順が一致しません。仕様【5】の FIFO 保証を
+  /// キー形式に依存せず維持するため、保存日時を基準に並べ替えます。
+  /// 保存日時が同一の場合はキーの辞書順で解決します。
+  ///
+  /// [box] 対象のキュー保存領域。
+  ///
+  /// Returns: 保存日時の昇順に並べ替えたキーの一覧。
+  List<dynamic> _sortQueueKeysByQueuedAt(Box box) {
+    final entries = <({dynamic key, DateTime queuedAt})>[];
+
+    for (final key in box.keys) {
+      final data = box.get(key) as Map?;
+      final queuedAtValue = data?['queuedAt'] as String?;
+      entries.add((
+        key: key,
+        // 保存日時が読み取れない場合は最古として扱い、再送から取り残さない
+        queuedAt: DateTime.tryParse(queuedAtValue ?? '') ??
+            DateTime.fromMillisecondsSinceEpoch(0),
+      ));
+    }
+
+    entries.sort((a, b) {
+      final comparedAt = a.queuedAt.compareTo(b.queuedAt);
+      if (comparedAt != 0) {
+        return comparedAt;
+      }
+      return a.key.toString().compareTo(b.key.toString());
+    });
+
+    return entries.map((entry) => entry.key).toList();
+  }
+
   /// キューの個別アイテムを処理します。
-  Future<void> _processQueuedItem(dynamic key) async {
-    final data = _queueBox!.get(key) as Map?;
+  ///
+  /// [box] 対象のキュー保存領域。停止処理と競合しないよう呼び出し側から受け取ります。
+  /// [key] 処理するキューのキー。
+  Future<void> _processQueuedItem(Box box, dynamic key) async {
+    final data = box.get(key) as Map?;
     if (data == null) return;
 
     final itemUrl = data['url'] as String? ?? '';
@@ -3598,11 +3753,17 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     try {
       final result = await _sendQueuedRequest(data);
+
+      // 送信中に stop() が実行された場合は閉じた保存領域へ書き込まない
+      if (!box.isOpen) {
+        return;
+      }
+
       if (result.success) {
-        await _queueBox!.delete(key);
+        await box.delete(key);
         _emitEvent(ProxyEventType.queueDrained, itemUrl, {});
       } else if (result.shouldDrop) {
-        await _queueBox!.delete(key);
+        await box.delete(key);
         await _recordDroppedRequest(
           data,
           statusCode: result.statusCode,
@@ -3615,11 +3776,15 @@ window.__offline_web_proxy_web_storage_bridge = {
         });
       } else {
         _updateRetrySchedule(data);
-        await _queueBox!.put(key, data);
+        await box.put(key, data);
       }
     } catch (e) {
+      if (!box.isOpen) {
+        return;
+      }
+
       _updateRetrySchedule(data);
-      await _queueBox!.put(key, data);
+      await box.put(key, data);
     }
   }
 
@@ -4446,8 +4611,14 @@ window.__offline_web_proxy_web_storage_bridge = {
       'errorMessage': errorMessage,
     };
 
-    final key = droppedAt.microsecondsSinceEpoch.toString();
-    await _droppedRequestBox?.put(key, droppedData);
+    final box = _droppedRequestBox;
+    // 停止処理と競合した場合は閉じた保存領域へ書き込まない
+    if (box == null || !box.isOpen) {
+      return;
+    }
+
+    final key = _generateUniqueStorageKey(box);
+    await box.put(key, droppedData);
   }
 
   /// ファイルパスからMIMEタイプを取得します。

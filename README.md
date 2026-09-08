@@ -197,6 +197,21 @@ Notes:
 - `offlineFallbackHtml` and `gatewayTimeoutHtml` replace the built-in offline and timeout response bodies with wording supplied by your app.
 - The supported configuration entry point is `ProxyConfig`. The package does not currently load an external YAML file automatically.
 
+### Recommended values for WebView front ends
+
+The defaults suit background synchronization. When the proxy sits in front of a screen a person is operating, a stalled upstream keeps the WebView waiting, and a browser engine only opens a handful of connections per origin, so a few stalled requests can freeze the whole page. Shorten the waits:
+
+```dart
+const config = ProxyConfig(
+  origin: 'https://api.example.com',
+  connectTimeout: Duration(seconds: 5),
+  requestTimeout: Duration(seconds: 20),
+  serverIdleTimeout: Duration(seconds: 60),
+);
+```
+
+Note that link-layer connectivity is not proof that the upstream is reachable. When the device is attached to a network whose upstream is down, requests still wait for `requestTimeout` before falling back to cache or to the queue.
+
 ## WebView Navigation Helper APIs
 
 Use the URL resolution APIs when your WebView needs to decide whether a target should stay inside the proxy, be rewritten to a proxy URL, or be delegated outside the app.

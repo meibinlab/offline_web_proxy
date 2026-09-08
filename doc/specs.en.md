@@ -228,21 +228,23 @@ Provides methods for cookie management. See [20] API Reference for details.
 
 ### Queue Management
 
-- **FIFO Guarantee**: Strictly maintain request order. Preserve data consistency
+- **Stored Order**: Resend in ascending order of the stored timestamp to preserve request order
+- **Unique Keys**: Derive keys from a microsecond timestamp plus a per-microsecond sequence number so that requests stored at the same moment are never overwritten
 - **Persistence**: Save queue state with Hive. Continue resending after app restart
+- **Backoff Handling**: Skip requests that are still waiting for their backoff window and send the following requests whose window has already passed
 
 ### Retry Strategy
 
-- **Exponential Backoff**: Gradually increase wait time after initial failure (1 sec → 2 sec → 4 sec...)
-- **Infinite Retry**: Retry persistently in case of network errors
-- **Jitter**: Add ±20% random wait time to avoid load concentration from simultaneous retries
+- **Staged Backoff**: Apply the seconds listed in `ProxyConfig.retryBackoffSeconds` in retry order (defaults to 1, 2, 5, 10, 20, 30 seconds), then keep using the last value
+- **Infinite Retry**: Keep retrying for network errors and 5xx responses
 
 ### Drop Conditions
 
 Remove requests from queue in the following cases:
 
-- **4xx Errors**: Client errors (authentication failure, invalid request, etc.)
-- **5xx Errors**: Server errors where retry is meaningless
+- **4xx Errors**: Client errors (authentication failure, invalid request, etc.). Resending cannot change the result, so the request is removed
+
+Network errors and 5xx errors are treated as temporary failures: they are kept in the queue and retried.
 
 ### History Management
 
@@ -250,7 +252,10 @@ Provides methods for queue management. See [20] API Reference for details.
 
 - **`getDroppedRequests()`**: Get history of dropped requests. Useful for debugging and troubleshooting
 
-## [6] Idempotency
+## [6] Idempotency: Not Implemented
+
+This chapter describes a planned specification. The current implementation neither attaches idempotency keys nor detects duplicates.
+Queued requests are resent without knowing whether the upstream already received them, so a request that the upstream completed just before the response was lost can be duplicated by the resend. Handle deduplication on the upstream server when it matters.
 
 ### Duplicate Request Prevention
 
@@ -478,6 +483,13 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ## [10] Offline Response
 
+### Online / Offline Decision
+
+- **Signal**: Uses the link-layer connectivity reported by `connectivity_plus`. It does not guarantee that the upstream server is reachable
+- **At startup**: `start()` reads the current connectivity to establish the initial value. The wait is capped (500 milliseconds); when the cap is exceeded or connectivity cannot be read, the proxy stays online as the safe default
+- **After startup**: The decision is updated on every connectivity change event. If a change event arrives while the startup read is still pending, the change event wins
+- **On coming back online**: Queue draining starts
+
 ### Response Types and Headers
 
 This section describes offline responses. Upstream-unreachable fallback follows the same cache selection rules, but the debug header contract is defined only for offline responses.
@@ -584,20 +596,18 @@ Preserve original Cache-Control header as much as possible even in offline respo
 ### Timeout Settings
 
 - **connectTimeout**: 10 seconds (TCP connection establishment time limit)
-- **sendTimeout**: 15 seconds (request send time limit)
-- **receiveTimeout**: 30 seconds (response receive time limit)
-- **requestTimeout**: 60 seconds (entire request time limit)
+- **requestTimeout**: 60 seconds (applied separately to receiving upstream headers and receiving the body)
 - **Upstream-unreachable fallback**: GET/HEAD may fall back to persisted cache when the connection to the upstream fails or the request exceeds `requestTimeout`
 
 ### Backoff Strategy
 
-- **Interval**: Gradual extension of [1, 2, 5, 10, 20, 30] seconds
-- **Retry**: Infinite retry (in case of network errors)
-- **Jitter**: Add ±20% random element for load distribution
+- **Interval**: Gradual extension defined by `ProxyConfig.retryBackoffSeconds` (defaults to [1, 2, 5, 10, 20, 30] seconds)
+- **Retry**: Infinite retry (for network errors and 5xx responses)
 
 ### Queue Processing
 
-- **Drain Interval**: Check queue every 3 seconds and process unsent requests
+- **Drain Interval**: Check queue every 5 seconds and process unsent requests
+- **Immediate Drain**: Draining also starts as soon as the proxy detects that connectivity is back
 
 ## [16] Cache Capacity and TTL
 

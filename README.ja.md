@@ -197,6 +197,21 @@ const config = ProxyConfig(
 - `offlineFallbackHtml` と `gatewayTimeoutHtml` を指定すると、オフライン応答とタイムアウト応答の HTML をアプリ側の文言へ差し替えられます。
 - 現在サポートされる設定入口は `ProxyConfig` です。外部 YAML の自動読込は実装されていません。
 
+### WebView 用途の推奨値
+
+既定値はバックグラウンド同期を想定した値です。人が操作する画面の前段に置く場合、上流が応答しないと WebView は待たされ続けます。ブラウザエンジンは 1 つの origin に対して同時接続数を数本に制限するため、数本のリクエストが滞留すると画面全体が反応しなくなります。待ち時間を短くしてください。
+
+```dart
+const config = ProxyConfig(
+  origin: 'https://api.example.com',
+  connectTimeout: Duration(seconds: 5),
+  requestTimeout: Duration(seconds: 20),
+  serverIdleTimeout: Duration(seconds: 60),
+);
+```
+
+なお、リンク層が接続済みでも上流へ到達できるとは限りません。ネットワークには接続しているが上流が停止している環境では、キャッシュやキューへ切り替わるまで `requestTimeout` の時間だけ待つことになります。
+
 ## WebView 遷移補助 API
 
 WebView 側で「proxy 内に残すか」「proxy URL に戻すか」「外部へ委譲するか」を判断したい場合は URL 解決 API を使います。
