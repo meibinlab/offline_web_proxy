@@ -78,18 +78,32 @@ Future<void> _emitConnectivity(List<String> statuses) async {
   );
 }
 
+/// ページ遷移としてリクエストするためのヘッダ。
+///
+/// ブラウザエンジンが付与するヘッダを再現し、HTML のフォールバック応答を
+/// 受け取る経路を検証するために使用する。
+const Map<String, String> _navigationHeaders = {
+  'Sec-Fetch-Mode': 'navigate',
+  'Accept': 'text/html',
+};
+
 /// 実 HttpClient でリクエストを実行し、ステータスとヘッダを返す。
-Future<_HttpResult> _performRequest(Uri uri, {String method = 'GET'}) async {
+Future<_HttpResult> _performRequest(
+  Uri uri, {
+  String method = 'GET',
+  Map<String, String> headers = const {},
+}) async {
   final client = HttpClient();
   try {
     final request = await client.openUrl(method, uri);
+    headers.forEach(request.headers.set);
     final response = await request.close();
-    final headers = <String, String>{};
+    final responseHeaders = <String, String>{};
     response.headers.forEach((name, values) {
-      headers[name.toLowerCase()] = values.join(', ');
+      responseHeaders[name.toLowerCase()] = values.join(', ');
     });
     await response.drain<void>();
-    return (statusCode: response.statusCode, headers: headers);
+    return (statusCode: response.statusCode, headers: responseHeaders);
   } finally {
     client.close(force: true);
   }
@@ -185,11 +199,13 @@ void main() {
         );
 
         final stopwatch = Stopwatch()..start();
-        final result =
-            await _performRequest(Uri.parse('http://127.0.0.1:$port/page'));
+        final result = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/page'),
+          headers: _navigationHeaders,
+        );
         stopwatch.stop();
 
-        // オフライン扱いのフォールバック応答が返ること
+        // ページ遷移にはオフライン扱いのフォールバック応答が返ること
         expect(result.statusCode, equals(HttpStatus.ok));
         expect(result.headers['x-offline'], equals('1'));
         expect(result.headers['x-offline-source'], equals('fallback'));
@@ -197,6 +213,40 @@ void main() {
         expect(upstream!.receivedPaths, isEmpty);
         // 受け入れ条件どおり 1 秒以内に応答すること
         expect(stopwatch.elapsed, lessThan(_firstResponseBudget));
+      });
+    });
+
+    /// 診断情報からオンライン判定とその根拠を確認できること
+    test('reports the online decision and its source', () async {
+      await withRealHttpClient(() async {
+        initialConnectivity = <String>['none'];
+        upstream = await _startMockUpstream();
+        await proxy.start(config: ProxyConfig(origin: upstream!.origin));
+
+        final atStartup = await proxy.getDiagnostics();
+        // 起動時の取得結果が根拠になること
+        expect(atStartup.isOnline, isFalse);
+        expect(
+          atStartup.onlineDecisionSource,
+          equals(OnlineDecisionSource.initial),
+        );
+        expect(atStartup.isUpstreamReachable, isFalse);
+
+        await _emitConnectivity(['wifi']);
+
+        final afterEvent = await proxy.getDiagnostics();
+        // 変化イベントを受信した後は、その内容が根拠になること
+        expect(afterEvent.isOnline, isTrue);
+        expect(
+          afterEvent.onlineDecisionSource,
+          equals(OnlineDecisionSource.linkLayer),
+        );
+        // 上流も遮断されていないため転送できること
+        expect(afterEvent.isUpstreamReachable, isTrue);
+        expect(
+          afterEvent.upstreamCircuitState,
+          equals(UpstreamCircuitState.closed),
+        );
       });
     });
 

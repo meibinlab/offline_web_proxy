@@ -172,8 +172,23 @@ const config = ProxyConfig(
     'image/*': 2592000,
     'default': 259200,
   },
-  connectTimeout: Duration(seconds: 10),
-  requestTimeout: Duration(seconds: 60),
+  connectTimeout: Duration(seconds: 5),
+  requestTimeout: Duration(seconds: 20),
+  upstreamFailureThreshold: 3,
+  upstreamProbePath: '/',
+  upstreamProbeMethod: 'HEAD',
+  upstreamProbeTimeout: Duration(seconds: 3),
+  upstreamProbeBackoffSeconds: [1, 2, 5, 10, 30],
+  queuedResponse: ProxyResponseConfig(
+    statusCode: 202,
+    contentType: 'application/json; charset=utf-8',
+    body: '{"queued":true}',
+  ),
+  offlineMissResponse: ProxyResponseConfig(
+    statusCode: 504,
+    contentType: 'application/json; charset=utf-8',
+    body: '{"offline":true}',
+  ),
   retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
   enableAdminApi: false,
   logLevel: 'info',
@@ -195,22 +210,51 @@ Notes:
 - `healthCheckPath` is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.
 - Setting `healthCheckInterval` above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by `ProxyLifecycleGuard` is the primary path.
 - `offlineFallbackHtml` and `gatewayTimeoutHtml` replace the built-in offline and timeout response bodies with wording supplied by your app.
+- `upstreamFailureThreshold` is how many consecutive unreachable attempts stop forwarding. It prevents every request from waiting for the timeout when the link layer is up but the upstream is down. Set it to `0` to disable the behavior.
+- `upstreamProbePath`, `upstreamProbeMethod`, `upstreamProbeTimeout` and `upstreamProbeBackoffSeconds` control the reachability probe used while forwarding is stopped. Any response counts as reachable, regardless of status code.
+- `queuedResponse` and `offlineMissResponse` define the responses the proxy generates itself. Both default to JSON so that `response.json()` succeeds in the web app.
+
+### Handling offline responses in the web app
+
+An update stored while offline has not reached the upstream, so the web app must be able to tell it apart from a success. The proxy answers with `202 Accepted` and `{"queued":true}` by default, plus headers that make the decision explicit.
+
+```js
+const res = await fetch('/api/sales_histories.json', {
+  method: 'POST',
+  body: JSON.stringify(sale),
+});
+
+if (res.headers.get('X-Offline-Queued') === '1') {
+  // Not sent upstream yet; the proxy resends it once connectivity returns
+  showPendingBadge(res.headers.get('X-Offline-Queue-Id'));
+  return;
+}
+
+const saved = await res.json();
+```
+
+An offline read with no cached entry answers with `504` and `{"offline":true}` by default, so `response.ok` is false and normal error handling applies. Only page navigations (`Sec-Fetch-Mode: navigate`) receive the readable HTML fallback page.
 - The supported configuration entry point is `ProxyConfig`. The package does not currently load an external YAML file automatically.
 
-### Recommended values for WebView front ends
+### Waiting times for WebView front ends
 
-The defaults suit background synchronization. When the proxy sits in front of a screen a person is operating, a stalled upstream keeps the WebView waiting, and a browser engine only opens a handful of connections per origin, so a few stalled requests can freeze the whole page. Shorten the waits:
+The defaults (`connectTimeout` 5 seconds, `requestTimeout` 20 seconds) are tuned for sitting in front of a WebView. A person is waiting for the screen, so a stalled upstream must not keep them waiting; a browser engine only opens a handful of connections per origin, so a few stalled requests can freeze the whole page.
+
+`requestTimeout` is the deadline for one whole request. Waiting for a free connection slot, establishing the connection, receiving the headers and receiving the body share that single budget, so per-stage waits never stack up.
+
+Link-layer connectivity is not proof that the upstream is reachable. When the device is attached to a network whose upstream is down, the first few requests still wait for `requestTimeout` until the upstream circuit breaker opens; after that they fall back to cache or the queue without waiting. The worst-case wait is `requestTimeout` × `upstreamFailureThreshold`, so tune the two values together.
+
+Consider shortening `serverIdleTimeout` (120 seconds by default) to 30-60 seconds as well, so idle WebView connections do not linger.
+
+For background-synchronization workloads that can afford to wait, extend them:
 
 ```dart
 const config = ProxyConfig(
   origin: 'https://api.example.com',
-  connectTimeout: Duration(seconds: 5),
-  requestTimeout: Duration(seconds: 20),
-  serverIdleTimeout: Duration(seconds: 60),
+  connectTimeout: Duration(seconds: 10),
+  requestTimeout: Duration(seconds: 60),
 );
 ```
-
-Note that link-layer connectivity is not proof that the upstream is reachable. When the device is attached to a network whose upstream is down, requests still wait for `requestTimeout` before falling back to cache or to the queue.
 
 ## WebView Navigation Helper APIs
 
@@ -307,6 +351,24 @@ Notes:
 - To prevent a restart-and-reload loop, consecutive failures wait before retrying and rebinds are limited by `maxRestartAttemptsPerMinute`.
 - This package carries no end-user wording. Decide what to show from `onFailed` or from the result of `recoverFromWebResourceError()`.
 - See `example/lib/main.dart` for a working integration.
+
+### Upstream reachability diagnostics
+
+`getDiagnostics()` reports upstream reachability alongside the proxy's own state, which is what on-site troubleshooting needs.
+
+```dart
+final diagnostics = await proxy.getDiagnostics();
+
+print('link=${diagnostics.isOnline} (${diagnostics.onlineDecisionSource})');
+print('upstream=${diagnostics.isUpstreamReachable} '
+    '(${diagnostics.upstreamCircuitState})');
+print('failures=${diagnostics.consecutiveUpstreamFailures} '
+    'lastSuccess=${diagnostics.lastUpstreamSuccessAt}');
+```
+
+- `isOnline` is the link-layer decision and `onlineDecisionSource` says what it is based on: the value read at startup, or a later change event.
+- `isUpstreamReachable` is whether requests can actually be forwarded, reflecting both the link layer and the circuit breaker.
+- `consecutiveUpstreamFailures` and `lastUpstreamSuccessAt` show how long the upstream has been out of reach.
 
 ## Cookie APIs
 

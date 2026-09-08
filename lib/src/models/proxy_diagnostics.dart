@@ -1,4 +1,6 @@
+import 'online_decision_source.dart';
 import 'proxy_recovery_result.dart';
+import 'upstream_circuit_state.dart';
 
 /// 死活監視と復旧の診断情報を表すクラスです。
 ///
@@ -37,6 +39,27 @@ class ProxyDiagnostics {
   /// 直近の停止推定時間（ミリ秒）です。不明な場合は `null` です。
   final int? lastDowntimeMs;
 
+  /// リンク層の接続状態に基づくオンライン判定です。
+  /// 上流へ到達できるかどうかは [isUpstreamReachable] で確認します。
+  final bool isOnline;
+
+  /// [isOnline] の判定根拠です。
+  final OnlineDecisionSource onlineDecisionSource;
+
+  /// 上流へリクエストを転送できる状態かどうかです。
+  /// リンク層が接続済みで、かつサーキットブレーカが遮断していない場合に `true` です。
+  final bool isUpstreamReachable;
+
+  /// 上流到達性のサーキットブレーカ状態です。
+  final UpstreamCircuitState upstreamCircuitState;
+
+  /// 上流へ到達できなかった連続回数です。上流が応答した時点で 0 に戻ります。
+  /// 復帰確認の失敗は含まず、転送を試みたリクエストの失敗だけを数えます。
+  final int consecutiveUpstreamFailures;
+
+  /// 最後に上流へ到達できた日時です。未到達の場合は `null` です。
+  final DateTime? lastUpstreamSuccessAt;
+
   /// 診断情報を生成します。
   ///
   /// [isRunning] は内部フラグ上の稼働状態です。
@@ -50,6 +73,12 @@ class ProxyDiagnostics {
   /// [lastRecoveryCause] は最終復旧処理の判定種別です。
   /// [lastRecoveryError] は最終復旧処理の失敗内容です。
   /// [lastDowntimeMs] は直近の停止推定時間（ミリ秒）です。
+  /// [isOnline] はリンク層の接続状態に基づくオンライン判定です。
+  /// [onlineDecisionSource] は [isOnline] の判定根拠です。
+  /// [isUpstreamReachable] は上流へ転送できる状態かどうかです。
+  /// [upstreamCircuitState] は上流到達性のサーキットブレーカ状態です。
+  /// [consecutiveUpstreamFailures] は上流へ到達できなかった連続回数です。
+  /// [lastUpstreamSuccessAt] は最後に上流へ到達できた日時です。
   const ProxyDiagnostics({
     required this.isRunning,
     required this.port,
@@ -62,6 +91,12 @@ class ProxyDiagnostics {
     required this.lastRecoveryCause,
     required this.lastRecoveryError,
     required this.lastDowntimeMs,
+    required this.isOnline,
+    required this.onlineDecisionSource,
+    required this.isUpstreamReachable,
+    required this.upstreamCircuitState,
+    required this.consecutiveUpstreamFailures,
+    required this.lastUpstreamSuccessAt,
   });
 
   @override
@@ -72,6 +107,12 @@ class ProxyDiagnostics {
         'lastProbeSucceeded: $lastProbeSucceeded, '
         'restartCount: $restartCount, lastRecoveryCause: $lastRecoveryCause, '
         'lastRecoveryError: $lastRecoveryError, '
-        'lastDowntimeMs: $lastDowntimeMs}';
+        'lastDowntimeMs: $lastDowntimeMs, '
+        'isOnline: $isOnline, '
+        'onlineDecisionSource: $onlineDecisionSource, '
+        'isUpstreamReachable: $isUpstreamReachable, '
+        'upstreamCircuitState: $upstreamCircuitState, '
+        'consecutiveUpstreamFailures: $consecutiveUpstreamFailures, '
+        'lastUpstreamSuccessAt: $lastUpstreamSuccessAt}';
   }
 }

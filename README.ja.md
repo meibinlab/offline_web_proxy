@@ -172,8 +172,23 @@ const config = ProxyConfig(
     'image/*': 2592000,
     'default': 259200,
   },
-  connectTimeout: Duration(seconds: 10),
-  requestTimeout: Duration(seconds: 60),
+  connectTimeout: Duration(seconds: 5),
+  requestTimeout: Duration(seconds: 20),
+  upstreamFailureThreshold: 3,
+  upstreamProbePath: '/',
+  upstreamProbeMethod: 'HEAD',
+  upstreamProbeTimeout: Duration(seconds: 3),
+  upstreamProbeBackoffSeconds: [1, 2, 5, 10, 30],
+  queuedResponse: ProxyResponseConfig(
+    statusCode: 202,
+    contentType: 'application/json; charset=utf-8',
+    body: '{"queued":true}',
+  ),
+  offlineMissResponse: ProxyResponseConfig(
+    statusCode: 504,
+    contentType: 'application/json; charset=utf-8',
+    body: '{"offline":true}',
+  ),
   retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
   enableAdminApi: false,
   logLevel: 'info',
@@ -195,22 +210,51 @@ const config = ProxyConfig(
 - `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。Web アプリのルートと衝突する場合に変更します。
 - `healthCheckInterval` に 0 より大きい値を指定すると定期的に稼働確認を行います。既定は無効で、復帰時の確認（`ProxyLifecycleGuard`）を主経路とします。
 - `offlineFallbackHtml` と `gatewayTimeoutHtml` を指定すると、オフライン応答とタイムアウト応答の HTML をアプリ側の文言へ差し替えられます。
+- `upstreamFailureThreshold` は、上流へ到達できない状態が連続した場合に転送を止めるまでの回数です。リンク層は接続済みでも上流が落ちている環境で、リクエストが毎回タイムアウトまで待たされるのを防ぎます。0 を指定すると無効になります。
+- `upstreamProbePath`、`upstreamProbeMethod`、`upstreamProbeTimeout`、`upstreamProbeBackoffSeconds` は、転送を止めている間の復帰確認に使います。応答が返れば到達可能と判定するため、ステータスコードは問いません。
+- `queuedResponse` と `offlineMissResponse` は、proxy が自分で生成する応答の内容です。既定はどちらも JSON で、Web アプリ側の `response.json()` が成功します。
+
+### Web アプリ側でのオフライン応答の扱い
+
+オフライン時の更新系リクエストは上流へ届いていないため、成功と区別できる必要があります。proxy は既定で `202 Accepted` と `{"queued":true}` を返し、あわせて判別用のヘッダを付与します。
+
+```js
+const res = await fetch('/api/sales_histories.json', {
+  method: 'POST',
+  body: JSON.stringify(sale),
+});
+
+if (res.headers.get('X-Offline-Queued') === '1') {
+  // 上流には未送信。オンライン復帰時に proxy が再送する
+  showPendingBadge(res.headers.get('X-Offline-Queue-Id'));
+  return;
+}
+
+const saved = await res.json();
+```
+
+キャッシュが無い状態のオフライン read には、既定で `504` と `{"offline":true}` を返します。`response.ok` が false になるため、通常のエラー処理で扱えます。ページ遷移（`Sec-Fetch-Mode: navigate`）だけは、人が読める HTML のフォールバックページを返します。
 - 現在サポートされる設定入口は `ProxyConfig` です。外部 YAML の自動読込は実装されていません。
 
-### WebView 用途の推奨値
+### WebView 用途の待ち時間
 
-既定値はバックグラウンド同期を想定した値です。人が操作する画面の前段に置く場合、上流が応答しないと WebView は待たされ続けます。ブラウザエンジンは 1 つの origin に対して同時接続数を数本に制限するため、数本のリクエストが滞留すると画面全体が反応しなくなります。待ち時間を短くしてください。
+既定値（`connectTimeout` 5 秒、`requestTimeout` 20 秒）は WebView の前段に置く用途に合わせています。人が画面の前で待つため、上流が応答しない場合の待ち時間を短くしています。ブラウザエンジンは 1 つの origin に対して同時接続数を数本に制限するため、数本のリクエストが滞留すると画面全体が反応しなくなります。
+
+`requestTimeout` は 1 リクエスト全体の締め切りです。空き接続の待ち、接続確立、ヘッダ受信、本文受信をこの 1 つの予算で管理するため、段階ごとに待ち時間が積み上がることはありません。
+
+リンク層が接続済みでも上流へ到達できるとは限りません。ネットワークには接続しているが上流が停止している環境では、上流到達性のサーキットブレーカが遮断するまでの数回は `requestTimeout` の時間だけ待ちます。遮断後は待たずにキャッシュやキューへ切り替わります。最悪の待ち時間は `requestTimeout` × `upstreamFailureThreshold` になるため、この 2 つの値は合わせて調整してください。
+
+WebView 側の接続が滞留しないよう、`serverIdleTimeout`（既定 120 秒）は 30〜60 秒程度への短縮も検討してください。
+
+バックグラウンド同期のように待てる用途では、次のように延ばしてください。
 
 ```dart
 const config = ProxyConfig(
   origin: 'https://api.example.com',
-  connectTimeout: Duration(seconds: 5),
-  requestTimeout: Duration(seconds: 20),
-  serverIdleTimeout: Duration(seconds: 60),
+  connectTimeout: Duration(seconds: 10),
+  requestTimeout: Duration(seconds: 60),
 );
 ```
-
-なお、リンク層が接続済みでも上流へ到達できるとは限りません。ネットワークには接続しているが上流が停止している環境では、キャッシュやキューへ切り替わるまで `requestTimeout` の時間だけ待つことになります。
 
 ## WebView 遷移補助 API
 
@@ -307,6 +351,24 @@ print('port=${diagnostics.port} restarts=${diagnostics.restartCount}');
 - 復旧の暴走を防ぐため、連続失敗時は待機時間を挟み、1 分あたりの再バインド回数は `maxRestartAttemptsPerMinute` で制限します。
 - 利用者向けの文言は本パッケージでは持ちません。`onFailed` や `recoverFromWebResourceError()` の結果を使って、アプリ側で表示内容を決めてください。
 - 実装例は `example/lib/main.dart` にあります。
+
+### 上流到達性の診断
+
+`getDiagnostics()` は proxy 自身の状態に加えて、上流へ到達できているかを返します。現地での切り分けに使います。
+
+```dart
+final diagnostics = await proxy.getDiagnostics();
+
+print('link=${diagnostics.isOnline} (${diagnostics.onlineDecisionSource})');
+print('upstream=${diagnostics.isUpstreamReachable} '
+    '(${diagnostics.upstreamCircuitState})');
+print('failures=${diagnostics.consecutiveUpstreamFailures} '
+    'lastSuccess=${diagnostics.lastUpstreamSuccessAt}');
+```
+
+- `isOnline` はリンク層の判定、`onlineDecisionSource` はその根拠（起動時の取得か、変化イベントか）です。
+- `isUpstreamReachable` は実際に転送できる状態かどうかで、リンク層とサーキットブレーカの両方を反映します。
+- `consecutiveUpstreamFailures` と `lastUpstreamSuccessAt` で、いつから到達できていないかを確認できます。
 
 ## Cookie API
 

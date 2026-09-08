@@ -25,6 +25,15 @@ class _RealHttpOverrides extends HttpOverrides {
 /// HTTP 応答の検証に必要な要素だけを保持する型。
 typedef _HttpResult = ({int statusCode, String body});
 
+/// ページ遷移としてリクエストするためのヘッダ。
+///
+/// ブラウザエンジンが付与するヘッダを再現し、HTML のフォールバック応答を
+/// 受け取る経路を検証するために使用する。
+const Map<String, String> _navigationHeaders = {
+  'Sec-Fetch-Mode': 'navigate',
+  'Accept': 'text/html',
+};
+
 /// 応答内容を切り替えられる上流サーバのモック。
 class _MockUpstream {
   _MockUpstream(this._server) {
@@ -92,10 +101,12 @@ Future<_HttpResult> _performRequest(
   Uri uri, {
   String method = 'GET',
   String? body,
+  Map<String, String> headers = const {},
 }) async {
   final client = HttpClient();
   try {
     final request = await client.openUrl(method, uri);
+    headers.forEach(request.headers.set);
     if (body != null) {
       request.write(body);
     }
@@ -218,9 +229,10 @@ void main() {
 
         final result = await _performRequest(
           Uri.parse('http://127.0.0.1:$port/never-cached'),
+          headers: _navigationHeaders,
         );
 
-        // アプリ側が指定した本文で応答すること
+        // ページ遷移にはアプリ側が指定した本文で応答すること
         expect(result.statusCode, equals(HttpStatus.gatewayTimeout));
         expect(result.body, equals('<html>unreachable</html>'));
       });
@@ -315,10 +327,11 @@ void main() {
 
         final result = await _performRequest(
           Uri.parse('http://127.0.0.1:$port/never-cached'),
+          headers: _navigationHeaders,
         );
         await subscription.cancel();
 
-        // オフライン応答として指定した HTML を返すこと
+        // ページ遷移にはオフライン応答として指定した HTML を返すこと
         expect(result.statusCode, equals(HttpStatus.ok));
         expect(result.body, equals('<html>offline-page</html>'));
       });
@@ -340,7 +353,7 @@ void main() {
         );
 
         // キュー保存として受け付けること
-        expect(result.statusCode, equals(HttpStatus.ok));
+        expect(result.statusCode, equals(HttpStatus.accepted));
         // キューに 1 件保存されること
         expect(await proxy.getQueuedRequests(), hasLength(1));
       });

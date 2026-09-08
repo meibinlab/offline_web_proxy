@@ -490,6 +490,30 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **After startup**: The decision is updated on every connectivity change event. If a change event arrives while the startup read is still pending, the change event wins
 - **On coming back online**: Queue draining starts
 
+### Upstream Circuit Breaker
+
+Link-layer connectivity does not prove that the upstream is reachable. When the device is attached to a store Wi-Fi whose uplink is down, sits behind a captive portal, or the upstream server alone is stopped, every request would wait for `requestTimeout` before falling back. Upstream reachability is therefore tracked separately.
+
+| State | Meaning | Request handling |
+| ----- | ------- | ---------------- |
+| closed | The upstream is reachable | Forwarded to the upstream as usual |
+| open | The upstream is unreachable | Not forwarded; answered from cache or stored in the queue immediately |
+| halfOpen | A probe is in flight | Only the probe reaches the upstream; other requests are handled as in `open` |
+
+- **What counts as a failure**: Only attempts that could not reach the upstream, such as connection failures, name resolution failures, TLS handshake failures and timeouts. A 4xx or 5xx response proves the upstream is alive, so it resets the counter instead
+- **Opening condition**: The circuit opens once consecutive failures reach `ProxyConfig.upstreamFailureThreshold` (defaults to 3; `0` disables it). Failed queue resends count as well as forwarded requests
+- **While open**: Nothing is forwarded upstream, and queue draining pauses until the upstream comes back
+- **Probing**: Sends `ProxyConfig.upstreamProbeMethod` (defaults to `HEAD`) to `ProxyConfig.upstreamProbePath` (defaults to `/`) with `ProxyConfig.upstreamProbeTimeout` (defaults to 3 seconds), spaced by `ProxyConfig.upstreamProbeBackoffSeconds` (defaults to [1, 2, 5, 10, 30] seconds). Any response counts as reachable regardless of status code
+- **Link-layer events**: Regaining link-layer connectivity triggers an immediate probe but is never the sole basis for the decision. No probe runs while the link layer is down
+- **Events**: `ProxyEventType.upstreamCircuitOpened` on opening and `ProxyEventType.upstreamCircuitClosed` on closing
+- **Diagnostics**: `getDiagnostics()` exposes the following values
+  - `isOnline`: The link-layer online decision
+  - `onlineDecisionSource`: What `isOnline` is based on (`initial` for the value read at startup, `linkLayer` for a change event)
+  - `isUpstreamReachable`: Whether requests can actually be forwarded, reflecting both the link layer and the circuit breaker
+  - `upstreamCircuitState`: The circuit breaker state
+  - `consecutiveUpstreamFailures`: Consecutive attempts that could not reach the upstream (probe failures excluded)
+  - `lastUpstreamSuccessAt`: When the upstream was last reached
+
 ### Response Types and Headers
 
 This section describes offline responses. Upstream-unreachable fallback follows the same cache selection rules, but the debug header contract is defined only for offline responses.
@@ -506,17 +530,35 @@ Add custom headers for debugging to offline responses:
   - `X-Cache-Status: stale` (cache expired but used because offline)
 - **Content**: Return cached response as-is
 
-#### On Fallback
+#### On Fallback (page navigation)
 
+- **Applies to**: Requests with `Sec-Fetch-Mode: navigate`, or with `text/html` in `Accept`
 - **Status**: 200 OK
-- **Custom Headers**: `X-Offline-Source: fallback`
-- **Content**: Pre-prepared fallback page ("You are offline", etc.)
+- **Custom Headers**: `X-Offline: 1`, `X-Offline-Source: fallback`
+- **Content**: Pre-prepared fallback page (replaceable via `ProxyConfig.offlineFallbackHtml`)
 
-#### When Unsupported
+#### When Unsupported (anything but a navigation)
 
-- **Status**: 504 Gateway Timeout
-- **Custom Headers**: `X-Offline-Source: none`
-- **Content**: Error page for offline not supported
+- **Applies to**: `fetch`, `XMLHttpRequest`, images, stylesheets and other subresource requests
+- **Status**: 504 Gateway Timeout (configurable via `ProxyConfig.offlineMissResponse`)
+- **Custom Headers**: `X-Offline: 1`, `X-Offline-Source: none`
+- **Content**: `{"offline":true}` (configurable via `ProxyConfig.offlineMissResponse`)
+- **Why**: Answering a subresource with 200 and HTML looks like a success to the web app and then fails while parsing, so a failed load cannot be handled
+
+#### When Queued (update requests)
+
+- **Applies to**: POST / PUT / PATCH / DELETE while offline or while the upstream is unreachable
+- **Status**: 202 Accepted (configurable via `ProxyConfig.queuedResponse`)
+- **Custom Headers**: `X-Offline-Queued: 1`, `X-Offline-Queue-Id: <queue id>`, `Connection: close`
+- **Content**: `{"queued":true}` (configurable via `ProxyConfig.queuedResponse`)
+- **Why**: The upstream has not processed the request yet, so the web app must be able to tell it apart from a real success. The headers are always added, even when the body is customized, so the decision never depends on the body
+- **When storing fails**: Answers with 503, `{"queued":false}` and `X-Offline-Queued: 0`. Presenting an unsaved request as a success would lose it silently
+
+#### Update requests answered with an upstream 5xx
+
+- **Status and body**: The upstream response is returned as-is
+- **Custom Headers**: `X-Offline-Queued: 1` and `X-Offline-Queue-Id` are added only when the request was stored for resend
+- **Why**: Without that marker the web app cannot tell that the proxy will resend, and a person may end up submitting the same request twice
 
 ### Processing Cache-Control Response Headers
 
@@ -595,9 +637,13 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 ### Timeout Settings
 
-- **connectTimeout**: 10 seconds (TCP connection establishment time limit)
-- **requestTimeout**: 60 seconds (applied separately to receiving upstream headers and receiving the body)
+- **connectTimeout**: 5 seconds (TCP connection establishment time limit)
+- **requestTimeout**: 20 seconds (deadline for one whole request)
+- **What the deadline covers**: Waiting for a free upstream connection slot, establishing the connection, receiving the headers and receiving the body all share one budget, so per-stage waits never stack up
+- **Why the defaults are short**: In front of a WebView a person is waiting for the screen, so the defaults are shorter than they would be for background synchronization
 - **Upstream-unreachable fallback**: GET/HEAD may fall back to persisted cache when the connection to the upstream fails or the request exceeds `requestTimeout`
+- **Queue resends**: The same deadline applies to each resend attempt
+- **Warmup**: The same deadline applies to each path fetched by `warmupCache()` (its `timeout` defaults to requestTimeout)
 
 ### Backoff Strategy
 

@@ -810,10 +810,12 @@ void main() {
 
           upstreamStatus = HttpStatus.badRequest;
 
+          // 消化タイマーは 5 秒間隔のため、負荷時でも間に合う猶予を取る
           await _waitUntil(
-            () async => (await proxy.getQueuedRequests()).isEmpty,
-            timeout: const Duration(seconds: 8),
+            () async => (await proxy.getDroppedRequests()).isNotEmpty,
+            timeout: const Duration(seconds: 30),
           );
+          expect(await proxy.getQueuedRequests(), isEmpty);
 
           final droppedRequests = await proxy.getDroppedRequests();
           expect(droppedRequests, hasLength(1));
@@ -853,8 +855,8 @@ void main() {
       expect(defaultConfig.host, equals('127.0.0.1'));
       expect(defaultConfig.port, equals(0));
       expect(defaultConfig.cacheMaxSize, equals(200 * 1024 * 1024));
-      expect(defaultConfig.connectTimeout, equals(Duration(seconds: 10)));
-      expect(defaultConfig.requestTimeout, equals(Duration(seconds: 60)));
+      expect(defaultConfig.connectTimeout, equals(Duration(seconds: 5)));
+      expect(defaultConfig.requestTimeout, equals(Duration(seconds: 20)));
       expect(defaultConfig.retryBackoffSeconds, equals([1, 2, 5, 10, 20, 30]));
       expect(defaultConfig.enableAdminApi, isFalse);
       expect(defaultConfig.logLevel, equals('info'));
@@ -915,7 +917,7 @@ void main() {
       expect(partialConfig.host, equals('127.0.0.1'));
       expect(partialConfig.port, equals(0));
       expect(partialConfig.cacheMaxSize, equals(200 * 1024 * 1024));
-      expect(partialConfig.connectTimeout, equals(Duration(seconds: 10)));
+      expect(partialConfig.connectTimeout, equals(Duration(seconds: 5)));
     });
   });
 }

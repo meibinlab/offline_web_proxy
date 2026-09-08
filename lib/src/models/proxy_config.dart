@@ -1,3 +1,5 @@
+import 'proxy_response_config.dart';
+
 /// Configuration settings for the [OfflineWebProxy] server.
 ///
 /// This class defines all configurable aspects of the proxy server including
@@ -17,7 +19,7 @@
 ///   port: 8080,                    // Fixed port instead of auto-assign
 ///   preferredPort: 8787,           // Prefer this port, then fallback automatically
 ///   cacheMaxSize: 500 * 1024 * 1024, // 500MB cache
-///   connectTimeout: Duration(seconds: 5),
+///   connectTimeout: Duration(seconds: 3),
 ///   cacheTtl: {
 ///     'application/json': 1800,    // 30 min for API responses
 ///     'image/*': 604800 * 4,       // 4 weeks for images
@@ -104,20 +106,76 @@ class ProxyConfig {
   /// * `'default'`: 259200 (3 days)
   final Map<String, int> cacheStale;
 
+  /// Number of consecutive unreachable upstream attempts that opens the
+  /// upstream circuit breaker.
+  ///
+  /// Link-layer connectivity does not prove that the upstream is reachable.
+  /// When a device is attached to a network whose upstream is down, every
+  /// request would otherwise wait for [requestTimeout] before falling back.
+  /// Once this many consecutive attempts fail to reach the upstream, the proxy
+  /// treats the upstream as unavailable and serves requests from cache or the
+  /// queue immediately, without waiting.
+  ///
+  /// Only unreachable errors count: connection failures, name resolution
+  /// failures, TLS handshake failures and timeouts. A 4xx or 5xx response means
+  /// the upstream answered, so it resets the counter instead.
+  ///
+  /// Set to `0` to disable the circuit breaker.
+  ///
+  /// **Default**: `3`
+  final int upstreamFailureThreshold;
+
+  /// Path requested to check whether the upstream became reachable again.
+  ///
+  /// Used only while the upstream circuit breaker is open. Any HTTP response,
+  /// including 4xx and 5xx, counts as reachable because the goal is to detect
+  /// reachability rather than health.
+  ///
+  /// **Default**: `'/'`
+  final String upstreamProbePath;
+
+  /// HTTP method used for the upstream reachability probe.
+  ///
+  /// `HEAD` keeps the probe cheap. Change it when the upstream does not accept
+  /// `HEAD` on [upstreamProbePath].
+  ///
+  /// **Default**: `'HEAD'`
+  final String upstreamProbeMethod;
+
+  /// Timeout applied to the upstream reachability probe.
+  ///
+  /// Kept short so that a failing probe does not delay the next attempt.
+  ///
+  /// **Default**: `Duration(seconds: 3)`
+  final Duration upstreamProbeTimeout;
+
+  /// Backoff intervals between upstream reachability probes.
+  ///
+  /// Applied in order while the circuit stays open. After the last interval,
+  /// probes keep using the final value.
+  ///
+  /// **Default**: `[1, 2, 5, 10, 30]` (seconds)
+  final List<int> upstreamProbeBackoffSeconds;
+
   /// Timeout for establishing TCP connections to upstream server.
   ///
   /// If connection cannot be established within this duration,
   /// the request will be treated as a network failure.
   ///
-  /// **Default**: `Duration(seconds: 10)`
+  /// **Default**: `Duration(seconds: 5)`
   final Duration connectTimeout;
 
-  /// Total timeout for completing HTTP requests to upstream server.
+  /// Total time budget for one upstream request.
   ///
-  /// Covers the entire request lifecycle from connection to response.
-  /// Should be longer than [connectTimeout].
+  /// Acts as a deadline covering the whole attempt: waiting for a free
+  /// upstream connection slot, opening the connection, receiving the response
+  /// headers and receiving the body. Once the budget is spent, the attempt
+  /// fails and the proxy falls back to cache or to the queue.
   ///
-  /// **Default**: `Duration(seconds: 60)`
+  /// A person is usually waiting in front of a WebView, so the default is kept
+  /// short. Should be longer than [connectTimeout].
+  ///
+  /// **Default**: `Duration(seconds: 20)`
   final Duration requestTimeout;
 
   /// Backoff intervals for retrying failed queued requests.
@@ -207,6 +265,31 @@ class ProxyConfig {
   /// **Default**: `5`
   final int maxRestartAttemptsPerMinute;
 
+  /// Response returned when an update request is stored in the offline queue.
+  ///
+  /// A queued request has not reached the upstream yet, so the front end must
+  /// be able to tell this response apart from a real one. The default is
+  /// `202 Accepted` with a JSON body, and the proxy always adds
+  /// `X-Offline-Queued: 1` plus `X-Offline-Queue-Id` so the decision can be
+  /// made on a header instead of the body.
+  ///
+  /// **Default**: `202` / `application/json; charset=utf-8` / `{"queued":true}`
+  final ProxyResponseConfig queuedResponse;
+
+  /// Response returned when an offline read cannot be served from cache.
+  ///
+  /// Applies to requests that are not page navigations, such as `fetch` and
+  /// `XMLHttpRequest` calls, images and stylesheets. Page navigations keep
+  /// receiving the HTML fallback page instead, so that a person sees a
+  /// readable screen.
+  ///
+  /// The default status is `504` so that `response.ok` is false in the front
+  /// end. Returning `200` with an HTML body would make a JSON request look
+  /// successful and then fail while parsing.
+  ///
+  /// **Default**: `504` / `application/json; charset=utf-8` / `{"offline":true}`
+  final ProxyResponseConfig offlineMissResponse;
+
   /// HTML body returned instead of the built-in offline fallback page.
   ///
   /// Supply the wording that suits your app. `null` keeps the built-in page.
@@ -240,8 +323,13 @@ class ProxyConfig {
       'image/*': 2592000,
       'default': 259200,
     },
-    this.connectTimeout = const Duration(seconds: 10),
-    this.requestTimeout = const Duration(seconds: 60),
+    this.upstreamFailureThreshold = 3,
+    this.upstreamProbePath = '/',
+    this.upstreamProbeMethod = 'HEAD',
+    this.upstreamProbeTimeout = const Duration(seconds: 3),
+    this.upstreamProbeBackoffSeconds = const [1, 2, 5, 10, 30],
+    this.connectTimeout = const Duration(seconds: 5),
+    this.requestTimeout = const Duration(seconds: 20),
     this.retryBackoffSeconds = const [1, 2, 5, 10, 20, 30],
     this.enableAdminApi = false,
     this.enableWebStorageInheritance = false,
@@ -253,6 +341,16 @@ class ProxyConfig {
     this.maxRestartAttemptsPerMinute = 5,
     this.offlineFallbackHtml,
     this.gatewayTimeoutHtml,
+    this.queuedResponse = const ProxyResponseConfig(
+      statusCode: 202,
+      contentType: 'application/json; charset=utf-8',
+      body: '{"queued":true}',
+    ),
+    this.offlineMissResponse = const ProxyResponseConfig(
+      statusCode: 504,
+      contentType: 'application/json; charset=utf-8',
+      body: '{"offline":true}',
+    ),
   });
 
   @override
