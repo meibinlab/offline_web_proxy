@@ -21,6 +21,15 @@ class _RealHttpOverrides extends HttpOverrides {
   }
 }
 
+/// 隔離領域の保存名。退避に失敗する状況を作るために使用する。
+const String _quarantinedRequestBoxName = 'proxy_quarantined_requests';
+
+/// 再送を先送りしたと判断する最小の間隔。
+///
+/// 既定のバックオフ（`retryBackoffSeconds` の先頭は 1 秒）に対して、
+/// 計測誤差を見込んだ下限を指定する。
+const Duration _minimumBackoff = Duration(milliseconds: 900);
+
 /// 応答するステータスコードを切り替えられる上流サーバのモック。
 class _MockUpstream {
   _MockUpstream(this._server) {
@@ -279,6 +288,47 @@ void main() {
           await proxy.discardQuarantinedRequest(quarantined.single.id),
           isFalse,
         );
+      });
+    });
+
+    /// 隔離領域へ退避できない場合は、キューから取り除かずバックオフを適用すること
+    test('keeps the request queued with backoff when quarantine is unavailable',
+        () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+
+        // 5xx で再送用にキューへ保存させる
+        upstream!.statusCode = HttpStatus.internalServerError;
+        await _performPost(
+          Uri.parse('http://127.0.0.1:$port/api/sales'),
+          '{"total":1000}',
+        );
+        expect(await proxy.getQueuedRequests(), hasLength(1));
+
+        // 隔離領域を閉じ、退避に失敗する状況を作る
+        await Hive.box(_quarantinedRequestBoxName).close();
+
+        // 4xx を返して再送を打ち切らせる
+        upstream!.statusCode = HttpStatus.badRequest;
+        await _waitUntil(() async {
+          final queued = await proxy.getQueuedRequests();
+          return queued.isNotEmpty && queued.single.retryCount > 0;
+        });
+
+        final queued = await proxy.getQueuedRequests();
+        // 退避できない状態で消してしまわないこと
+        expect(queued, hasLength(1));
+        // 消化間隔ごとに同じ 4xx を叩き続けないよう、再送を先送りすること
+        expect(queued.single.retryCount, greaterThan(0));
+        expect(
+          queued.single.nextRetryAt.difference(queued.single.queuedAt),
+          greaterThanOrEqualTo(_minimumBackoff),
+        );
+        // 破棄したことにもしないこと
+        expect(await proxy.getDroppedRequests(), isEmpty);
       });
     });
 
