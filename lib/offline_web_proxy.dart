@@ -74,16 +74,21 @@ import 'src/models/cookie_header_builder.dart';
 import 'src/models/cookie_info.dart';
 import 'src/models/cookie_record.dart';
 import 'src/models/cookie_restore_entry.dart';
+import 'src/models/drop_policy.dart';
 import 'src/models/dropped_request.dart';
+import 'src/models/online_decision_source.dart';
 import 'src/models/proxy_config.dart';
 import 'src/models/proxy_diagnostics.dart';
 import 'src/models/proxy_event.dart';
 import 'src/models/proxy_navigation_resolution.dart';
 import 'src/models/proxy_recovery_result.dart';
+import 'src/models/proxy_response_config.dart';
 import 'src/models/proxy_stats.dart';
 import 'src/models/proxy_webview_navigation_recommendation.dart';
+import 'src/models/quarantined_request.dart';
 import 'src/models/queued_request.dart';
 import 'src/models/response_header_snapshot.dart';
+import 'src/models/upstream_circuit_state.dart';
 import 'src/models/warmup_result.dart';
 
 export 'src/exceptions/exceptions.dart';
@@ -92,16 +97,38 @@ export 'src/models/cache_entry.dart';
 export 'src/models/cache_stats.dart';
 export 'src/models/cookie_info.dart';
 export 'src/models/cookie_restore_entry.dart';
+export 'src/models/drop_policy.dart';
 export 'src/models/dropped_request.dart';
+export 'src/models/online_decision_source.dart';
 export 'src/models/proxy_config.dart';
 export 'src/models/proxy_diagnostics.dart';
 export 'src/models/proxy_event.dart';
 export 'src/models/proxy_navigation_resolution.dart';
 export 'src/models/proxy_recovery_result.dart';
+export 'src/models/proxy_response_config.dart';
 export 'src/models/proxy_stats.dart';
 export 'src/models/proxy_webview_navigation_recommendation.dart';
+export 'src/models/quarantined_request.dart';
 export 'src/models/queued_request.dart';
+export 'src/models/upstream_circuit_state.dart';
 export 'src/models/warmup_result.dart';
+
+/// 上流への同時接続数の空き待ちが締め切りを超えたことを表す例外。
+///
+/// 上流サーバの障害ではなく proxy 側の混雑が原因のため、
+/// 上流到達性の判定には数えません。
+class _UpstreamSlotTimeoutException implements Exception {
+  /// 例外を生成します。
+  ///
+  /// [message] 失敗内容の説明。
+  const _UpstreamSlotTimeoutException(this.message);
+
+  /// 失敗内容の説明。
+  final String message;
+
+  @override
+  String toString() => 'UpstreamSlotTimeoutException: $message';
+}
 
 /// キャッシュ事前更新の進捗を通知するコールバック関数。
 typedef WarmupProgressCallback = void Function(int completed, int total);
@@ -117,12 +144,59 @@ const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 const int _cookieEncryptionKeyLength = 32;
 const String _droppedRequestBoxName = 'proxy_dropped_requests';
+const String _quarantinedRequestBoxName = 'proxy_quarantined_requests';
 const Set<String> _loopbackHosts = {'127.0.0.1', 'localhost'};
 const String _defaultHealthCheckPath = '/__offline_web_proxy/health';
 const String _defaultLoopbackHost = '127.0.0.1';
 
 /// 復旧の連続失敗時に挟む待機秒数。末尾の値は以降も維持されます。
 const List<int> _recoveryBackoffSeconds = [0, 1, 2, 5, 10];
+
+/// 設定が読み込めない場合に使う既定のべき等性キーのヘッダ名。
+const String _defaultIdempotencyHeaderName = 'Idempotency-Key';
+
+/// 設定が読み込めない場合に使う既定のべき等性キーの保持期間。
+const Duration _defaultIdempotencyRetention = Duration(hours: 24);
+
+/// 設定が読み込めない場合に使う既定のキュー投入応答。
+const ProxyResponseConfig _defaultQueuedResponse = ProxyResponseConfig(
+  statusCode: 202,
+  contentType: 'application/json; charset=utf-8',
+  body: '{"queued":true}',
+);
+
+/// 設定が読み込めない場合に使う既定のオフライン時キャッシュミス応答。
+const ProxyResponseConfig _defaultOfflineMissResponse = ProxyResponseConfig(
+  statusCode: 504,
+  contentType: 'application/json; charset=utf-8',
+  body: '{"offline":true}',
+);
+
+/// 設定が読み込めない場合に使う既定の接続タイムアウト。
+const Duration _defaultConnectTimeout = Duration(seconds: 5);
+
+/// 設定が読み込めない場合に使う既定のリクエスト全体の締め切り。
+const Duration _defaultRequestTimeout = Duration(seconds: 20);
+
+/// 上流の復帰確認で使う既定のバックオフ秒数。
+/// 設定が空の場合のフォールバックとして使用します。
+const List<int> _defaultUpstreamProbeBackoffSeconds = [1, 2, 5, 10, 30];
+
+/// 起動時に接続状態の取得を待つ上限時間。
+/// プラットフォーム応答が遅い場合でも起動を止めないために設けています。
+const Duration _initialConnectivityTimeout = Duration(milliseconds: 500);
+
+/// 上流断を検知済みのためウォームアップを試行しなかった場合のメッセージ。
+const String _upstreamUnreachableWarmupMessage = '上流へ到達できないため取得しませんでした';
+
+/// 保存領域のキーに使うタイムスタンプの桁数。
+/// マイクロ秒値をゼロ埋めし、辞書順と時系列順を一致させます。
+const int _storageKeyTimestampDigits = 19;
+
+/// 保存領域のキーに使う連番の桁数。
+/// 同一マイクロ秒内で採番するため、この桁数を超えることは実質ありません。
+const int _storageKeySequenceDigits = 6;
+
 const Set<int> _redirectStatusCodes = {
   HttpStatus.movedPermanently,
   HttpStatus.found,
@@ -152,7 +226,7 @@ const List<String> _staticResourceAssetPrefixes = [
 /// final config = ProxyConfig(
 ///   origin: 'https://api.example.com',
 ///   cacheMaxSize: 100 * 1024 * 1024, // 100MBキャッシュ
-///   connectTimeout: Duration(seconds: 10),
+///   connectTimeout: Duration(seconds: 5),
 /// );
 ///
 /// // サーバを起動
@@ -226,6 +300,29 @@ class OfflineWebProxy {
   /// 現在のオンライン状態。
   bool _isOnline = true;
 
+  /// 現在のオンライン判定の根拠。
+  OnlineDecisionSource _onlineDecisionSource = OnlineDecisionSource.initial;
+
+  /// 接続状態の変化イベントを受信済みかを示すフラグ。
+  /// 起動時の初期化が、より新しい変化イベントを上書きしないようにするために使う。
+  bool _hasReceivedConnectivityEvent = false;
+
+  /// 上流到達性のサーキットブレーカ状態。
+  UpstreamCircuitState _upstreamCircuitState = UpstreamCircuitState.closed;
+
+  /// 上流へ到達できなかった連続回数。上流が応答した時点で 0 に戻す。
+  /// 復帰確認の失敗は含めず、転送を試みたリクエストの失敗だけを数える。
+  int _consecutiveUpstreamFailures = 0;
+
+  /// 最後に上流へ到達できた日時。未到達の場合は `null`。
+  DateTime? _lastUpstreamSuccessAt;
+
+  /// 上流の復帰確認を予約するタイマー。
+  Timer? _upstreamProbeTimer;
+
+  /// 復帰確認の連続失敗回数。バックオフ段階の決定に使う。
+  int _upstreamProbeAttempts = 0;
+
   /// キュー消化が実行中かを示すフラグ（重複実行防止）。
   bool _isDrainingQueue = false;
 
@@ -260,12 +357,30 @@ class OfflineWebProxy {
   /// ドロップされたリクエスト履歴の永続化ボックス。
   Box? _droppedRequestBox;
 
+  /// 上流に拒否されたリクエストの隔離領域。
+  Box? _quarantinedRequestBox;
+
+  /// べき等性キーの生成に使う乱数生成器。
+  final Random _idempotencyKeyRandom = Random.secure();
+
+  /// 未確認のドロップ履歴の件数。
+  /// `getStats()` のたびに履歴を全走査しないよう保持し、更新時に破棄する。
+  int? _unacknowledgedDroppedCount;
+
   /// 起動時に構築した静的リソースの proxy URL と asset key の対応表。
   final Map<String, String> _staticResourceAssetMap = {};
 
   /// 上流サーバへの同時接続数を制限するセマフォ。
   /// WebView が短時間に多数のリクエストを投げた場合にネイティブ側のソケット枯渇を防ぐ。
   final Semaphore _upstreamSemaphore = Semaphore(50);
+
+  /// 直前に保存領域のキーへ使用したマイクロ秒。
+  /// 同一マイクロ秒内での連番採番に使う。
+  int _lastStorageKeyMicroseconds = -1;
+
+  /// 同一マイクロ秒内で採番する連番。
+  /// マイクロ秒が変わるたびに 0 へ戻す。
+  int _storageKeySequence = 0;
 
   /// 現在バインドしているポート番号。
   /// サスペンドでソケットが無効化された後も参照できるよう、サーバとは別に保持する。
@@ -353,8 +468,12 @@ class OfflineWebProxy {
       // 静的リソース一覧を初期化
       await _initializeStaticResourceIndex();
 
-      // 接続状態の監視を開始
+      // 上流到達性の判定状態を初期化する
+      _resetUpstreamCircuit();
+
+      // 接続状態の監視を開始し、起動時の実状態で初期値を確定する
       _startConnectivityMonitoring();
+      await _initializeOnlineState();
 
       // ルーターとミドルウェアを作成し、再バインドで再利用できるよう保持する
       final router = _createRouter();
@@ -419,6 +538,8 @@ class OfflineWebProxy {
       _cachePurgeTimer = null;
       _healthCheckTimer?.cancel();
       _healthCheckTimer = null;
+      _upstreamProbeTimer?.cancel();
+      _upstreamProbeTimer = null;
 
       await _server?.close();
       await _connectivitySubscription.cancel();
@@ -431,6 +552,7 @@ class OfflineWebProxy {
       await _webStorageBox?.close();
       await _idempotencyBox?.close();
       await _droppedRequestBox?.close();
+      await _quarantinedRequestBox?.close();
 
       // HTTPクライアントを閉じる
       _httpClient?.close(force: true);
@@ -641,6 +763,12 @@ class OfflineWebProxy {
       lastRecoveryCause: _lastRecoveryCause,
       lastRecoveryError: _lastRecoveryError,
       lastDowntimeMs: _lastDowntimeMs,
+      isOnline: _isOnline,
+      onlineDecisionSource: _onlineDecisionSource,
+      isUpstreamReachable: _isUpstreamReachable,
+      upstreamCircuitState: _upstreamCircuitState,
+      consecutiveUpstreamFailures: _consecutiveUpstreamFailures,
+      lastUpstreamSuccessAt: _lastUpstreamSuccessAt,
     );
   }
 
@@ -1219,7 +1347,8 @@ class OfflineWebProxy {
   /// 指定したパス一覧でキャッシュの事前ウォームアップを実行します。
   ///
   /// [paths] ウォームアップ対象の相対パス一覧。
-  /// [timeout] 各リクエストのタイムアウト秒数。
+  /// [timeout] 各リクエストの締め切り秒数。省略時は
+  ///   [ProxyConfig.requestTimeout] を使用します。
   /// [maxConcurrency] 同時実行する最大リクエスト数。
   /// [onProgress] 進捗状態を通知するコールバック関数。
   /// [onError] エラー発生時に呼ばれるコールバック関数。
@@ -1262,8 +1391,29 @@ class OfflineWebProxy {
         await semaphore.acquire(timeout: const Duration(seconds: 30));
         try {
           final entryStartTime = DateTime.now();
+
+          // 上流断を検知済みの間は待たせず、復帰確認に判定を委ねる
+          if (_isRunning && !_isUpstreamReachable) {
+            onError?.call(path, _upstreamUnreachableWarmupMessage);
+            failureCount++;
+            onProgress?.call(index + 1, targetPaths.length);
+            return WarmupEntry(
+              path: path,
+              success: false,
+              statusCode: null,
+              errorMessage: _upstreamUnreachableWarmupMessage,
+              duration: DateTime.now().difference(entryStartTime),
+            );
+          }
+
           try {
             final response = await _fetchFromUpstream(path, timeout: timeout);
+
+            // 上流が応答した以上は到達可能とみなし、遮断中なら解除する
+            if (_isRunning) {
+              _recordUpstreamSuccess();
+            }
+
             if (response.statusCode == HttpStatus.ok) {
               final upstreamUri = _buildUpstreamUriFromParts(path: path);
               final cacheKey = _generateCacheKey(upstreamUri.toString());
@@ -1284,6 +1434,12 @@ class OfflineWebProxy {
               duration: duration,
             );
           } catch (e) {
+            // 画面操作が無い状況でも上流断を検知できるよう、判定材料に含める。
+            // 停止中は復帰確認を予約できないため数えない。
+            if (_isRunning && _shouldCountUpstreamFailure(e)) {
+              _recordUpstreamFailure();
+            }
+
             final duration = DateTime.now().difference(entryStartTime);
             onError?.call(path, e.toString());
             failureCount++;
@@ -1632,6 +1788,182 @@ class OfflineWebProxy {
     }
   }
 
+  /// ドロップされたリクエストの履歴を確認済みにします。
+  ///
+  /// 起動時に未確認の履歴を検知したあと、利用者へ提示し終えた時点で
+  /// 呼び出してください。履歴自体は削除しないため、内容は後から参照できます。
+  ///
+  /// Returns: 確認済みへ変更した件数。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 更新に失敗した場合。
+  Future<int> acknowledgeDroppedRequests() async {
+    try {
+      final box = _droppedRequestBox;
+      if (box == null || !box.isOpen) {
+        return 0;
+      }
+
+      var updated = 0;
+      for (final key in box.keys.toList()) {
+        final data = box.get(key) as Map?;
+        if (data == null || data['acknowledged'] == true) {
+          continue;
+        }
+
+        final updatedData = Map<String, dynamic>.from(data);
+        updatedData['acknowledged'] = true;
+        await box.put(key, updatedData);
+        updated++;
+      }
+
+      _unacknowledgedDroppedCount = null;
+      return updated;
+    } catch (e) {
+      throw QueueOperationException('acknowledgeDropped',
+          'ドロップされたリクエストの確認状態の更新に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// 隔離されたリクエストの一覧を取得します。
+  ///
+  /// 上流に拒否されて再送を中止したリクエストのうち、
+  /// [ProxyConfig.dropPolicy] が [DropPolicy.quarantine] の場合に退避した
+  /// ものを返します。本文は返しません。
+  ///
+  /// [limit] 取得する最大件数。
+  ///
+  /// Returns: 隔離されているリクエストの一覧。隔離した順に並びます。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 取得に失敗した場合。
+  Future<List<QuarantinedRequest>> getQuarantinedRequests({int? limit}) async {
+    try {
+      if (limit != null && limit <= 0) {
+        return const <QuarantinedRequest>[];
+      }
+
+      final box = _quarantinedRequestBox;
+      if (box == null || !box.isOpen) {
+        return const <QuarantinedRequest>[];
+      }
+
+      final requests = <QuarantinedRequest>[];
+      var index = 0;
+      for (final key in box.keys) {
+        final data = box.get(key) as Map?;
+        if (data != null) {
+          requests.add(_mapToQuarantinedRequest(key.toString(), data));
+          if (limit != null && requests.length >= limit) {
+            break;
+          }
+        }
+
+        index++;
+        if (index % 50 == 0) {
+          await Future.delayed(Duration.zero);
+        }
+      }
+
+      return requests;
+    } catch (e) {
+      throw QueueOperationException('getQuarantined',
+          '隔離されたリクエストの取得に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// 隔離されたリクエストをキューへ戻して再送します。
+  ///
+  /// 拒否の原因を解消したあとに呼び出してください。再試行回数は初期化し、
+  /// オンラインであれば直ちに送信を試みます。
+  ///
+  /// [id] [getQuarantinedRequests] が返した識別子。
+  ///
+  /// Returns: キューへ戻した場合は `true`。該当が無い場合は `false`。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 操作に失敗した場合。
+  Future<bool> retryQuarantinedRequest(String id) async {
+    try {
+      final quarantineBox = _quarantinedRequestBox;
+      final queueBox = _queueBox;
+      if (quarantineBox == null ||
+          !quarantineBox.isOpen ||
+          queueBox == null ||
+          !queueBox.isOpen) {
+        return false;
+      }
+
+      final data = quarantineBox.get(id) as Map?;
+      if (data == null) {
+        return false;
+      }
+
+      final now = DateTime.now();
+      final queueData = Map<String, dynamic>.from(data)
+        ..remove('quarantinedAt')
+        ..remove('reason')
+        ..remove('errorMessage')
+        ..remove('statusCode')
+        ..['retryCount'] = 0
+        ..['nextRetryAt'] = now.toIso8601String()
+        // 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る
+        ..['queuedAt'] = now.toIso8601String();
+
+      final key = _generateUniqueStorageKey(queueBox);
+      await queueBox.put(key, queueData);
+      await quarantineBox.delete(id);
+
+      _emitEvent(ProxyEventType.requestQueued,
+          queueData['url'] as String? ?? '', {'queueId': key});
+
+      // ignore: discarded_futures
+      _drainQueue();
+      return true;
+    } catch (e) {
+      throw QueueOperationException('retryQuarantined',
+          '隔離されたリクエストの再送に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// 隔離されたリクエストを破棄します。
+  ///
+  /// 内容を確認したうえで送信しないと判断した場合に呼び出してください。
+  ///
+  /// [id] [getQuarantinedRequests] が返した識別子。
+  ///
+  /// Returns: 破棄した場合は `true`。該当が無い場合は `false`。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 操作に失敗した場合。
+  Future<bool> discardQuarantinedRequest(String id) async {
+    try {
+      final box = _quarantinedRequestBox;
+      if (box == null || !box.isOpen || !box.containsKey(id)) {
+        return false;
+      }
+
+      await box.delete(id);
+      return true;
+    } catch (e) {
+      throw QueueOperationException('discardQuarantined',
+          '隔離されたリクエストの破棄に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// 隔離されたリクエストを全て破棄します。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 破棄に失敗した場合。
+  Future<void> clearQuarantinedRequests() async {
+    try {
+      await _quarantinedRequestBox?.clear();
+    } catch (e) {
+      throw QueueOperationException('clearQuarantined',
+          '隔離されたリクエストの破棄に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
   /// ドロップされたリクエストの履歴を全て削除します。
   ///
   /// Throws:
@@ -1639,6 +1971,7 @@ class OfflineWebProxy {
   Future<void> clearDroppedRequests() async {
     try {
       await _droppedRequestBox?.clear();
+      _unacknowledgedDroppedCount = null;
     } catch (e) {
       throw QueueOperationException('clearDropped',
           'ドロップされたリクエスト履歴の削除に失敗しました: $e', e is Exception ? e : null);
@@ -1655,6 +1988,8 @@ class OfflineWebProxy {
     try {
       final queueLength = _queueBox?.length ?? 0;
       final droppedRequestsCount = _droppedRequestBox?.length ?? 0;
+      final quarantinedCount = _quarantinedRequestBox?.length ?? 0;
+      final unacknowledgedDroppedCount = _countUnacknowledgedDroppedRequests();
       final uptime = _startedAt != null
           ? DateTime.now().difference(_startedAt!)
           : Duration.zero;
@@ -1666,6 +2001,8 @@ class OfflineWebProxy {
         cacheHitRate: _totalRequests > 0 ? _cacheHits / _totalRequests : 0.0,
         queueLength: queueLength,
         droppedRequestsCount: droppedRequestsCount,
+        unacknowledgedDroppedCount: unacknowledgedDroppedCount,
+        quarantinedCount: quarantinedCount,
         startedAt: _startedAt ?? DateTime.now(),
         uptime: uptime,
       );
@@ -1678,6 +2015,32 @@ class OfflineWebProxy {
   // ──────────────────────────────────────────────────────
   // プライベートメソッド
   // ──────────────────────────────────────────────────────
+
+  /// 未確認のドロップ履歴の件数を数えます。
+  ///
+  /// Returns: `acknowledged` が `false` の履歴件数。
+  int _countUnacknowledgedDroppedRequests() {
+    final cached = _unacknowledgedDroppedCount;
+    if (cached != null) {
+      return cached;
+    }
+
+    final box = _droppedRequestBox;
+    if (box == null || !box.isOpen) {
+      return 0;
+    }
+
+    var count = 0;
+    for (final key in box.keys) {
+      final data = box.get(key) as Map?;
+      if (data != null && data['acknowledged'] != true) {
+        count++;
+      }
+    }
+
+    _unacknowledgedDroppedCount = count;
+    return count;
+  }
 
   /// デフォルト設定を読み込みます。
   ///
@@ -1706,8 +2069,8 @@ class OfflineWebProxy {
         'image/*': 2592000,
         'default': 259200,
       },
-      connectTimeout: const Duration(seconds: 10),
-      requestTimeout: const Duration(seconds: 60),
+      connectTimeout: const Duration(seconds: 5),
+      requestTimeout: const Duration(seconds: 20),
       retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
       enableAdminApi: false,
       logLevel: 'info',
@@ -1726,6 +2089,8 @@ class OfflineWebProxy {
     await _ensureCookieStorageInitialized();
     _idempotencyBox = await Hive.openBox('proxy_idempotency');
     _droppedRequestBox = await Hive.openBox(_droppedRequestBoxName);
+    _quarantinedRequestBox = await Hive.openBox(_quarantinedRequestBoxName);
+    _unacknowledgedDroppedCount = null;
   }
 
   /// サーバ起動時に使用するポートを解決します。
@@ -1949,18 +2314,14 @@ class OfflineWebProxy {
   /// オンライン/オフラインの切り替わりを検知し、
   /// オンライン復帰時にキューの消化を自動実行します。
   void _startConnectivityMonitoring() {
+    _hasReceivedConnectivityEvent = false;
     _connectivitySubscription =
         Connectivity().onConnectivityChanged.listen((dynamic results) {
-      final wasOnline = _isOnline;
+      _hasReceivedConnectivityEvent = true;
+      _onlineDecisionSource = OnlineDecisionSource.linkLayer;
 
-      // プラグインのバージョンによってConnectivityResultまたは
-      // List<ConnectivityResult>のどちらかの型で送られてくる場合がある
-      _isOnline = switch (results) {
-        List list when list.isNotEmpty =>
-          !list.every((r) => r == ConnectivityResult.none),
-        ConnectivityResult result => result != ConnectivityResult.none,
-        _ => true, // 不明な型の場合はフォールバックでオンラインと見なす（安全側）
-      };
+      final wasOnline = _isOnline;
+      _isOnline = _resolveOnlineState(results);
 
       if (wasOnline != _isOnline) {
         _emitEvent(
@@ -1972,10 +2333,247 @@ class OfflineWebProxy {
         );
 
         if (_isOnline) {
+          // リンク層が復帰した直後は状況が変わっている可能性が高いため即確認する
+          if (_upstreamCircuitState != UpstreamCircuitState.closed) {
+            _scheduleUpstreamProbe(immediate: true);
+          }
+
           _drainQueue();
+        } else {
+          // リンク層が切れている間の復帰確認は無駄なため止める
+          _upstreamProbeTimer?.cancel();
+          _upstreamProbeTimer = null;
         }
       }
     });
+  }
+
+  /// 起動時のオンライン状態を実際の接続状態で初期化します。
+  ///
+  /// `onConnectivityChanged` は状態が変化したときしか通知しないため、
+  /// 機内モードや圏外で起動した場合に初期値のままオンラインと誤判定します。
+  /// これを防ぐため、起動時の接続状態を取得して初期値を確定します。
+  ///
+  /// 取得に時間がかかっても起動を止めないよう待ち時間の上限を設け、
+  /// 取得できない場合は従来どおりオンラインとみなして実リクエストの結果に委ねます。
+  Future<void> _initializeOnlineState() async {
+    try {
+      final results = await Connectivity()
+          .checkConnectivity()
+          .timeout(_initialConnectivityTimeout);
+
+      // 取得を待つ間に変化イベントを受信していた場合は、より新しいイベントを優先する
+      if (_hasReceivedConnectivityEvent) {
+        return;
+      }
+
+      _isOnline = _resolveOnlineState(results);
+      _onlineDecisionSource = OnlineDecisionSource.initial;
+    } catch (e) {
+      // 取得に失敗した場合も、変化イベントを受信済みならそちらを優先する
+      if (_hasReceivedConnectivityEvent) {
+        return;
+      }
+
+      // 取得できない環境では安全側に倒し、オンラインのまま起動を継続する
+      _isOnline = true;
+      _onlineDecisionSource = OnlineDecisionSource.initial;
+    }
+  }
+
+  /// 接続状態の通知内容からオンラインかどうかを判定します。
+  ///
+  /// [results] `connectivity_plus` から受け取った接続状態。
+  /// プラグインのバージョンによって [ConnectivityResult] または
+  /// `List<ConnectivityResult>` のどちらかで渡されるため両方を受け付けます。
+  ///
+  /// Returns: オンラインと判定した場合は `true`。
+  bool _resolveOnlineState(dynamic results) {
+    return switch (results) {
+      List list when list.isNotEmpty =>
+        !list.every((r) => r == ConnectivityResult.none),
+      ConnectivityResult result => result != ConnectivityResult.none,
+      _ => true, // 不明な型や空の通知はフォールバックでオンラインと見なす（安全側）
+    };
+  }
+
+  /// 上流へリクエストを転送できる状態かを返します。
+  ///
+  /// リンク層が接続済みで、かつ上流到達性のサーキットブレーカが遮断状態で
+  /// ないことを条件にします。復帰確認中（halfOpen）は確認用の要求だけを
+  /// 上流へ送り、通常のリクエストは待たせずにフォールバックへ回します。
+  bool get _isUpstreamReachable =>
+      _isOnline && _upstreamCircuitState == UpstreamCircuitState.closed;
+
+  /// 上流到達性の判定に数えるべき失敗かを返します。
+  ///
+  /// 同時接続数の空き待ちによる失敗は proxy 側の混雑が原因であり、
+  /// 上流の状態を表さないため除外します。
+  ///
+  /// [error] 発生した例外。
+  ///
+  /// Returns: 上流到達性の判定に数える場合は `true`。
+  bool _shouldCountUpstreamFailure(Object error) {
+    return _isUpstreamUnreachableError(error) &&
+        error is! _UpstreamSlotTimeoutException;
+  }
+
+  /// 上流へ到達できたことを記録します。
+  ///
+  /// 上流がステータス行を返した時点で到達可能とみなすため、4xx や 5xx でも
+  /// 成功として扱います。遮断中だった場合は遮断を解除します。
+  void _recordUpstreamSuccess() {
+    _lastUpstreamSuccessAt = DateTime.now();
+    _consecutiveUpstreamFailures = 0;
+
+    if (_upstreamCircuitState != UpstreamCircuitState.closed) {
+      _closeUpstreamCircuit();
+    }
+  }
+
+  /// 上流へ到達できなかったことを記録します。
+  ///
+  /// 連続失敗が [ProxyConfig.upstreamFailureThreshold] に達した場合は
+  /// 遮断状態へ遷移し、以降のリクエストを待たせずにフォールバックへ回します。
+  void _recordUpstreamFailure() {
+    _consecutiveUpstreamFailures++;
+
+    final threshold = _config?.upstreamFailureThreshold ?? 0;
+    if (threshold <= 0 ||
+        _upstreamCircuitState != UpstreamCircuitState.closed) {
+      return;
+    }
+
+    if (_consecutiveUpstreamFailures >= threshold) {
+      _openUpstreamCircuit();
+    }
+  }
+
+  /// 上流到達性のサーキットブレーカを遮断状態にします。
+  void _openUpstreamCircuit() {
+    _upstreamCircuitState = UpstreamCircuitState.open;
+    _upstreamProbeAttempts = 0;
+
+    _emitEvent(ProxyEventType.upstreamCircuitOpened, '', {
+      'consecutiveFailures': _consecutiveUpstreamFailures,
+      'lastSuccessAt': _lastUpstreamSuccessAt?.toIso8601String(),
+    });
+
+    _scheduleUpstreamProbe();
+  }
+
+  /// 上流到達性のサーキットブレーカを通常状態へ戻します。
+  void _closeUpstreamCircuit() {
+    _upstreamProbeTimer?.cancel();
+    _upstreamProbeTimer = null;
+    _upstreamProbeAttempts = 0;
+    _upstreamCircuitState = UpstreamCircuitState.closed;
+
+    _emitEvent(ProxyEventType.upstreamCircuitClosed, '', {
+      'lastSuccessAt': _lastUpstreamSuccessAt?.toIso8601String(),
+    });
+
+    // 遮断中に保留していた更新系リクエストを送信する
+    // ignore: discarded_futures
+    _drainQueue();
+  }
+
+  /// 上流到達性のサーキットブレーカの状態を初期化します。
+  void _resetUpstreamCircuit() {
+    _lastUpstreamSuccessAt = null;
+    _upstreamProbeTimer?.cancel();
+    _upstreamProbeTimer = null;
+    _upstreamProbeAttempts = 0;
+    _consecutiveUpstreamFailures = 0;
+    _upstreamCircuitState = UpstreamCircuitState.closed;
+  }
+
+  /// 次回の復帰確認を予約します。
+  ///
+  /// [immediate] を `true` にすると待機せずに確認します。リンク層が復帰した
+  /// 直後など、状況が変わった可能性が高い場合に使います。
+  void _scheduleUpstreamProbe({bool immediate = false}) {
+    _upstreamProbeTimer?.cancel();
+    _upstreamProbeTimer = null;
+
+    if (!_isRunning || _upstreamCircuitState == UpstreamCircuitState.closed) {
+      return;
+    }
+
+    // リンク層が切れている間は確認しても失敗するため、復帰イベントを待つ
+    if (!_isOnline) {
+      return;
+    }
+
+    final delay =
+        immediate ? Duration.zero : Duration(seconds: _upstreamProbeDelay);
+    _upstreamProbeTimer = Timer(delay, () {
+      // ignore: discarded_futures
+      _probeUpstream();
+    });
+  }
+
+  /// 現在の試行回数に対応する復帰確認の待機秒数を返します。
+  int get _upstreamProbeDelay {
+    final backoff = _config?.upstreamProbeBackoffSeconds;
+    if (backoff == null || backoff.isEmpty) {
+      return _defaultUpstreamProbeBackoffSeconds.last;
+    }
+
+    final index = _upstreamProbeAttempts;
+    return index < backoff.length ? backoff[index] : backoff.last;
+  }
+
+  /// 上流の復帰を確認し、到達できた場合は遮断を解除します。
+  Future<void> _probeUpstream() async {
+    // 実行中（halfOpen）に再度呼ばれた場合は、確認が二重に走らないようにする
+    if (!_isRunning || _upstreamCircuitState != UpstreamCircuitState.open) {
+      return;
+    }
+
+    _upstreamCircuitState = UpstreamCircuitState.halfOpen;
+    final reachable = await _sendUpstreamProbe();
+
+    if (!_isRunning) {
+      return;
+    }
+
+    if (reachable) {
+      _recordUpstreamSuccess();
+      return;
+    }
+
+    _upstreamCircuitState = UpstreamCircuitState.open;
+    _upstreamProbeAttempts++;
+    _scheduleUpstreamProbe();
+  }
+
+  /// 上流へ確認用の軽量リクエストを送ります。
+  ///
+  /// 死んだ keep-alive 接続を再利用しないよう、確認専用のクライアントを使います。
+  ///
+  /// Returns: 上流が応答した場合は `true`。ステータスコードは問いません。
+  Future<bool> _sendUpstreamProbe() async {
+    final config = _config;
+    if (config == null || config.origin.isEmpty) {
+      return false;
+    }
+
+    final timeout = config.upstreamProbeTimeout;
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final uri = _buildUpstreamUriFromParts(path: config.upstreamProbePath);
+      final request = await client
+          .openUrl(config.upstreamProbeMethod, uri)
+          .timeout(timeout);
+      final response = await request.close().timeout(timeout);
+      await response.drain<void>().timeout(timeout);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   /// HTTPリクエストルーティング用のRouterを作成します。
@@ -2105,8 +2703,8 @@ class OfflineWebProxy {
       return await _serveStaticResource(path);
     }
 
-    // オンライン/オフライン状態に基づいて処理
-    if (_isOnline) {
+    // 接続状態と上流到達性に基づいて処理
+    if (_isUpstreamReachable) {
       return await _handleOnlineRequest(request);
     } else {
       return await _handleOfflineRequest(request);
@@ -2310,12 +2908,23 @@ window.__offline_web_proxy_web_storage_bridge = {
         ? null
         : await _readRequestBodyBytes(request);
 
+    // 転送とキュー再送で同じキーを使い、timeout 後の再送を上流が重複と判別できるようにする
+    final ({String value, bool suppliedByClient})? idempotency =
+        _isReadRequestMethod(request.method) ||
+                !(_config?.enableIdempotencyKey ?? true)
+            ? null
+            : _resolveIdempotencyKey(request);
+
     // 上流サーバに転送
     try {
       final result = await _forwardToUpstream(
         request,
         requestBodyBytes: requestBodyBytes,
+        idempotencyKey: idempotency?.value,
       );
+
+      // 上流が応答した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
+      _recordUpstreamSuccess();
 
       final redirectResponse = _tryBuildHandledRedirectResponse(
         request: request,
@@ -2352,16 +2961,33 @@ window.__offline_web_proxy_web_storage_bridge = {
       }
 
       // read系以外のリクエストが失敗した場合はキューに保存
+      String? queueId;
       if (!_isReadRequestMethod(request.method) && result.statusCode >= 500) {
-        await _queueRequest(request, bodyBytes: requestBodyBytes);
+        queueId = await _queueRequest(
+          request,
+          bodyBytes: requestBodyBytes,
+          idempotency: idempotency,
+        );
       }
 
       _cacheMisses++;
       // read系の 4xx/5xx は upstream 応答をそのまま返し、
       // キャッシュフォールバックは timeout 時だけに限定する。
       // ボディを含む新しいレスポンスを返す
-      return finalResponse;
+      if (queueId == null) {
+        return finalResponse;
+      }
+
+      // 応答は upstream のまま返しつつ、再送予定であることを伝える
+      return finalResponse.change(headers: {
+        'X-Offline-Queued': '1',
+        'X-Offline-Queue-Id': queueId,
+      });
     } catch (e) {
+      if (_shouldCountUpstreamFailure(e)) {
+        _recordUpstreamFailure();
+      }
+
       // 上流へ到達できなかった read 系だけキャッシュフォールバックを許可
       if (_isReadRequestMethod(request.method) &&
           _isUpstreamUnreachableError(e)) {
@@ -2377,19 +3003,32 @@ window.__offline_web_proxy_web_storage_bridge = {
           );
         }
 
-        return _buildUpstreamUnreachableResponse(request.method);
+        return _buildUpstreamUnreachableResponse(request);
       } else if (!_isReadRequestMethod(request.method)) {
-        await _queueRequest(request, bodyBytes: requestBodyBytes);
-        return shelf.Response.ok('リクエストを再試行のためキューに保存しました', headers: {
-          // クライアント側で脆弱な接続を開いたままにするのを避けるため
-          // キューされたレスポンスでは接続を閉じる
-          'Connection': 'close',
-        });
+        final queueId = await _queueRequest(
+          request,
+          bodyBytes: requestBodyBytes,
+          idempotency: idempotency,
+        );
+        return _buildQueuedResponse(queueId);
       }
 
       return shelf.Response.internalServerError(
           body: '上流サーバエラー', headers: {'Connection': 'close'});
     }
+  }
+
+  /// 締め切りまでの残り時間を返します。
+  ///
+  /// 1 リクエストの待ち時間が段階ごとに積み上がらないよう、各段階の
+  /// タイムアウトに使います。
+  ///
+  /// [deadline] リクエスト全体の締め切り。
+  ///
+  /// Returns: 残り時間。既に超過している場合は [Duration.zero]。
+  Duration _remainingUntil(DateTime deadline) {
+    final remaining = deadline.difference(DateTime.now());
+    return remaining.isNegative ? Duration.zero : remaining;
   }
 
   Future<Uint8List> _readRequestBodyBytes(shelf.Request request) async {
@@ -2417,7 +3056,8 @@ window.__offline_web_proxy_web_storage_bridge = {
   ///
   /// Returns: 上流へ到達できなかった場合は `true`。
   bool _isUpstreamUnreachableError(Object error) {
-    return error is TimeoutException ||
+    return error is _UpstreamSlotTimeoutException ||
+        error is TimeoutException ||
         error is SocketException ||
         error is HandshakeException ||
         error is HttpException ||
@@ -2503,14 +3143,32 @@ window.__offline_web_proxy_web_storage_bridge = {
 
   /// 上流へ到達できずキャッシュも使えない場合のレスポンスを返します。
   ///
-  /// [method] リクエストメソッド。
+  /// ページ遷移には人が読める HTML を返し、`fetch` や画像などの部品要求には
+  /// [ProxyConfig.offlineMissResponse] を返します。
+  ///
+  /// キャッシュを使えなかったことを Web アプリ側が判別できるよう、
+  /// オフライン時と同じ `X-Offline-Source: none` を付与します。リンク層は
+  /// 接続済みのため `X-Offline` は付与しません。
+  ///
+  /// [request] 対象のHTTPリクエスト。
   ///
   /// Returns: 504 応答。HEAD の場合は本文を持ちません。
-  shelf.Response _buildUpstreamUnreachableResponse(String method) {
-    if (method.toUpperCase() == 'HEAD') {
+  shelf.Response _buildUpstreamUnreachableResponse(shelf.Request request) {
+    if (request.method.toUpperCase() == 'HEAD') {
       return shelf.Response(HttpStatus.gatewayTimeout, headers: {
+        'X-Offline-Source': 'none',
         'Connection': 'close',
       });
+    }
+
+    if (!_isNavigationRequest(request)) {
+      return _buildConfiguredResponse(
+        _config?.offlineMissResponse ?? _defaultOfflineMissResponse,
+        extraHeaders: {
+          'X-Offline-Source': 'none',
+          'Connection': 'close',
+        },
+      );
     }
 
     final customContent = _config?.gatewayTimeoutHtml;
@@ -2520,6 +3178,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         body: customContent,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
+          'X-Offline-Source': 'none',
           'Connection': 'close',
         },
       );
@@ -2528,17 +3187,39 @@ window.__offline_web_proxy_web_storage_bridge = {
     return shelf.Response(
       HttpStatus.gatewayTimeout,
       body: '上流サーバがタイムアウトしました',
-      headers: {'Connection': 'close'},
+      headers: {
+        'X-Offline-Source': 'none',
+        'Connection': 'close',
+      },
     );
   }
 
   /// オフライン時にキャッシュが使えない場合のレスポンスを返します。
-  shelf.Response _buildOfflineCacheMissResponse(String method) {
-    if (method.toUpperCase() == 'HEAD') {
+  ///
+  /// ページ遷移には人が読める HTML のフォールバックページを返します。
+  /// `fetch` や画像などの部品要求には [ProxyConfig.offlineMissResponse] を
+  /// 返します。既定では 504 と JSON を返し、200 と HTML で「成功したが
+  /// 解釈できない応答」になる状態を避けます。
+  ///
+  /// [request] 対象のHTTPリクエスト。
+  ///
+  /// Returns: オフライン時のフォールバック応答。
+  shelf.Response _buildOfflineCacheMissResponse(shelf.Request request) {
+    if (request.method.toUpperCase() == 'HEAD') {
       return shelf.Response(HttpStatus.gatewayTimeout, headers: {
         'X-Offline': '1',
         'X-Offline-Source': 'none',
       });
+    }
+
+    if (!_isNavigationRequest(request)) {
+      return _buildConfiguredResponse(
+        _config?.offlineMissResponse ?? _defaultOfflineMissResponse,
+        extraHeaders: {
+          'X-Offline': '1',
+          'X-Offline-Source': 'none',
+        },
+      );
     }
 
     return shelf.Response.ok(
@@ -2547,6 +3228,87 @@ window.__offline_web_proxy_web_storage_bridge = {
         'Content-Type': 'text/html; charset=utf-8',
         'X-Offline': '1',
         'X-Offline-Source': 'fallback',
+      },
+    );
+  }
+
+  /// キューへ保存したことを伝えるレスポンスを生成します。
+  ///
+  /// 応答内容は [ProxyConfig.queuedResponse] で差し替えられます。既定では
+  /// `202 Accepted` と JSON を返し、上流が処理した結果ではないことを
+  /// Web アプリ側が判別できるようにします。判別をヘッダだけで行えるよう、
+  /// `X-Offline-Queued` と `X-Offline-Queue-Id` を常に付与します。
+  ///
+  /// クライアント側で脆弱な接続を開いたままにするのを避けるため、
+  /// オンライン経路とオフライン経路のどちらでも接続を閉じます。
+  ///
+  /// [queueId] 保存したキューの ID。保存できなかった場合は `null`。
+  ///
+  /// Returns: キュー投入を伝えるレスポンス。保存できなかった場合は 503 応答。
+  shelf.Response _buildQueuedResponse(String? queueId) {
+    if (queueId == null) {
+      // 保存できていない状態で成功に見せると、送信されないまま失われる
+      return shelf.Response(
+        HttpStatus.serviceUnavailable,
+        body: '{"queued":false}',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'X-Offline-Queued': '0',
+          'Connection': 'close',
+        },
+      );
+    }
+
+    final config = _config?.queuedResponse ?? _defaultQueuedResponse;
+
+    return shelf.Response(
+      config.statusCode,
+      body: config.body,
+      headers: {
+        'Content-Type': config.contentType,
+        'X-Offline-Queued': '1',
+        'X-Offline-Queue-Id': queueId,
+        'Connection': 'close',
+      },
+    );
+  }
+
+  /// ページ遷移（ナビゲーション）の要求かどうかを判定します。
+  ///
+  /// ナビゲーションには人が読める HTML を返し、`fetch` や画像などの
+  /// 部品要求には Web アプリが解釈できる応答を返すために使います。
+  ///
+  /// [request] 判定するHTTPリクエスト。
+  ///
+  /// Returns: ページ遷移の要求と判断した場合は `true`。
+  bool _isNavigationRequest(shelf.Request request) {
+    // 現行のブラウザエンジンは全リクエストへ Sec-Fetch-Mode を付与する
+    final fetchMode = request.headers['sec-fetch-mode']?.trim().toLowerCase();
+    if (fetchMode != null && fetchMode.isNotEmpty) {
+      return fetchMode == 'navigate';
+    }
+
+    // 付与しない環境では Accept で判断する
+    final accept = request.headers['accept']?.toLowerCase() ?? '';
+    return accept.contains('text/html');
+  }
+
+  /// 自動生成する応答を組み立てます。
+  ///
+  /// [config] 応答内容の設定。
+  /// [extraHeaders] 応答へ追加するヘッダ。
+  ///
+  /// Returns: 設定に従ったレスポンス。
+  shelf.Response _buildConfiguredResponse(
+    ProxyResponseConfig config, {
+    Map<String, String> extraHeaders = const {},
+  }) {
+    return shelf.Response(
+      config.statusCode,
+      body: config.body,
+      headers: {
+        'Content-Type': config.contentType,
+        ...extraHeaders,
       },
     );
   }
@@ -2583,13 +3345,15 @@ window.__offline_web_proxy_web_storage_bridge = {
       }
 
       // オフラインフォールバックを返却
-      return _buildOfflineCacheMissResponse(request.method);
+      return _buildOfflineCacheMissResponse(request);
     } else {
       // read系以外のリクエストをキューに保存
-      await _queueRequest(request);
-      _emitEvent(ProxyEventType.requestQueued, request.url.toString(), {});
+      final queueId = await _queueRequest(request);
+      _emitEvent(ProxyEventType.requestQueued, request.url.toString(), {
+        'queueId': queueId,
+      });
 
-      return shelf.Response.ok('オンライン復帰時に再試行するためキューに保存しました');
+      return _buildQueuedResponse(queueId);
     }
   }
 
@@ -2744,6 +3508,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       })> _forwardToUpstream(
     shelf.Request request, {
     Uint8List? requestBodyBytes,
+    String? idempotencyKey,
   }) async {
     if (_config?.origin.isEmpty ?? true) {
       throw Exception('No upstream origin configured');
@@ -2757,16 +3522,33 @@ window.__offline_web_proxy_web_storage_bridge = {
     // HttpClientを再利用する（大量リクエストでの生成コストを削減）
     final client = _getOrCreateHttpClient();
     client.autoUncompress = false; // 自動解凍を無効化
-    final requestTimeout =
-        _config?.requestTimeout ?? const Duration(seconds: 60);
+
+    // 待ち時間が段階ごとに積み上がらないよう、1 リクエスト全体の締め切りを決める
+    final deadline =
+        DateTime.now().add(_config?.requestTimeout ?? _defaultRequestTimeout);
 
     // 同時上流接続数を制限してネイティブ側のリソース枯渇を防ぐ
-    await _upstreamSemaphore.acquire(timeout: const Duration(seconds: 30));
+    try {
+      await _upstreamSemaphore.acquire(timeout: _remainingUntil(deadline));
+    } on TimeoutException catch (e) {
+      // 上流の状態とは無関係な混雑のため、到達性の判定と区別できるようにする
+      throw _UpstreamSlotTimeoutException(e.message ?? '同時接続数の空き待ちがタイムアウトしました');
+    }
 
     try {
-      final ioRequest = await client.openUrl(request.method, uri);
+      final ioRequest = await client
+          .openUrl(request.method, uri)
+          .timeout(_remainingUntil(deadline));
       ioRequest.followRedirects = false;
       await _copyRequestHeaders(request, ioRequest, upstreamUri: uri);
+
+      // 応答を受け取れずキューへ回った場合でも同じキーで再送できるようにする
+      if (idempotencyKey != null && (_config?.enableIdempotencyKey ?? true)) {
+        ioRequest.headers.set(
+          _config?.idempotencyHeaderName ?? _defaultIdempotencyHeaderName,
+          idempotencyKey,
+        );
+      }
 
       // read系以外のリクエストの場合はボディをコピー
       if (!_isReadRequestMethod(request.method)) {
@@ -2776,16 +3558,10 @@ window.__offline_web_proxy_web_storage_bridge = {
         }
       }
 
-      final ioResponse = await ioRequest.close().timeout(requestTimeout);
+      final ioResponse =
+          await ioRequest.close().timeout(_remainingUntil(deadline));
 
-      final bodyBytes = await (() async {
-        final builder = BytesBuilder(copy: false);
-        await for (final chunk in ioResponse) {
-          builder.add(chunk);
-        }
-        return builder.takeBytes();
-      })()
-          .timeout(requestTimeout);
+      final bodyBytes = await _readResponseBytes(ioResponse, deadline);
 
       final headerSnapshot =
           ResponseHeaderSnapshot.fromHttpHeaders(ioResponse.headers);
@@ -3433,15 +4209,57 @@ window.__offline_web_proxy_web_storage_bridge = {
         DateTime.now().add(Duration(seconds: backoffSeconds)).toIso8601String();
   }
 
+  /// 保存領域内で重複しない一意なキーを生成します。
+  ///
+  /// マイクロ秒精度のタイムスタンプへ同一マイクロ秒内の連番を付与します。
+  /// ミリ秒精度のキーでは同一ミリ秒に保存したデータが上書きで失われるため、
+  /// 精度と連番の両方で衝突を防ぎます。
+  ///
+  /// Hive はキーの辞書順で列挙するため、タイムスタンプと連番はゼロ埋めして
+  /// 辞書順と時系列順を一致させます。既存キーと衝突した場合は連番を進めて
+  /// 再生成するため、処理は必ず終了します。
+  ///
+  /// [box] 重複を確認する保存領域。`null` の場合は確認を省略します。
+  ///
+  /// Returns: 生成された一意なキー。
+  String _generateUniqueStorageKey(Box? box) {
+    while (true) {
+      final microseconds = DateTime.now().microsecondsSinceEpoch;
+      if (microseconds == _lastStorageKeyMicroseconds) {
+        _storageKeySequence++;
+      } else {
+        _lastStorageKeyMicroseconds = microseconds;
+        _storageKeySequence = 0;
+      }
+
+      final timestampPart =
+          microseconds.toString().padLeft(_storageKeyTimestampDigits, '0');
+      final sequencePart = _storageKeySequence
+          .toString()
+          .padLeft(_storageKeySequenceDigits, '0');
+      final key = '$timestampPart-$sequencePart';
+
+      if (box == null || !box.containsKey(key)) {
+        return key;
+      }
+    }
+  }
+
   /// HTTPリクエストをキューに保存します。
   ///
   /// オフライン時や上流サーバエラー時に非-GETリクエストを
   /// キューに保存し、オンライン復帰時に自動再送します。
   ///
   /// [request] キューに保存するHTTPリクエスト。
-  Future<void> _queueRequest(
+  /// [bodyBytes] 既に読み取り済みのリクエストボディ。
+  /// [idempotency] 転送時に決定済みのべき等性キーと、その出所。
+  ///   省略した場合はこの時点で決定します。
+  ///
+  /// Returns: 保存に使用したキュー ID。保存領域が使えない場合は `null`。
+  Future<String?> _queueRequest(
     shelf.Request request, {
     List<int>? bodyBytes,
+    ({String value, bool suppliedByClient})? idempotency,
   }) async {
     final List<int> body;
     if (request.method == 'GET') {
@@ -3464,8 +4282,139 @@ window.__offline_web_proxy_web_storage_bridge = {
       'nextRetryAt': DateTime.now().toIso8601String(),
     };
 
-    final key = DateTime.now().millisecondsSinceEpoch.toString();
-    await _queueBox?.put(key, queueData);
+    final box = _queueBox;
+    if (box == null) {
+      return null;
+    }
+
+    if (_config?.enableIdempotencyKey ?? true) {
+      final resolved = idempotency ?? _resolveIdempotencyKey(request);
+
+      // クライアントが同じキーで送り直した場合、キューへ二重に積まない。
+      // 生成したキーは一致し得ないため、指定された場合だけ探索する。
+      if (resolved.suppliedByClient) {
+        final existingKey = _findQueuedKeyByIdempotencyKey(box, resolved.value);
+        if (existingKey != null) {
+          return existingKey;
+        }
+      }
+
+      queueData['idempotencyKey'] = resolved.value;
+    }
+
+    final key = _generateUniqueStorageKey(box);
+    await box.put(key, queueData);
+    return key;
+  }
+
+  /// リクエストに適用するべき等性キーを決定します。
+  ///
+  /// クライアントが付与済みの場合はその値を尊重し、無い場合は生成します。
+  ///
+  /// [request] 対象のHTTPリクエスト。
+  ///
+  /// Returns: べき等性キーと、クライアントが指定した値かどうか。
+  ({String value, bool suppliedByClient}) _resolveIdempotencyKey(
+    shelf.Request request,
+  ) {
+    final headerName =
+        _config?.idempotencyHeaderName ?? _defaultIdempotencyHeaderName;
+    final supplied = request.headers[headerName]?.trim();
+    if (supplied != null && supplied.isNotEmpty) {
+      return (value: supplied, suppliedByClient: true);
+    }
+
+    // 同じ内容の会計が連続しても別の要求として扱えるよう、内容ではなく乱数で採番する
+    final buffer = StringBuffer();
+    for (var i = 0; i < 4; i++) {
+      buffer.write(
+        _idempotencyKeyRandom
+            .nextInt(0x100000000)
+            .toRadixString(16)
+            .padLeft(8, '0'),
+      );
+    }
+    return (value: buffer.toString(), suppliedByClient: false);
+  }
+
+  /// 同じべき等性キーを持つキュー項目のキーを探します。
+  ///
+  /// [box] 対象のキュー保存領域。
+  /// [idempotencyKey] 検索するべき等性キー。
+  ///
+  /// Returns: 見つかったキュー ID。無い場合は `null`。
+  String? _findQueuedKeyByIdempotencyKey(Box box, String idempotencyKey) {
+    for (final key in box.keys) {
+      final data = box.get(key) as Map?;
+      if (data != null && data['idempotencyKey'] == idempotencyKey) {
+        return key.toString();
+      }
+    }
+
+    return null;
+  }
+
+  /// 上流へ届いたことが確認済みのべき等性キーかどうかを返します。
+  ///
+  /// [idempotencyKey] 判定するべき等性キー。
+  ///
+  /// Returns: 送信済みとして扱う場合は `true`。
+  bool _isIdempotencyKeyCompleted(String idempotencyKey) {
+    final box = _idempotencyBox;
+    if (box == null || !box.isOpen) {
+      return false;
+    }
+
+    final completedAt = box.get(idempotencyKey) as String?;
+    if (completedAt == null) {
+      return false;
+    }
+
+    final parsed = DateTime.tryParse(completedAt);
+    if (parsed == null) {
+      return false;
+    }
+
+    final retention =
+        _config?.idempotencyRetention ?? _defaultIdempotencyRetention;
+    return DateTime.now().difference(parsed) < retention;
+  }
+
+  /// 上流へ届いたべき等性キーを記録します。
+  ///
+  /// [idempotencyKey] 記録するべき等性キー。
+  Future<void> _recordIdempotencyKey(String idempotencyKey) async {
+    final box = _idempotencyBox;
+    if (box == null || !box.isOpen) {
+      return;
+    }
+
+    await box.put(idempotencyKey, DateTime.now().toIso8601String());
+  }
+
+  /// 保持期間を過ぎたべき等性キーを削除します。
+  ///
+  /// エラーが発生しても例外をスローしません。
+  Future<void> _purgeExpiredIdempotencyKeys() async {
+    final box = _idempotencyBox;
+    if (box == null || !box.isOpen) {
+      return;
+    }
+
+    try {
+      final retention =
+          _config?.idempotencyRetention ?? _defaultIdempotencyRetention;
+      final threshold = DateTime.now().subtract(retention);
+
+      for (final key in box.keys.toList()) {
+        final recordedAt = DateTime.tryParse(box.get(key) as String? ?? '');
+        if (recordedAt == null || recordedAt.isBefore(threshold)) {
+          await box.delete(key);
+        }
+      }
+    } catch (e) {
+      // 期限切れの削除に失敗しても運用は継続する
+    }
   }
 
   /// 上流サーバからリソースを取得します。
@@ -3485,15 +4434,21 @@ window.__offline_web_proxy_web_storage_bridge = {
     final uri = _buildUpstreamUriFromParts(path: path);
     final client = _getOrCreateHttpClient();
     client.autoUncompress = true;
+
+    // 転送と同じく、待ち時間が段階ごとに積み上がらないよう締め切りで管理する
+    final deadline = DateTime.now().add(
+      timeout != null
+          ? Duration(seconds: timeout)
+          : (_config?.requestTimeout ?? _defaultRequestTimeout),
+    );
+
     try {
-      final request = await client.getUrl(uri).timeout(
-            Duration(seconds: timeout ?? 30),
-          );
+      final request =
+          await client.getUrl(uri).timeout(_remainingUntil(deadline));
       // keep-aliveを有効にする（persistentConnectionデフォルトを使用）
       request.headers.set('accept-encoding', 'gzip, deflate');
 
-      final timeoutDuration = Duration(seconds: timeout ?? 30);
-      final response = await request.close().timeout(timeoutDuration);
+      final response = await request.close().timeout(_remainingUntil(deadline));
 
       final bodyBytes = await (() async {
         final builder = BytesBuilder(copy: false);
@@ -3502,7 +4457,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         }
         return builder.takeBytes();
       })()
-          .timeout(timeoutDuration);
+          .timeout(_remainingUntil(deadline));
 
       final headerSnapshot =
           ResponseHeaderSnapshot.fromHttpHeaders(response.headers);
@@ -3543,6 +4498,8 @@ window.__offline_web_proxy_web_storage_bridge = {
     _cachePurgeTimer = Timer.periodic(const Duration(hours: 1), (timer) {
       // ignore: discarded_futures
       _purgeExpiredCache();
+      // ignore: discarded_futures
+      _purgeExpiredIdempotencyKeys();
     });
 
     // 定期ヘルスチェックを設定（既定では無効）
@@ -3557,7 +4514,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     // 停止直後にタイマーが発火した場合でも閉じたボックスへ触らない
     final queueBox = _queueBox;
     if (!_isRunning ||
-        !_isOnline ||
+        !_isUpstreamReachable ||
         queueBox == null ||
         !queueBox.isOpen ||
         _isDrainingQueue) {
@@ -3570,9 +4527,14 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     _isDrainingQueue = true;
     try {
-      final keys = _queueBox!.keys.toList();
+      final keys = _sortQueueKeysByQueuedAt(queueBox);
       for (var i = 0; i < keys.length; i++) {
-        await _processQueuedItem(keys[i]);
+        // 停止した場合や上流断を検知した場合は、残りを待たせずに打ち切る
+        if (!_isRunning || !queueBox.isOpen || !_isUpstreamReachable) {
+          break;
+        }
+
+        await _processQueuedItem(queueBox, keys[i]);
         if (i % 10 == 0) {
           await Future.delayed(Duration.zero); // UIフリーズ防止
         }
@@ -3582,9 +4544,47 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
   }
 
+  /// キューのキーを保存日時の昇順に並べ替えて返します。
+  ///
+  /// Hive はキーの辞書順で列挙するため、旧バージョンで保存したキー形式が
+  /// 残っている場合は辞書順と時系列順が一致しません。仕様【5】の FIFO 保証を
+  /// キー形式に依存せず維持するため、保存日時を基準に並べ替えます。
+  /// 保存日時が同一の場合はキーの辞書順で解決します。
+  ///
+  /// [box] 対象のキュー保存領域。
+  ///
+  /// Returns: 保存日時の昇順に並べ替えたキーの一覧。
+  List<dynamic> _sortQueueKeysByQueuedAt(Box box) {
+    final entries = <({dynamic key, DateTime queuedAt})>[];
+
+    for (final key in box.keys) {
+      final data = box.get(key) as Map?;
+      final queuedAtValue = data?['queuedAt'] as String?;
+      entries.add((
+        key: key,
+        // 保存日時が読み取れない場合は最古として扱い、再送から取り残さない
+        queuedAt: DateTime.tryParse(queuedAtValue ?? '') ??
+            DateTime.fromMillisecondsSinceEpoch(0),
+      ));
+    }
+
+    entries.sort((a, b) {
+      final comparedAt = a.queuedAt.compareTo(b.queuedAt);
+      if (comparedAt != 0) {
+        return comparedAt;
+      }
+      return a.key.toString().compareTo(b.key.toString());
+    });
+
+    return entries.map((entry) => entry.key).toList();
+  }
+
   /// キューの個別アイテムを処理します。
-  Future<void> _processQueuedItem(dynamic key) async {
-    final data = _queueBox!.get(key) as Map?;
+  ///
+  /// [box] 対象のキュー保存領域。停止処理と競合しないよう呼び出し側から受け取ります。
+  /// [key] 処理するキューのキー。
+  Future<void> _processQueuedItem(Box box, dynamic key) async {
+    final data = box.get(key) as Map?;
     if (data == null) return;
 
     final itemUrl = data['url'] as String? ?? '';
@@ -3598,28 +4598,65 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     try {
       final result = await _sendQueuedRequest(data);
+
+      // 送信中に stop() が実行された場合は閉じた保存領域へ書き込まない
+      if (!box.isOpen) {
+        return;
+      }
+
       if (result.success) {
-        await _queueBox!.delete(key);
+        await box.delete(key);
         _emitEvent(ProxyEventType.queueDrained, itemUrl, {});
       } else if (result.shouldDrop) {
-        await _queueBox!.delete(key);
-        await _recordDroppedRequest(
-          data,
-          statusCode: result.statusCode,
-          dropReason: result.dropReason ?? 'dropped',
-          errorMessage: result.errorMessage ?? 'HTTP ${result.statusCode}',
-        );
-        _emitEvent(ProxyEventType.requestDropped, itemUrl, {
-          'statusCode': result.statusCode,
-          'dropReason': result.dropReason,
-        });
+        final reason = result.dropReason ?? 'dropped';
+        final errorMessage = result.errorMessage ?? 'HTTP ${result.statusCode}';
+
+        if ((_config?.dropPolicy ?? DropPolicy.quarantine) ==
+            DropPolicy.quarantine) {
+          // 本文ごと隔離してから取り除き、退避に失敗した場合は消さない
+          final quarantineId = await _quarantineRequest(
+            data,
+            statusCode: result.statusCode,
+            reason: reason,
+            errorMessage: errorMessage,
+          );
+          if (quarantineId == null) {
+            // 退避できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
+            _updateRetrySchedule(data);
+            await box.put(key, data);
+            return;
+          }
+
+          await box.delete(key);
+          _emitEvent(ProxyEventType.requestQuarantined, itemUrl, {
+            'quarantineId': quarantineId,
+            'statusCode': result.statusCode,
+            'reason': reason,
+          });
+        } else {
+          await box.delete(key);
+          await _recordDroppedRequest(
+            data,
+            statusCode: result.statusCode,
+            dropReason: reason,
+            errorMessage: errorMessage,
+          );
+          _emitEvent(ProxyEventType.requestDropped, itemUrl, {
+            'statusCode': result.statusCode,
+            'dropReason': result.dropReason,
+          });
+        }
       } else {
         _updateRetrySchedule(data);
-        await _queueBox!.put(key, data);
+        await box.put(key, data);
       }
     } catch (e) {
+      if (!box.isOpen) {
+        return;
+      }
+
       _updateRetrySchedule(data);
-      await _queueBox!.put(key, data);
+      await box.put(key, data);
     }
   }
 
@@ -3653,9 +4690,26 @@ window.__offline_web_proxy_web_storage_bridge = {
     final method = data['method'] as String;
     final headers = Map<String, String>.from(data['headers'] as Map? ?? {});
     final body = data['body'] as List<int>? ?? [];
+    final idempotencyKey = data['idempotencyKey'] as String?;
+
+    // 既に上流へ届いたことが分かっている場合は送り直さない
+    if (idempotencyKey != null && _isIdempotencyKeyCompleted(idempotencyKey)) {
+      return (
+        success: true,
+        shouldDrop: false,
+        statusCode: HttpStatus.ok,
+        dropReason: null,
+        errorMessage: null,
+      );
+    }
 
     final client = _getOrCreateHttpClient();
     client.autoUncompress = true;
+
+    // 転送と同じく、再送 1 回あたりの待ち時間を締め切りで抑える
+    final deadline =
+        DateTime.now().add(_config?.requestTimeout ?? _defaultRequestTimeout);
+
     try {
       Uri uri = Uri.parse(url);
 
@@ -3673,7 +4727,8 @@ window.__offline_web_proxy_web_storage_bridge = {
 
         uri = _buildUpstreamUriFromParts(path: url);
       }
-      final request = await client.openUrl(method, uri);
+      final request =
+          await client.openUrl(method, uri).timeout(_remainingUntil(deadline));
 
       await _applyQueuedRequestHeaders(
         request,
@@ -3681,55 +4736,142 @@ window.__offline_web_proxy_web_storage_bridge = {
         requestHeaders: headers,
       );
 
+      // 再送のたびに同じキーを送り、上流側で重複を判別できるようにする
+      if (idempotencyKey != null) {
+        request.headers.set(
+          _config?.idempotencyHeaderName ?? _defaultIdempotencyHeaderName,
+          idempotencyKey,
+        );
+      }
+
       if (body.isNotEmpty && method != 'GET') {
         request.add(body);
       }
 
-      try {
-        final response = await request
-            .close()
-            .timeout(_config?.requestTimeout ?? const Duration(seconds: 60));
+      final response = await request.close().timeout(_remainingUntil(deadline));
 
-        // 2xxステータスコードを成功とみなす
-        final statusCode = response.statusCode;
-        if (statusCode >= 200 && statusCode < 300) {
-          return (
-            success: true,
-            shouldDrop: false,
-            statusCode: statusCode,
-            dropReason: null,
-            errorMessage: null,
-          );
-        }
+      // 上流がステータス行を返した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
+      _recordUpstreamSuccess();
 
-        if (statusCode >= 400 && statusCode < 500) {
-          return (
-            success: false,
-            shouldDrop: true,
-            statusCode: statusCode,
-            dropReason: '4xx_error',
-            errorMessage: 'HTTP $statusCode',
-          );
+      // 本文を読み捨てないと接続が解放されず、後続の再送が空き待ちで止まる
+      await _drainResponse(response, deadline);
+
+      // 2xxステータスコードを成功とみなす
+      final statusCode = response.statusCode;
+      if (statusCode >= 200 && statusCode < 300) {
+        if (idempotencyKey != null) {
+          await _recordIdempotencyKey(idempotencyKey);
         }
 
         return (
-          success: false,
+          success: true,
           shouldDrop: false,
           statusCode: statusCode,
           dropReason: null,
-          errorMessage: 'HTTP $statusCode',
-        );
-      } catch (e) {
-        return (
-          success: false,
-          shouldDrop: false,
-          statusCode: 0,
-          dropReason: null,
-          errorMessage: e.toString(),
+          errorMessage: null,
         );
       }
+
+      if (statusCode >= 400 && statusCode < 500) {
+        return (
+          success: false,
+          shouldDrop: true,
+          statusCode: statusCode,
+          dropReason: '4xx_error',
+          errorMessage: 'HTTP $statusCode',
+        );
+      }
+
+      return (
+        success: false,
+        shouldDrop: false,
+        statusCode: statusCode,
+        dropReason: null,
+        errorMessage: 'HTTP $statusCode',
+      );
+    } catch (e) {
+      // 画面操作が無い状況でも上流断を検知できるよう、再送の失敗も判定に含める。
+      // 接続確立の失敗が最も多いため、応答受信より前の例外もここで受け取る。
+      if (_shouldCountUpstreamFailure(e)) {
+        _recordUpstreamFailure();
+      }
+
+      return (
+        success: false,
+        shouldDrop: false,
+        statusCode: 0,
+        dropReason: null,
+        errorMessage: e.toString(),
+      );
     } finally {
       // 共有クライアントをここで閉じない
+    }
+  }
+
+  /// 上流からの応答本文を締め切り付きで読み取ります。
+  ///
+  /// 締め切りを過ぎた場合は購読を打ち切って接続を破棄します。読み取りを
+  /// 放置すると、応答が遅い上流に対して `HttpClient` の接続枠を占有し続け、
+  /// 後続のリクエストが空き待ちで滞留します。
+  ///
+  /// [response] 読み取る上流応答。
+  /// [deadline] リクエスト全体の締め切り。
+  ///
+  /// Returns: 受信した本文。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 締め切りまでに読み切れなかった場合。
+  Future<Uint8List> _readResponseBytes(
+    HttpClientResponse response,
+    DateTime deadline,
+  ) async {
+    final builder = BytesBuilder(copy: false);
+    await _consumeResponseBody(response, deadline, onData: builder.add);
+    return builder.takeBytes();
+  }
+
+  /// 上流からの応答本文を読み捨てて接続を解放します。
+  ///
+  /// 本文を読み切らないと `HttpClient` の接続が解放されず、キューの再送が
+  /// `maxConnectionsPerHost` に達した時点で空き待ちのまま停止します。
+  /// 応答を返した事実だけを使うため、読み切れない場合も例外にしません。
+  ///
+  /// [response] 読み捨てる上流応答。
+  /// [deadline] リクエスト全体の締め切り。
+  Future<void> _drainResponse(
+    HttpClientResponse response,
+    DateTime deadline,
+  ) async {
+    try {
+      await _consumeResponseBody(response, deadline);
+    } catch (_) {
+      // 読み切れなくても、受信済みのステータスによる判定は続行する
+    }
+  }
+
+  /// 上流からの応答本文を締め切り付きで受信します。
+  ///
+  /// [onData] を省略した場合は読み捨てます。締め切りを過ぎた場合や受信に
+  /// 失敗した場合は購読を打ち切り、接続を破棄します。
+  ///
+  /// [response] 受信する上流応答。
+  /// [deadline] リクエスト全体の締め切り。
+  /// [onData] 受信したチャンクの受け取り先。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 締め切りまでに受信し切れなかった場合。
+  Future<void> _consumeResponseBody(
+    HttpClientResponse response,
+    DateTime deadline, {
+    void Function(List<int> chunk)? onData,
+  }) async {
+    final subscription = response.listen(onData, cancelOnError: true);
+    try {
+      await subscription.asFuture<void>().timeout(_remainingUntil(deadline));
+    } catch (_) {
+      // 受信を打ち切る場合も接続を残さない
+      await subscription.cancel();
+      rethrow;
     }
   }
 
@@ -3742,8 +4884,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     if (_httpClient != null) return _httpClient!;
 
     _httpClient = HttpClient()
-      ..connectionTimeout =
-          _config?.connectTimeout ?? const Duration(seconds: 10)
+      ..connectionTimeout = _config?.connectTimeout ?? _defaultConnectTimeout
       ..autoUncompress = true
       ..maxConnectionsPerHost = 50;
 
@@ -3911,6 +5052,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       dropReason: data['dropReason'] as String? ?? 'dropped',
       statusCode: data['statusCode'] as int? ?? 0,
       errorMessage: data['errorMessage'] as String? ?? '',
+      // 旧バージョンの履歴には項目が無いため、未確認として扱う
+      acknowledged: data['acknowledged'] as bool? ?? false,
     );
   }
 
@@ -4444,10 +5587,74 @@ window.__offline_web_proxy_web_storage_bridge = {
       'dropReason': dropReason,
       'statusCode': statusCode,
       'errorMessage': errorMessage,
+      'acknowledged': false,
     };
 
-    final key = droppedAt.microsecondsSinceEpoch.toString();
-    await _droppedRequestBox?.put(key, droppedData);
+    final box = _droppedRequestBox;
+    // 停止処理と競合した場合は閉じた保存領域へ書き込まない
+    if (box == null || !box.isOpen) {
+      return;
+    }
+
+    final key = _generateUniqueStorageKey(box);
+    await box.put(key, droppedData);
+    _unacknowledgedDroppedCount = null;
+  }
+
+  /// リクエストを隔離領域へ退避します。
+  ///
+  /// 本文を含むキューデータをそのまま保持するため、原因を解消したあとに
+  /// [retryQuarantinedRequest] で再送できます。
+  ///
+  /// [data] 退避するキューデータ。
+  /// [statusCode] 上流から返されたステータスコード。
+  /// [reason] 退避理由。
+  /// [errorMessage] 詳細なエラーメッセージ。
+  ///
+  /// Returns: 退避に使用した ID。保存領域が使えない場合は `null`。
+  Future<String?> _quarantineRequest(
+    Map data, {
+    required int statusCode,
+    required String reason,
+    required String errorMessage,
+  }) async {
+    final box = _quarantinedRequestBox;
+    // 停止処理と競合した場合は閉じた保存領域へ書き込まない
+    if (box == null || !box.isOpen) {
+      return null;
+    }
+
+    final quarantinedData = Map<String, dynamic>.from(data);
+    quarantinedData['quarantinedAt'] = DateTime.now().toIso8601String();
+    quarantinedData['statusCode'] = statusCode;
+    quarantinedData['reason'] = reason;
+    quarantinedData['errorMessage'] = errorMessage;
+
+    final key = _generateUniqueStorageKey(box);
+    await box.put(key, quarantinedData);
+    return key;
+  }
+
+  /// 隔離データを [QuarantinedRequest] へ変換します。
+  ///
+  /// [id] 隔離領域内での識別子。
+  /// [data] 保存されている隔離データ。
+  ///
+  /// Returns: 変換した隔離リクエスト情報。
+  QuarantinedRequest _mapToQuarantinedRequest(String id, Map data) {
+    final now = DateTime.now();
+
+    return QuarantinedRequest(
+      id: id,
+      url: data['url'] as String? ?? '',
+      method: data['method'] as String? ?? 'GET',
+      quarantinedAt:
+          DateTime.tryParse(data['quarantinedAt'] as String? ?? '') ?? now,
+      queuedAt: DateTime.tryParse(data['queuedAt'] as String? ?? '') ?? now,
+      reason: data['reason'] as String? ?? 'dropped',
+      statusCode: data['statusCode'] as int? ?? 0,
+      errorMessage: data['errorMessage'] as String? ?? '',
+    );
   }
 
   /// ファイルパスからMIMEタイプを取得します。

@@ -23,7 +23,20 @@ class _RealHttpOverrides extends HttpOverrides {
 }
 
 /// HTTP 応答の検証に必要な要素だけを保持する型。
-typedef _HttpResult = ({int statusCode, String body});
+typedef _HttpResult = ({
+  int statusCode,
+  String body,
+  Map<String, String> headers,
+});
+
+/// ページ遷移としてリクエストするためのヘッダ。
+///
+/// ブラウザエンジンが付与するヘッダを再現し、HTML のフォールバック応答を
+/// 受け取る経路を検証するために使用する。
+const Map<String, String> _navigationHeaders = {
+  'Sec-Fetch-Mode': 'navigate',
+  'Accept': 'text/html',
+};
 
 /// 応答内容を切り替えられる上流サーバのモック。
 class _MockUpstream {
@@ -92,16 +105,26 @@ Future<_HttpResult> _performRequest(
   Uri uri, {
   String method = 'GET',
   String? body,
+  Map<String, String> headers = const {},
 }) async {
   final client = HttpClient();
   try {
     final request = await client.openUrl(method, uri);
+    headers.forEach(request.headers.set);
     if (body != null) {
       request.write(body);
     }
     final response = await request.close();
     final responseBody = await response.transform(utf8.decoder).join();
-    return (statusCode: response.statusCode, body: responseBody);
+    final responseHeaders = <String, String>{};
+    response.headers.forEach((name, values) {
+      responseHeaders[name.toLowerCase()] = values.join(', ');
+    });
+    return (
+      statusCode: response.statusCode,
+      body: responseBody,
+      headers: responseHeaders,
+    );
   } finally {
     client.close(force: true);
   }
@@ -201,6 +224,33 @@ void main() {
 
         // 代替できるキャッシュが無い場合は 504 を返すこと
         expect(result.statusCode, equals(HttpStatus.gatewayTimeout));
+        // キャッシュを使えなかったことを判別できること
+        expect(result.headers['x-offline-source'], equals('none'));
+      });
+    });
+
+    /// ページ遷移以外には Web アプリが解釈できる応答を返すこと
+    test('returns a parsable response for non navigation requests', () async {
+      await withRealHttpClient(() async {
+        final closedPort = await _findClosedPort();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: 'http://127.0.0.1:$closedPort'),
+        );
+
+        final result = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/api/items'),
+          headers: const {'Sec-Fetch-Mode': 'cors', 'Accept': '*/*'},
+        );
+
+        // 200 と HTML で「成功したが解釈できない応答」にならないこと
+        expect(result.statusCode, equals(HttpStatus.gatewayTimeout));
+        expect(result.body, equals('{"offline":true}'));
+        expect(
+          result.headers['content-type'],
+          equals('application/json; charset=utf-8'),
+        );
+        // オフライン時と同じ契約で由来を判別できること
+        expect(result.headers['x-offline-source'], equals('none'));
       });
     });
 
@@ -218,9 +268,10 @@ void main() {
 
         final result = await _performRequest(
           Uri.parse('http://127.0.0.1:$port/never-cached'),
+          headers: _navigationHeaders,
         );
 
-        // アプリ側が指定した本文で応答すること
+        // ページ遷移にはアプリ側が指定した本文で応答すること
         expect(result.statusCode, equals(HttpStatus.gatewayTimeout));
         expect(result.body, equals('<html>unreachable</html>'));
       });
@@ -315,10 +366,11 @@ void main() {
 
         final result = await _performRequest(
           Uri.parse('http://127.0.0.1:$port/never-cached'),
+          headers: _navigationHeaders,
         );
         await subscription.cancel();
 
-        // オフライン応答として指定した HTML を返すこと
+        // ページ遷移にはオフライン応答として指定した HTML を返すこと
         expect(result.statusCode, equals(HttpStatus.ok));
         expect(result.body, equals('<html>offline-page</html>'));
       });
@@ -340,7 +392,7 @@ void main() {
         );
 
         // キュー保存として受け付けること
-        expect(result.statusCode, equals(HttpStatus.ok));
+        expect(result.statusCode, equals(HttpStatus.accepted));
         // キューに 1 件保存されること
         expect(await proxy.getQueuedRequests(), hasLength(1));
       });

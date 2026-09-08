@@ -228,43 +228,81 @@ Provides methods for cookie management. See [20] API Reference for details.
 
 ### Queue Management
 
-- **FIFO Guarantee**: Strictly maintain request order. Preserve data consistency
+- **Stored Order**: Resend in ascending order of the stored timestamp to preserve request order
+- **Unique Keys**: Derive keys from a microsecond timestamp plus a per-microsecond sequence number so that requests stored at the same moment are never overwritten
 - **Persistence**: Save queue state with Hive. Continue resending after app restart
+- **Backoff Handling**: Skip requests that are still waiting for their backoff window and send the following requests whose window has already passed
+- **Connection Release**: A resend always reads the upstream response body to completion and releases the connection before moving on, so a queue larger than the concurrent connection limit still drains to the end
+- **When Quarantine Fails**: If the request cannot be moved to the quarantine store, it stays in the queue and is retried with backoff applied
 
 ### Retry Strategy
 
-- **Exponential Backoff**: Gradually increase wait time after initial failure (1 sec → 2 sec → 4 sec...)
-- **Infinite Retry**: Retry persistently in case of network errors
-- **Jitter**: Add ±20% random wait time to avoid load concentration from simultaneous retries
+- **Staged Backoff**: Apply the seconds listed in `ProxyConfig.retryBackoffSeconds` in retry order (defaults to 1, 2, 5, 10, 20, 30 seconds), then keep using the last value
+- **Infinite Retry**: Keep retrying for network errors and 5xx responses
 
-### Drop Conditions
+### Conditions for Giving Up a Resend
 
-Remove requests from queue in the following cases:
+A request leaves the queue in the following case.
 
-- **4xx Errors**: Client errors (authentication failure, invalid request, etc.)
-- **5xx Errors**: Server errors where retry is meaningless
+- **4xx Errors**: Client errors (authentication failure, invalid request, etc.). Resending cannot change the result, so the request is removed
+
+Network errors and 5xx errors are treated as temporary failures: they are kept in the queue and retried.
+
+### What Happens to a Removed Request
+
+`ProxyConfig.dropPolicy` decides.
+
+| Policy | Behavior | Use for |
+| ------ | -------- | ------- |
+| `quarantine` (default) | Move it, body included, to a quarantine store | Business data such as a sales record, where losing a request matters |
+| `drop` | Discard it and keep only a history entry | Requests that can be lost safely |
+
+- **Quarantine notification**: Emits `ProxyEventType.requestQuarantined`
+- **Drop notification**: Emits `ProxyEventType.requestDropped`
+- **No double bookkeeping**: A quarantined request is not also written to the dropped history
 
 ### History Management
 
 Provides methods for queue management. See [20] API Reference for details.
 
+- **`getQuarantinedRequests()`**: List quarantined requests. Bodies are not returned
+- **`retryQuarantinedRequest(id)`**: Put the request back in the queue after the cause is fixed. The retry count is reset and the stored timestamp is set to the moment it was accepted, so it is sent after requests already waiting
+- **`discardQuarantinedRequest(id)`**: Discard a request after reviewing it
+- **`clearQuarantinedRequests()`**: Discard every quarantined request
 - **`getDroppedRequests()`**: Get history of dropped requests. Useful for debugging and troubleshooting
+- **`acknowledgeDroppedRequests()`**: Mark the history as seen. The entries themselves are kept
+
+### Noticing Unhandled Requests
+
+- **`ProxyStats.quarantinedCount`**: Number of quarantined requests. Anything above zero needs a decision
+- **`ProxyStats.unacknowledgedDroppedCount`**: Number of dropped history entries not acknowledged yet. Check it at startup to notice requests discarded while nobody was watching
 
 ## [6] Idempotency
 
 ### Duplicate Request Prevention
 
-Use idempotency keys to prevent duplicate execution of the same request.
+A queued request is resent without knowing whether the upstream already received it. If the upstream finished processing and only the response was lost, the resend can apply the same update twice. To avoid that, each update request is assigned one key that is sent on the first forward and on every resend.
+
+- **When the key is decided**: On receiving the request. A key supplied by the client is kept; otherwise the proxy generates one
+- **How keys are generated**: From random data, not from the body. Two identical sales totals in a row must not be treated as the same request and collapsed into one
+- **Where it applies**: Both the forwarded attempt and every queue resend carry the same key
+- **Queue deduplication**: Resubmitting the same key does not add a second queue entry
+- **Skipping delivered requests**: A key already known to have reached the upstream within the retention period is not resent
+
+### Division of Responsibility
+
+The proxy guarantees only that the same operation carries the same key. **Deduplication itself must be implemented on the upstream server.** The proxy cannot tell a lost response from a request that never arrived.
 
 ### Supported Headers
 
-- **Idempotency-Key**: Standard idempotency key (priority)
-- **X-Request-ID**: Custom request ID (alternative)
+- **`ProxyConfig.idempotencyHeaderName`**: Defaults to `Idempotency-Key`; change it to match the upstream
+- **`ProxyConfig.enableIdempotencyKey`**: Set to `false` to send no key
 
 ### Retention Period
 
-- **24 Hours**: Retain idempotency key for 24 hours. After expiration, treat as new request
+- **24 hours by default**: Configurable via `ProxyConfig.idempotencyRetention`. After it expires, a request carrying the key is treated as new
 - **Storage**: Persist with Hive. Valid even after app restart
+- **Expiry**: Removed by the hourly maintenance task
 
 ## [7] Response Compression
 
@@ -478,9 +516,47 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ## [10] Offline Response
 
+### Online / Offline Decision
+
+- **Signal**: Uses the link-layer connectivity reported by `connectivity_plus`. It does not guarantee that the upstream server is reachable
+- **At startup**: `start()` reads the current connectivity to establish the initial value. The wait is capped (500 milliseconds); when the cap is exceeded or connectivity cannot be read, the proxy stays online as the safe default
+- **After startup**: The decision is updated on every connectivity change event. If a change event arrives while the startup read is still pending, the change event wins
+- **On coming back online**: Queue draining starts
+
+### Upstream Circuit Breaker
+
+Link-layer connectivity does not prove that the upstream is reachable. When the device is attached to a store Wi-Fi whose uplink is down, sits behind a captive portal, or the upstream server alone is stopped, every request would wait for `requestTimeout` before falling back. Upstream reachability is therefore tracked separately.
+
+| State | Meaning | Request handling |
+| ----- | ------- | ---------------- |
+| closed | The upstream is reachable | Forwarded to the upstream as usual |
+| open | The upstream is unreachable | Not forwarded; answered from cache or stored in the queue immediately |
+| halfOpen | A probe is in flight | Only the probe reaches the upstream; other requests are handled as in `open` |
+
+- **What counts as a failure**: Only attempts that could not reach the upstream, such as connection failures, name resolution failures, TLS handshake failures and timeouts. A 4xx or 5xx response proves the upstream is alive, so it resets the counter instead
+- **Opening condition**: The circuit opens once consecutive failures reach `ProxyConfig.upstreamFailureThreshold` (defaults to 3; `0` disables it). Failed queue resends and failed warmups count as well as forwarded requests. A queue resend that could not establish a connection at all (a refused connection, for instance) counts too
+- **While open**: Nothing is forwarded upstream; queue draining and warmup pause until the upstream comes back
+- **Waiting for a free connection slot**: Waiting on the proxy's own limit of concurrent upstream connections is caused by proxy congestion, so it does not count as an upstream failure
+- **Probing**: Sends `ProxyConfig.upstreamProbeMethod` (defaults to `HEAD`) to `ProxyConfig.upstreamProbePath` (defaults to `/`) with `ProxyConfig.upstreamProbeTimeout` (defaults to 3 seconds), spaced by `ProxyConfig.upstreamProbeBackoffSeconds` (defaults to [1, 2, 5, 10, 30] seconds). Any response counts as reachable regardless of status code
+- **Link-layer events**: Regaining link-layer connectivity triggers an immediate probe but is never the sole basis for the decision. No probe runs while the link layer is down
+- **Events**: `ProxyEventType.upstreamCircuitOpened` on opening and `ProxyEventType.upstreamCircuitClosed` on closing
+- **Diagnostics**: `getDiagnostics()` exposes the following values
+  - `isOnline`: The link-layer online decision
+  - `onlineDecisionSource`: What `isOnline` is based on (`initial` for the value read at startup, `linkLayer` for a change event)
+  - `isUpstreamReachable`: Whether requests can actually be forwarded, reflecting both the link layer and the circuit breaker
+  - `upstreamCircuitState`: The circuit breaker state
+  - `consecutiveUpstreamFailures`: Consecutive attempts that could not reach the upstream (probe failures excluded)
+  - `lastUpstreamSuccessAt`: When the upstream was last reached
+
 ### Response Types and Headers
 
 This section describes offline responses. Upstream-unreachable fallback follows the same cache selection rules, but the debug header contract is defined only for offline responses.
+
+Upstream-unreachable responses behave as follows. `X-Offline` is not added because the link layer is up.
+
+- **When a cached entry is served instead**: Treated the same as a response the upstream returned while online; no extra header is added
+- **When no cached entry can be served**: `X-Offline-Source: none` is added so the response can be told apart from a 504 the upstream itself returned
+- **While the circuit breaker is open**: Requests take the same path as offline ones, so the headers in this section (including `X-Offline: 1`) apply as written
 
 Add custom headers for debugging to offline responses:
 
@@ -494,17 +570,35 @@ Add custom headers for debugging to offline responses:
   - `X-Cache-Status: stale` (cache expired but used because offline)
 - **Content**: Return cached response as-is
 
-#### On Fallback
+#### On Fallback (page navigation)
 
+- **Applies to**: Requests with `Sec-Fetch-Mode: navigate`, or with `text/html` in `Accept`
 - **Status**: 200 OK
-- **Custom Headers**: `X-Offline-Source: fallback`
-- **Content**: Pre-prepared fallback page ("You are offline", etc.)
+- **Custom Headers**: `X-Offline: 1`, `X-Offline-Source: fallback`
+- **Content**: Pre-prepared fallback page (replaceable via `ProxyConfig.offlineFallbackHtml`)
 
-#### When Unsupported
+#### When Unsupported (anything but a navigation)
 
-- **Status**: 504 Gateway Timeout
-- **Custom Headers**: `X-Offline-Source: none`
-- **Content**: Error page for offline not supported
+- **Applies to**: `fetch`, `XMLHttpRequest`, images, stylesheets and other subresource requests
+- **Status**: 504 Gateway Timeout (configurable via `ProxyConfig.offlineMissResponse`)
+- **Custom Headers**: `X-Offline: 1`, `X-Offline-Source: none`
+- **Content**: `{"offline":true}` (configurable via `ProxyConfig.offlineMissResponse`)
+- **Why**: Answering a subresource with 200 and HTML looks like a success to the web app and then fails while parsing, so a failed load cannot be handled
+
+#### When Queued (update requests)
+
+- **Applies to**: POST / PUT / PATCH / DELETE while offline or while the upstream is unreachable
+- **Status**: 202 Accepted (configurable via `ProxyConfig.queuedResponse`)
+- **Custom Headers**: `X-Offline-Queued: 1`, `X-Offline-Queue-Id: <queue id>`, `Connection: close`
+- **Content**: `{"queued":true}` (configurable via `ProxyConfig.queuedResponse`)
+- **Why**: The upstream has not processed the request yet, so the web app must be able to tell it apart from a real success. The headers are always added, even when the body is customized, so the decision never depends on the body
+- **When storing fails**: Answers with 503, `{"queued":false}` and `X-Offline-Queued: 0`. Presenting an unsaved request as a success would lose it silently
+
+#### Update requests answered with an upstream 5xx
+
+- **Status and body**: The upstream response is returned as-is
+- **Custom Headers**: `X-Offline-Queued: 1` and `X-Offline-Queue-Id` are added only when the request was stored for resend
+- **Why**: Without that marker the web app cannot tell that the proxy will resend, and a person may end up submitting the same request twice
 
 ### Processing Cache-Control Response Headers
 
@@ -583,21 +677,24 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 ### Timeout Settings
 
-- **connectTimeout**: 10 seconds (TCP connection establishment time limit)
-- **sendTimeout**: 15 seconds (request send time limit)
-- **receiveTimeout**: 30 seconds (response receive time limit)
-- **requestTimeout**: 60 seconds (entire request time limit)
+- **connectTimeout**: 5 seconds (TCP connection establishment time limit)
+- **requestTimeout**: 20 seconds (deadline for one whole request)
+- **What the deadline covers**: Waiting for a free upstream connection slot, establishing the connection, receiving the headers and receiving the body all share one budget, so per-stage waits never stack up
+- **Connections on deadline**: When body reception is cut short, the subscription is cancelled and the connection is destroyed, so a half-read connection does not keep occupying an upstream connection slot
+- **Why the defaults are short**: In front of a WebView a person is waiting for the screen, so the defaults are shorter than they would be for background synchronization
 - **Upstream-unreachable fallback**: GET/HEAD may fall back to persisted cache when the connection to the upstream fails or the request exceeds `requestTimeout`
+- **Queue resends**: The same deadline applies to each resend attempt
+- **Warmup**: The same deadline applies to each path fetched by `warmupCache()` (its `timeout` defaults to requestTimeout)
 
 ### Backoff Strategy
 
-- **Interval**: Gradual extension of [1, 2, 5, 10, 20, 30] seconds
-- **Retry**: Infinite retry (in case of network errors)
-- **Jitter**: Add ±20% random element for load distribution
+- **Interval**: Gradual extension defined by `ProxyConfig.retryBackoffSeconds` (defaults to [1, 2, 5, 10, 20, 30] seconds)
+- **Retry**: Infinite retry (for network errors and 5xx responses)
 
 ### Queue Processing
 
-- **Drain Interval**: Check queue every 3 seconds and process unsent requests
+- **Drain Interval**: Check queue every 5 seconds and process unsent requests
+- **Immediate Drain**: Draining also starts as soon as the proxy detects that connectivity is back
 
 ## [16] Cache Capacity and TTL
 
@@ -1105,6 +1202,7 @@ Pre-fetch fallback cache for the specified path list.
 - **Exceptions**:
   - `ArgumentError`: When invalid path is included
   - `WarmupException`: When the entire pre-fetch process fails
+- **Interaction with upstream reachability**: While the circuit breaker is open (or the link layer is down), no request is sent and every path is reported as a failure. The outcome of each fetch feeds the reachability decision
 
 ```dart
 // Pre-fetch with configured path list
@@ -1342,6 +1440,87 @@ Clears history of dropped requests.
 await proxy.clearDroppedRequests();
 ```
 
+#### `Future<int> acknowledgeDroppedRequests()`
+
+Marks the dropped request history as reviewed.
+
+- **Return Value**: Number of entries changed to acknowledged
+- **Exceptions**:
+  - `QueueOperationException`: When the update fails
+- **Usage**: Detect unreviewed entries at startup with `ProxyStats.unacknowledgedDroppedCount`, then call this once they have been shown to the operator. The history itself is kept, so the content stays available afterwards
+
+```dart
+final stats = await proxy.getStats();
+if (stats.unacknowledgedDroppedCount > 0) {
+  // Show the requests that were lost before marking them as reviewed
+  await proxy.acknowledgeDroppedRequests();
+}
+```
+
+### Quarantine Management
+
+When `ProxyConfig.dropPolicy` is `DropPolicy.quarantine` (the default), a request rejected by the upstream is moved to a quarantine store with its body intact. The following APIs let an operator inspect it and choose between resending and discarding.
+
+#### `Future<List<QuarantinedRequest>> getQuarantinedRequests({int? limit})`
+
+Gets the list of quarantined requests.
+
+- **Parameters**:
+  - `limit`: Upper limit of items to retrieve (default: 100)
+- **Return Value**: List of quarantined requests, in quarantine order
+- **Exceptions**:
+  - `QueueOperationException`: When retrieval fails
+- **Note**: The body is not returned. Use `retryQuarantinedRequest()` to resend it
+
+```dart
+final quarantined = await proxy.getQuarantinedRequests();
+for (final request in quarantined) {
+  print('${request.method} ${request.url} -> ${request.statusCode}');
+}
+```
+
+#### `Future<bool> retryQuarantinedRequest(String id)`
+
+Moves a quarantined request back to the queue and resends it.
+
+- **Parameters**:
+  - `id`: Identifier returned by `getQuarantinedRequests()`
+- **Return Value**: `true` when moved back to the queue, `false` when no entry matches
+- **Exceptions**:
+  - `QueueOperationException`: When the operation fails
+- **Note**: The retry count is reset. Call it after the cause of the rejection has been fixed
+
+```dart
+// Resend after the upstream side has been corrected
+await proxy.retryQuarantinedRequest(quarantined.first.id);
+```
+
+#### `Future<bool> discardQuarantinedRequest(String id)`
+
+Discards a quarantined request.
+
+- **Parameters**:
+  - `id`: Identifier returned by `getQuarantinedRequests()`
+- **Return Value**: `true` when discarded, `false` when no entry matches
+- **Exceptions**:
+  - `QueueOperationException`: When the operation fails
+
+```dart
+await proxy.discardQuarantinedRequest(quarantined.first.id);
+```
+
+#### `Future<void> clearQuarantinedRequests()`
+
+Discards every quarantined request.
+
+- **Return Value**: None
+- **Exceptions**:
+  - `QueueOperationException`: When deletion fails
+
+```dart
+await proxy.clearQuarantinedRequests();
+```
+
 ### Statistics and Monitoring
 
 #### `Future<ProxyStats> getStats()`
@@ -1446,8 +1625,28 @@ class DroppedRequest {
   final String dropReason; // Drop reason ("4xx_error", "5xx_error", "network_timeout", etc.)
   final int statusCode; // HTTP status code at error
   final String errorMessage; // Detailed error message
+  final bool acknowledged; // Whether it has been shown to the operator (default: false)
 }
 ```
+
+#### `QuarantinedRequest`
+
+Class representing a mutating request the upstream rejected, moved to the quarantine store.
+
+```dart
+class QuarantinedRequest {
+  final String id; // Identifier inside the quarantine store (used to resend or discard)
+  final String url; // URL of the quarantined request
+  final String method; // HTTP method
+  final DateTime quarantinedAt; // Date/time quarantined
+  final DateTime queuedAt; // Date/time first stored in the queue
+  final String reason; // Quarantine reason ("4xx_error", etc.)
+  final int statusCode; // HTTP status code returned by the upstream
+  final String errorMessage; // Detailed error message
+}
+```
+
+The body is retained but not returned in this list. Use `retryQuarantinedRequest(id)` to resend it.
 
 #### `ProxyStats`
 
@@ -1461,6 +1660,8 @@ class ProxyStats {
   final double cacheHitRate; // Cache hit rate (0.0~1.0)
   final int queueLength; // Current queue length
   final int droppedRequestsCount; // Dropped request count
+  final int unacknowledgedDroppedCount; // Dropped history entries not yet acknowledged
+  final int quarantinedCount; // Number of quarantined requests
   final DateTime startedAt; // Proxy server start date/time
   final Duration uptime; // Operation time
 }
@@ -1521,10 +1722,22 @@ class ProxyConfig {
   final int cacheMaxSize; // Maximum cache capacity (bytes)
   final Map<String, int> cacheTtl; // TTL setting by Content-Type (seconds)
   final Map<String, int> cacheStale; // Stale period setting by Content-Type (seconds)
-  final Duration connectTimeout; // Connection timeout
-  final Duration requestTimeout; // Request timeout
+  final int upstreamFailureThreshold; // Consecutive failures treated as unreachable (default: 3, 0=disabled)
+  final String upstreamProbePath; // Path used by the reachability probe (default: "/")
+  final String upstreamProbeMethod; // HTTP method used by the probe (default: "HEAD")
+  final Duration upstreamProbeTimeout; // Probe timeout (default: 3 seconds)
+  final List<int> upstreamProbeBackoffSeconds; // Probe interval (default: [1, 2, 5, 10, 30])
+  final Duration connectTimeout; // Connection timeout (default: 5 seconds)
+  final Duration requestTimeout; // Deadline for one whole request (default: 20 seconds)
   final List<int> retryBackoffSeconds; // Retry backoff interval
+  final bool enableIdempotencyKey; // Attach an idempotency key (default: true)
+  final String idempotencyHeaderName; // Idempotency key header name (default: "Idempotency-Key")
+  final Duration idempotencyRetention; // Retention of completed keys (default: 24 hours)
+  final DropPolicy dropPolicy; // How a request that stopped retrying is handled (default: quarantine)
+  final ProxyResponseConfig queuedResponse; // Response for a queued request (default: 202 / JSON)
+  final ProxyResponseConfig offlineMissResponse; // Response when nothing can be served (default: 504 / JSON)
   final bool enableAdminApi; // Enable admin API (development only)
+  final bool enableWebStorageInheritance; // WebStorage inheritance bridge (default: false)
   final String logLevel; // Log level ("debug", "info", "warn", "error")
   final List<String> startupPaths; // Startup cache update paths
   final int preferredPort; // Port to use when available (0=unspecified)
@@ -1536,6 +1749,33 @@ class ProxyConfig {
   final String? gatewayTimeoutHtml; // Replacement HTML for timeout responses (null=built-in page)
 }
 ```
+
+#### `DropPolicy`
+
+Enum representing how a mutating request that stopped retrying is handled.
+
+```dart
+enum DropPolicy {
+  quarantine, // Move it to the quarantine store with its body (default)
+  drop // Keep only a history entry and discard it (the body is not retained)
+}
+```
+
+Use `quarantine` when losing a request means losing business data, such as a sales record.
+
+#### `ProxyResponseConfig`
+
+Class representing a response the proxy generates on its own.
+
+```dart
+class ProxyResponseConfig {
+  final int statusCode; // Status code of the generated response
+  final String contentType; // Value of the Content-Type header
+  final String body; // Response body
+}
+```
+
+Used by `ProxyConfig.queuedResponse` (default: 202 / `{"queued":true}`) and `ProxyConfig.offlineMissResponse` (default: 504 / `{"offline":true}`). Specify a format the web application can parse.
 
 #### `ProxyEvent`
 
@@ -1560,14 +1800,32 @@ enum ProxyEventType {
   requestQueued, // Request queued
   queueDrained, // Queue send completed
   requestDropped, // Request dropped
+  requestQuarantined, // Request moved to the quarantine store
   networkOnline, // Network restored
   networkOffline, // Network disconnected
+  upstreamCircuitOpened, // Upstream considered unreachable and forwarding stopped
+  upstreamCircuitClosed, // Upstream confirmed reachable and forwarding resumed
   cacheCleared, // Cache cleared
   errorOccurred, // Error occurred
   serverUnavailable, // Responsiveness check failed and recovery was not possible
   serverRecovered // Recovered by rebinding
 }
 ```
+
+The `data` of `requestQuarantined` carries the following metadata.
+
+- `quarantineId`: Identifier inside the quarantine store (used by `retryQuarantinedRequest` and friends)
+- `statusCode`: Status code returned by the upstream
+- `reason`: Quarantine reason (`"4xx_error"`, etc.)
+
+The `data` of `upstreamCircuitOpened` carries the following metadata.
+
+- `consecutiveFailures`: Consecutive failure count when forwarding stopped
+- `lastSuccessAt`: Date/time the upstream was last reached (ISO 8601, `null` when there is none)
+
+The `data` of `upstreamCircuitClosed` carries the following metadata.
+
+- `lastSuccessAt`: Date/time reachability was confirmed (ISO 8601)
 
 The `data` of `serverUnavailable` and `serverRecovered` carries the following metadata.
 
@@ -1648,6 +1906,37 @@ class ProxyDiagnostics {
   final ProxyRecoveryCause? lastRecoveryCause; // Category of the last recovery
   final String? lastRecoveryError; // Detail of the last recovery failure
   final int? lastDowntimeMs; // Estimated recent downtime in milliseconds
+  final bool isOnline; // Online decision based on link-layer connectivity
+  final OnlineDecisionSource onlineDecisionSource; // What isOnline is based on
+  final bool isUpstreamReachable; // Whether requests can actually be forwarded
+  final UpstreamCircuitState upstreamCircuitState; // Circuit breaker state
+  final int consecutiveUpstreamFailures; // Consecutive attempts that could not reach the upstream
+  final DateTime? lastUpstreamSuccessAt; // Date/time the upstream was last reached
+}
+```
+
+`isOnline` through `lastUpstreamSuccessAt` are required arguments. Code that constructs `ProxyDiagnostics` directly has to supply them.
+
+#### `UpstreamCircuitState`
+
+Enum representing the state of the upstream reachability circuit breaker.
+
+```dart
+enum UpstreamCircuitState {
+  closed, // Considered reachable; requests are forwarded as usual
+  open, // Considered unreachable; requests go to the fallback without forwarding
+  halfOpen // A reachability probe is in flight
+}
+```
+
+#### `OnlineDecisionSource`
+
+Enum representing what `ProxyDiagnostics.isOnline` is based on.
+
+```dart
+enum OnlineDecisionSource {
+  initial, // Connectivity read during start() (including the fallback when it cannot be read)
+  linkLayer // A connectivity change event received after startup
 }
 ```
 

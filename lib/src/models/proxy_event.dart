@@ -57,6 +57,9 @@ enum ProxyEventType {
   /// リクエストドロップ
   requestDropped,
 
+  /// リクエストを隔離領域へ退避
+  requestQuarantined,
+
   /// ネットワーク復旧
   networkOnline,
 
@@ -74,4 +77,10 @@ enum ProxyEventType {
 
   /// 再バインドにより復旧した
   serverRecovered,
+
+  /// 上流へ到達できないと判定し、転送を停止した
+  upstreamCircuitOpened,
+
+  /// 上流への到達を確認し、転送を再開した
+  upstreamCircuitClosed,
 }

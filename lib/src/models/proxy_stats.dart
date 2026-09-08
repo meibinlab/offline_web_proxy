@@ -91,6 +91,24 @@ class ProxyStats {
   /// Monitor this metric closely in production environments.
   final int droppedRequestsCount;
 
+  /// Number of dropped requests the application has not acknowledged yet.
+  ///
+  /// Counts entries returned by `getDroppedRequests()` whose `acknowledged`
+  /// flag is still false. Check it at startup to notice requests that were
+  /// discarded while nobody was watching, then call
+  /// `acknowledgeDroppedRequests()` once the operator has seen them.
+  final int unacknowledgedDroppedCount;
+
+  /// Number of requests waiting in the quarantine store.
+  ///
+  /// Requests move here instead of being discarded when
+  /// `ProxyConfig.dropPolicy` is `DropPolicy.quarantine`. They keep their body
+  /// and stay until they are resent or discarded explicitly.
+  ///
+  /// **Warning**: A non-zero value means updates have not reached the upstream
+  /// and need a decision.
+  final int quarantinedCount;
+
   /// Timestamp when the proxy server was started.
   ///
   /// Used as the baseline for calculating uptime and provides context for
@@ -112,12 +130,16 @@ class ProxyStats {
     required this.cacheHitRate,
     required this.queueLength,
     required this.droppedRequestsCount,
+    this.unacknowledgedDroppedCount = 0,
+    this.quarantinedCount = 0,
     required this.startedAt,
     required this.uptime,
   });
 
   @override
   String toString() {
-    return 'ProxyStats{requests: $totalRequests, hitRate: ${(cacheHitRate * 100).toStringAsFixed(1)}%, uptime: $uptime}';
+    return 'ProxyStats{requests: $totalRequests, '
+        'hitRate: ${(cacheHitRate * 100).toStringAsFixed(1)}%, '
+        'quarantined: $quarantinedCount, uptime: $uptime}';
   }
 }

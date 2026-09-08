@@ -29,6 +29,15 @@ class _RealHttpOverrides extends HttpOverrides {
 /// HTTP 応答の検証に必要な要素だけを保持する型。
 typedef _HttpResult = ({int statusCode, HttpHeaders headers, String body});
 
+/// ページ遷移としてリクエストするためのヘッダ。
+///
+/// ブラウザエンジンが付与するヘッダを再現し、HTML のフォールバック応答を
+/// 受け取る経路を検証するために使用する。
+const Map<String, String> _navigationHeaders = {
+  'Sec-Fetch-Mode': 'navigate',
+  'Accept': 'text/html',
+};
+
 /// 上流サーバのモック。受信パスを記録し、常に 200 を返す。
 class _MockUpstream {
   _MockUpstream(this._server) {
@@ -120,10 +129,14 @@ Future<bool> _canConnect(int port) async {
 }
 
 /// 実 HttpClient で GET を実行し、ステータス、ヘッダ、本文を返す。
-Future<_HttpResult> _performGet(Uri uri) async {
+Future<_HttpResult> _performGet(
+  Uri uri, {
+  Map<String, String> headers = const {},
+}) async {
   final client = HttpClient();
   try {
     final request = await client.getUrl(uri);
+    headers.forEach(request.headers.set);
     final response = await request.close();
     final body = await response.transform(utf8.decoder).join();
     return (
@@ -1038,8 +1051,10 @@ void main() {
             ),
           );
 
-          final result =
-              await _performGet(Uri.parse('http://127.0.0.1:$port/slow'));
+          final result = await _performGet(
+            Uri.parse('http://127.0.0.1:$port/slow'),
+            headers: _navigationHeaders,
+          );
 
           // タイムアウト時は 504 を返すこと
           expect(result.statusCode, equals(HttpStatus.gatewayTimeout));

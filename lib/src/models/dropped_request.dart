@@ -18,6 +18,12 @@ class DroppedRequest {
   /// 詳細なエラーメッセージ
   final String errorMessage;
 
+  /// アプリ側が内容を確認済みかどうか
+  ///
+  /// `acknowledgeDroppedRequests()` を呼ぶまで `false` のままです。
+  /// 起動時に未確認の履歴が残っていることを検知する用途で使用します。
+  final bool acknowledged;
+
   const DroppedRequest({
     required this.url,
     required this.method,
@@ -25,10 +31,12 @@ class DroppedRequest {
     required this.dropReason,
     required this.statusCode,
     required this.errorMessage,
+    this.acknowledged = false,
   });
 
   @override
   String toString() {
-    return 'DroppedRequest{url: $url, reason: $dropReason, status: $statusCode}';
+    return 'DroppedRequest{url: $url, reason: $dropReason, '
+        'status: $statusCode, acknowledged: $acknowledged}';
   }
 }

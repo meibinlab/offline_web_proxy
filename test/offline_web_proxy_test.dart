@@ -1899,8 +1899,8 @@ void main() {
       expect(config.host, equals('127.0.0.1'));
       expect(config.port, equals(0));
       expect(config.cacheMaxSize, equals(200 * 1024 * 1024));
-      expect(config.connectTimeout, equals(Duration(seconds: 10)));
-      expect(config.requestTimeout, equals(Duration(seconds: 60)));
+      expect(config.connectTimeout, equals(Duration(seconds: 5)));
+      expect(config.requestTimeout, equals(Duration(seconds: 20)));
       expect(config.enableAdminApi, isFalse);
       expect(config.logLevel, equals('info'));
       expect(config.startupPaths, isEmpty);
