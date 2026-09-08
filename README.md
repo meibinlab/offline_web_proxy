@@ -184,6 +184,10 @@ const config = ProxyConfig(
     contentType: 'application/json; charset=utf-8',
     body: '{"queued":true}',
   ),
+  dropPolicy: DropPolicy.quarantine,
+  enableIdempotencyKey: true,
+  idempotencyHeaderName: 'Idempotency-Key',
+  idempotencyRetention: Duration(hours: 24),
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -213,6 +217,8 @@ Notes:
 - `upstreamFailureThreshold` is how many consecutive unreachable attempts stop forwarding. It prevents every request from waiting for the timeout when the link layer is up but the upstream is down. Set it to `0` to disable the behavior.
 - `upstreamProbePath`, `upstreamProbeMethod`, `upstreamProbeTimeout` and `upstreamProbeBackoffSeconds` control the reachability probe used while forwarding is stopped. Any response counts as reachable, regardless of status code.
 - `queuedResponse` and `offlineMissResponse` define the responses the proxy generates itself. Both default to JSON so that `response.json()` succeeds in the web app.
+- `dropPolicy` decides what happens to an update request the upstream rejected with 4xx. The default `quarantine` keeps it, body included, so `getQuarantinedRequests()` can surface it for a resend-or-discard decision. `drop` discards it and keeps only a history entry, as before.
+- `enableIdempotencyKey` attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. **Deduplication itself must be implemented on the upstream server.**
 
 ### Handling offline responses in the web app
 
@@ -416,8 +422,17 @@ final queued = await proxy.getQueuedRequests();
 final dropped = await proxy.getDroppedRequests(limit: 50);
 await proxy.clearDroppedRequests();
 
+// 上流に拒否されて再送を打ち切ったリクエスト
+final quarantined = await proxy.getQuarantinedRequests();
+for (final request in quarantined) {
+  // 原因を解消したら再送、送らないと判断したら破棄する
+  await proxy.retryQuarantinedRequest(request.id);
+}
+
 final stats = await proxy.getStats();
 print('requests=${stats.totalRequests} hitRate=${stats.cacheHitRate}');
+print('quarantined=${stats.quarantinedCount} '
+    'unacknowledged=${stats.unacknowledgedDroppedCount}');
 
 proxy.events.listen((event) {
   if (event.type == ProxyEventType.requestReceived) {

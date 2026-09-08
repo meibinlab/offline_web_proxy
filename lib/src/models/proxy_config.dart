@@ -1,3 +1,4 @@
+import 'drop_policy.dart';
 import 'proxy_response_config.dart';
 
 /// Configuration settings for the [OfflineWebProxy] server.
@@ -265,6 +266,49 @@ class ProxyConfig {
   /// **Default**: `5`
   final int maxRestartAttemptsPerMinute;
 
+  /// Whether the proxy attaches an idempotency key to queued update requests.
+  ///
+  /// A queued request is resent without knowing whether the upstream already
+  /// received the original attempt, so a request the upstream completed just
+  /// before the response was lost would otherwise be applied twice. The proxy
+  /// keeps one stable key per queued request and sends it on every attempt, so
+  /// the upstream can recognize the repeat.
+  ///
+  /// A key supplied by the client is kept as-is; otherwise the proxy generates
+  /// one. Deduplication itself has to happen on the upstream server: the proxy
+  /// cannot tell a lost response from a request that never arrived.
+  ///
+  /// **Default**: `true`
+  final bool enableIdempotencyKey;
+
+  /// Name of the header carrying the idempotency key.
+  ///
+  /// Change it when the upstream expects a different header.
+  ///
+  /// **Default**: `'Idempotency-Key'`
+  final String idempotencyHeaderName;
+
+  /// How long a completed idempotency key is remembered.
+  ///
+  /// Used to skip resending a request the proxy already delivered. After this
+  /// period the key is forgotten and a request carrying it is treated as new.
+  ///
+  /// **Default**: `Duration(hours: 24)`
+  final Duration idempotencyRetention;
+
+  /// What happens to a queued update request the upstream rejected with 4xx.
+  ///
+  /// Resending cannot change a 4xx result, so the request leaves the queue.
+  /// [DropPolicy.quarantine] keeps it, body included, in a quarantine store so
+  /// that it can be resent after the cause is fixed, or discarded on purpose.
+  /// [DropPolicy.drop] discards it and keeps only a history entry.
+  ///
+  /// The default keeps the request, because silently discarding business data
+  /// such as a sales record is rarely acceptable.
+  ///
+  /// **Default**: [DropPolicy.quarantine]
+  final DropPolicy dropPolicy;
+
   /// Response returned when an update request is stored in the offline queue.
   ///
   /// A queued request has not reached the upstream yet, so the front end must
@@ -341,6 +385,10 @@ class ProxyConfig {
     this.maxRestartAttemptsPerMinute = 5,
     this.offlineFallbackHtml,
     this.gatewayTimeoutHtml,
+    this.enableIdempotencyKey = true,
+    this.idempotencyHeaderName = 'Idempotency-Key',
+    this.idempotencyRetention = const Duration(hours: 24),
+    this.dropPolicy = DropPolicy.quarantine,
     this.queuedResponse = const ProxyResponseConfig(
       statusCode: 202,
       contentType: 'application/json; charset=utf-8',

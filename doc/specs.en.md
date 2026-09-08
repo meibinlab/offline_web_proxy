@@ -238,38 +238,69 @@ Provides methods for cookie management. See [20] API Reference for details.
 - **Staged Backoff**: Apply the seconds listed in `ProxyConfig.retryBackoffSeconds` in retry order (defaults to 1, 2, 5, 10, 20, 30 seconds), then keep using the last value
 - **Infinite Retry**: Keep retrying for network errors and 5xx responses
 
-### Drop Conditions
+### Conditions for Giving Up a Resend
 
-Remove requests from queue in the following cases:
+A request leaves the queue in the following case.
 
 - **4xx Errors**: Client errors (authentication failure, invalid request, etc.). Resending cannot change the result, so the request is removed
 
 Network errors and 5xx errors are treated as temporary failures: they are kept in the queue and retried.
 
+### What Happens to a Removed Request
+
+`ProxyConfig.dropPolicy` decides.
+
+| Policy | Behavior | Use for |
+| ------ | -------- | ------- |
+| `quarantine` (default) | Move it, body included, to a quarantine store | Business data such as a sales record, where losing a request matters |
+| `drop` | Discard it and keep only a history entry | Requests that can be lost safely |
+
+- **Quarantine notification**: Emits `ProxyEventType.requestQuarantined`
+- **Drop notification**: Emits `ProxyEventType.requestDropped`
+- **No double bookkeeping**: A quarantined request is not also written to the dropped history
+
 ### History Management
 
 Provides methods for queue management. See [20] API Reference for details.
 
+- **`getQuarantinedRequests()`**: List quarantined requests. Bodies are not returned
+- **`retryQuarantinedRequest(id)`**: Put the request back in the queue after the cause is fixed. The retry count is reset and the stored timestamp is set to the moment it was accepted, so it is sent after requests already waiting
+- **`discardQuarantinedRequest(id)`**: Discard a request after reviewing it
+- **`clearQuarantinedRequests()`**: Discard every quarantined request
 - **`getDroppedRequests()`**: Get history of dropped requests. Useful for debugging and troubleshooting
+- **`acknowledgeDroppedRequests()`**: Mark the history as seen. The entries themselves are kept
 
-## [6] Idempotency: Not Implemented
+### Noticing Unhandled Requests
 
-This chapter describes a planned specification. The current implementation neither attaches idempotency keys nor detects duplicates.
-Queued requests are resent without knowing whether the upstream already received them, so a request that the upstream completed just before the response was lost can be duplicated by the resend. Handle deduplication on the upstream server when it matters.
+- **`ProxyStats.quarantinedCount`**: Number of quarantined requests. Anything above zero needs a decision
+- **`ProxyStats.unacknowledgedDroppedCount`**: Number of dropped history entries not acknowledged yet. Check it at startup to notice requests discarded while nobody was watching
+
+## [6] Idempotency
 
 ### Duplicate Request Prevention
 
-Use idempotency keys to prevent duplicate execution of the same request.
+A queued request is resent without knowing whether the upstream already received it. If the upstream finished processing and only the response was lost, the resend can apply the same update twice. To avoid that, each update request is assigned one key that is sent on the first forward and on every resend.
+
+- **When the key is decided**: On receiving the request. A key supplied by the client is kept; otherwise the proxy generates one
+- **How keys are generated**: From random data, not from the body. Two identical sales totals in a row must not be treated as the same request and collapsed into one
+- **Where it applies**: Both the forwarded attempt and every queue resend carry the same key
+- **Queue deduplication**: Resubmitting the same key does not add a second queue entry
+- **Skipping delivered requests**: A key already known to have reached the upstream within the retention period is not resent
+
+### Division of Responsibility
+
+The proxy guarantees only that the same operation carries the same key. **Deduplication itself must be implemented on the upstream server.** The proxy cannot tell a lost response from a request that never arrived.
 
 ### Supported Headers
 
-- **Idempotency-Key**: Standard idempotency key (priority)
-- **X-Request-ID**: Custom request ID (alternative)
+- **`ProxyConfig.idempotencyHeaderName`**: Defaults to `Idempotency-Key`; change it to match the upstream
+- **`ProxyConfig.enableIdempotencyKey`**: Set to `false` to send no key
 
 ### Retention Period
 
-- **24 Hours**: Retain idempotency key for 24 hours. After expiration, treat as new request
+- **24 hours by default**: Configurable via `ProxyConfig.idempotencyRetention`. After it expires, a request carrying the key is treated as new
 - **Storage**: Persist with Hive. Valid even after app restart
+- **Expiry**: Removed by the hourly maintenance task
 
 ## [7] Response Compression
 

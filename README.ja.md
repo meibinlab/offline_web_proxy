@@ -184,6 +184,10 @@ const config = ProxyConfig(
     contentType: 'application/json; charset=utf-8',
     body: '{"queued":true}',
   ),
+  dropPolicy: DropPolicy.quarantine,
+  enableIdempotencyKey: true,
+  idempotencyHeaderName: 'Idempotency-Key',
+  idempotencyRetention: Duration(hours: 24),
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -213,6 +217,8 @@ const config = ProxyConfig(
 - `upstreamFailureThreshold` は、上流へ到達できない状態が連続した場合に転送を止めるまでの回数です。リンク層は接続済みでも上流が落ちている環境で、リクエストが毎回タイムアウトまで待たされるのを防ぎます。0 を指定すると無効になります。
 - `upstreamProbePath`、`upstreamProbeMethod`、`upstreamProbeTimeout`、`upstreamProbeBackoffSeconds` は、転送を止めている間の復帰確認に使います。応答が返れば到達可能と判定するため、ステータスコードは問いません。
 - `queuedResponse` と `offlineMissResponse` は、proxy が自分で生成する応答の内容です。既定はどちらも JSON で、Web アプリ側の `response.json()` が成功します。
+- `dropPolicy` は、上流が 4xx で拒否した更新系リクエストの扱いです。既定の `quarantine` では本文を保持したまま隔離し、`getQuarantinedRequests()` で確認して再送または破棄を判断できます。`drop` を指定すると従来どおり破棄し、履歴のみ残します。
+- `enableIdempotencyKey` は更新系リクエストへのべき等性キー付与です。最初の転送と再送で同じキーを送るため、応答を受け取れなかったリクエストが再送で二重に適用されることを上流側で防げます。**重複の排除自体は上流サーバでの実装が必要です。**
 
 ### Web アプリ側でのオフライン応答の扱い
 
@@ -416,8 +422,17 @@ final queued = await proxy.getQueuedRequests();
 final dropped = await proxy.getDroppedRequests(limit: 50);
 await proxy.clearDroppedRequests();
 
+// 上流に拒否されて再送を打ち切ったリクエスト
+final quarantined = await proxy.getQuarantinedRequests();
+for (final request in quarantined) {
+  // 原因を解消したら再送、送らないと判断したら破棄する
+  await proxy.retryQuarantinedRequest(request.id);
+}
+
 final stats = await proxy.getStats();
 print('requests=${stats.totalRequests} hitRate=${stats.cacheHitRate}');
+print('quarantined=${stats.quarantinedCount} '
+    'unacknowledged=${stats.unacknowledgedDroppedCount}');
 
 proxy.events.listen((event) {
   if (event.type == ProxyEventType.requestReceived) {

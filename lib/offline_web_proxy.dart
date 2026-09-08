@@ -74,6 +74,7 @@ import 'src/models/cookie_header_builder.dart';
 import 'src/models/cookie_info.dart';
 import 'src/models/cookie_record.dart';
 import 'src/models/cookie_restore_entry.dart';
+import 'src/models/drop_policy.dart';
 import 'src/models/dropped_request.dart';
 import 'src/models/online_decision_source.dart';
 import 'src/models/proxy_config.dart';
@@ -84,6 +85,7 @@ import 'src/models/proxy_recovery_result.dart';
 import 'src/models/proxy_response_config.dart';
 import 'src/models/proxy_stats.dart';
 import 'src/models/proxy_webview_navigation_recommendation.dart';
+import 'src/models/quarantined_request.dart';
 import 'src/models/queued_request.dart';
 import 'src/models/response_header_snapshot.dart';
 import 'src/models/upstream_circuit_state.dart';
@@ -95,6 +97,7 @@ export 'src/models/cache_entry.dart';
 export 'src/models/cache_stats.dart';
 export 'src/models/cookie_info.dart';
 export 'src/models/cookie_restore_entry.dart';
+export 'src/models/drop_policy.dart';
 export 'src/models/dropped_request.dart';
 export 'src/models/online_decision_source.dart';
 export 'src/models/proxy_config.dart';
@@ -105,6 +108,7 @@ export 'src/models/proxy_recovery_result.dart';
 export 'src/models/proxy_response_config.dart';
 export 'src/models/proxy_stats.dart';
 export 'src/models/proxy_webview_navigation_recommendation.dart';
+export 'src/models/quarantined_request.dart';
 export 'src/models/queued_request.dart';
 export 'src/models/upstream_circuit_state.dart';
 export 'src/models/warmup_result.dart';
@@ -140,12 +144,19 @@ const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 const int _cookieEncryptionKeyLength = 32;
 const String _droppedRequestBoxName = 'proxy_dropped_requests';
+const String _quarantinedRequestBoxName = 'proxy_quarantined_requests';
 const Set<String> _loopbackHosts = {'127.0.0.1', 'localhost'};
 const String _defaultHealthCheckPath = '/__offline_web_proxy/health';
 const String _defaultLoopbackHost = '127.0.0.1';
 
 /// 復旧の連続失敗時に挟む待機秒数。末尾の値は以降も維持されます。
 const List<int> _recoveryBackoffSeconds = [0, 1, 2, 5, 10];
+
+/// 設定が読み込めない場合に使う既定のべき等性キーのヘッダ名。
+const String _defaultIdempotencyHeaderName = 'Idempotency-Key';
+
+/// 設定が読み込めない場合に使う既定のべき等性キーの保持期間。
+const Duration _defaultIdempotencyRetention = Duration(hours: 24);
 
 /// 設定が読み込めない場合に使う既定のキュー投入応答。
 const ProxyResponseConfig _defaultQueuedResponse = ProxyResponseConfig(
@@ -343,6 +354,16 @@ class OfflineWebProxy {
   /// ドロップされたリクエスト履歴の永続化ボックス。
   Box? _droppedRequestBox;
 
+  /// 上流に拒否されたリクエストの隔離領域。
+  Box? _quarantinedRequestBox;
+
+  /// べき等性キーの生成に使う乱数生成器。
+  final Random _idempotencyKeyRandom = Random.secure();
+
+  /// 未確認のドロップ履歴の件数。
+  /// `getStats()` のたびに履歴を全走査しないよう保持し、更新時に破棄する。
+  int? _unacknowledgedDroppedCount;
+
   /// 起動時に構築した静的リソースの proxy URL と asset key の対応表。
   final Map<String, String> _staticResourceAssetMap = {};
 
@@ -528,6 +549,7 @@ class OfflineWebProxy {
       await _webStorageBox?.close();
       await _idempotencyBox?.close();
       await _droppedRequestBox?.close();
+      await _quarantinedRequestBox?.close();
 
       // HTTPクライアントを閉じる
       _httpClient?.close(force: true);
@@ -1736,6 +1758,182 @@ class OfflineWebProxy {
     }
   }
 
+  /// ドロップされたリクエストの履歴を確認済みにします。
+  ///
+  /// 起動時に未確認の履歴を検知したあと、利用者へ提示し終えた時点で
+  /// 呼び出してください。履歴自体は削除しないため、内容は後から参照できます。
+  ///
+  /// Returns: 確認済みへ変更した件数。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 更新に失敗した場合。
+  Future<int> acknowledgeDroppedRequests() async {
+    try {
+      final box = _droppedRequestBox;
+      if (box == null || !box.isOpen) {
+        return 0;
+      }
+
+      var updated = 0;
+      for (final key in box.keys.toList()) {
+        final data = box.get(key) as Map?;
+        if (data == null || data['acknowledged'] == true) {
+          continue;
+        }
+
+        final updatedData = Map<String, dynamic>.from(data);
+        updatedData['acknowledged'] = true;
+        await box.put(key, updatedData);
+        updated++;
+      }
+
+      _unacknowledgedDroppedCount = null;
+      return updated;
+    } catch (e) {
+      throw QueueOperationException('acknowledgeDropped',
+          'ドロップされたリクエストの確認状態の更新に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// 隔離されたリクエストの一覧を取得します。
+  ///
+  /// 上流に拒否されて再送を中止したリクエストのうち、
+  /// [ProxyConfig.dropPolicy] が [DropPolicy.quarantine] の場合に退避した
+  /// ものを返します。本文は返しません。
+  ///
+  /// [limit] 取得する最大件数。
+  ///
+  /// Returns: 隔離されているリクエストの一覧。隔離した順に並びます。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 取得に失敗した場合。
+  Future<List<QuarantinedRequest>> getQuarantinedRequests({int? limit}) async {
+    try {
+      if (limit != null && limit <= 0) {
+        return const <QuarantinedRequest>[];
+      }
+
+      final box = _quarantinedRequestBox;
+      if (box == null || !box.isOpen) {
+        return const <QuarantinedRequest>[];
+      }
+
+      final requests = <QuarantinedRequest>[];
+      var index = 0;
+      for (final key in box.keys) {
+        final data = box.get(key) as Map?;
+        if (data != null) {
+          requests.add(_mapToQuarantinedRequest(key.toString(), data));
+          if (limit != null && requests.length >= limit) {
+            break;
+          }
+        }
+
+        index++;
+        if (index % 50 == 0) {
+          await Future.delayed(Duration.zero);
+        }
+      }
+
+      return requests;
+    } catch (e) {
+      throw QueueOperationException('getQuarantined',
+          '隔離されたリクエストの取得に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// 隔離されたリクエストをキューへ戻して再送します。
+  ///
+  /// 拒否の原因を解消したあとに呼び出してください。再試行回数は初期化し、
+  /// オンラインであれば直ちに送信を試みます。
+  ///
+  /// [id] [getQuarantinedRequests] が返した識別子。
+  ///
+  /// Returns: キューへ戻した場合は `true`。該当が無い場合は `false`。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 操作に失敗した場合。
+  Future<bool> retryQuarantinedRequest(String id) async {
+    try {
+      final quarantineBox = _quarantinedRequestBox;
+      final queueBox = _queueBox;
+      if (quarantineBox == null ||
+          !quarantineBox.isOpen ||
+          queueBox == null ||
+          !queueBox.isOpen) {
+        return false;
+      }
+
+      final data = quarantineBox.get(id) as Map?;
+      if (data == null) {
+        return false;
+      }
+
+      final now = DateTime.now();
+      final queueData = Map<String, dynamic>.from(data)
+        ..remove('quarantinedAt')
+        ..remove('reason')
+        ..remove('errorMessage')
+        ..remove('statusCode')
+        ..['retryCount'] = 0
+        ..['nextRetryAt'] = now.toIso8601String()
+        // 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る
+        ..['queuedAt'] = now.toIso8601String();
+
+      final key = _generateUniqueStorageKey(queueBox);
+      await queueBox.put(key, queueData);
+      await quarantineBox.delete(id);
+
+      _emitEvent(ProxyEventType.requestQueued,
+          queueData['url'] as String? ?? '', {'queueId': key});
+
+      // ignore: discarded_futures
+      _drainQueue();
+      return true;
+    } catch (e) {
+      throw QueueOperationException('retryQuarantined',
+          '隔離されたリクエストの再送に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// 隔離されたリクエストを破棄します。
+  ///
+  /// 内容を確認したうえで送信しないと判断した場合に呼び出してください。
+  ///
+  /// [id] [getQuarantinedRequests] が返した識別子。
+  ///
+  /// Returns: 破棄した場合は `true`。該当が無い場合は `false`。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 操作に失敗した場合。
+  Future<bool> discardQuarantinedRequest(String id) async {
+    try {
+      final box = _quarantinedRequestBox;
+      if (box == null || !box.isOpen || !box.containsKey(id)) {
+        return false;
+      }
+
+      await box.delete(id);
+      return true;
+    } catch (e) {
+      throw QueueOperationException('discardQuarantined',
+          '隔離されたリクエストの破棄に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// 隔離されたリクエストを全て破棄します。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 破棄に失敗した場合。
+  Future<void> clearQuarantinedRequests() async {
+    try {
+      await _quarantinedRequestBox?.clear();
+    } catch (e) {
+      throw QueueOperationException('clearQuarantined',
+          '隔離されたリクエストの破棄に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
   /// ドロップされたリクエストの履歴を全て削除します。
   ///
   /// Throws:
@@ -1743,6 +1941,7 @@ class OfflineWebProxy {
   Future<void> clearDroppedRequests() async {
     try {
       await _droppedRequestBox?.clear();
+      _unacknowledgedDroppedCount = null;
     } catch (e) {
       throw QueueOperationException('clearDropped',
           'ドロップされたリクエスト履歴の削除に失敗しました: $e', e is Exception ? e : null);
@@ -1759,6 +1958,8 @@ class OfflineWebProxy {
     try {
       final queueLength = _queueBox?.length ?? 0;
       final droppedRequestsCount = _droppedRequestBox?.length ?? 0;
+      final quarantinedCount = _quarantinedRequestBox?.length ?? 0;
+      final unacknowledgedDroppedCount = _countUnacknowledgedDroppedRequests();
       final uptime = _startedAt != null
           ? DateTime.now().difference(_startedAt!)
           : Duration.zero;
@@ -1770,6 +1971,8 @@ class OfflineWebProxy {
         cacheHitRate: _totalRequests > 0 ? _cacheHits / _totalRequests : 0.0,
         queueLength: queueLength,
         droppedRequestsCount: droppedRequestsCount,
+        unacknowledgedDroppedCount: unacknowledgedDroppedCount,
+        quarantinedCount: quarantinedCount,
         startedAt: _startedAt ?? DateTime.now(),
         uptime: uptime,
       );
@@ -1782,6 +1985,32 @@ class OfflineWebProxy {
   // ──────────────────────────────────────────────────────
   // プライベートメソッド
   // ──────────────────────────────────────────────────────
+
+  /// 未確認のドロップ履歴の件数を数えます。
+  ///
+  /// Returns: `acknowledged` が `false` の履歴件数。
+  int _countUnacknowledgedDroppedRequests() {
+    final cached = _unacknowledgedDroppedCount;
+    if (cached != null) {
+      return cached;
+    }
+
+    final box = _droppedRequestBox;
+    if (box == null || !box.isOpen) {
+      return 0;
+    }
+
+    var count = 0;
+    for (final key in box.keys) {
+      final data = box.get(key) as Map?;
+      if (data != null && data['acknowledged'] != true) {
+        count++;
+      }
+    }
+
+    _unacknowledgedDroppedCount = count;
+    return count;
+  }
 
   /// デフォルト設定を読み込みます。
   ///
@@ -1830,6 +2059,8 @@ class OfflineWebProxy {
     await _ensureCookieStorageInitialized();
     _idempotencyBox = await Hive.openBox('proxy_idempotency');
     _droppedRequestBox = await Hive.openBox(_droppedRequestBoxName);
+    _quarantinedRequestBox = await Hive.openBox(_quarantinedRequestBoxName);
+    _unacknowledgedDroppedCount = null;
   }
 
   /// サーバ起動時に使用するポートを解決します。
@@ -2647,11 +2878,17 @@ window.__offline_web_proxy_web_storage_bridge = {
         ? null
         : await _readRequestBodyBytes(request);
 
+    // 転送とキュー再送で同じキーを使い、timeout 後の再送を上流が重複と判別できるようにする
+    final String? idempotencyKey = _isReadRequestMethod(request.method)
+        ? null
+        : _resolveIdempotencyKey(request).value;
+
     // 上流サーバに転送
     try {
       final result = await _forwardToUpstream(
         request,
         requestBodyBytes: requestBodyBytes,
+        idempotencyKey: idempotencyKey,
       );
 
       final redirectResponse = _tryBuildHandledRedirectResponse(
@@ -2694,7 +2931,11 @@ window.__offline_web_proxy_web_storage_bridge = {
       // read系以外のリクエストが失敗した場合はキューに保存
       String? queueId;
       if (!_isReadRequestMethod(request.method) && result.statusCode >= 500) {
-        queueId = await _queueRequest(request, bodyBytes: requestBodyBytes);
+        queueId = await _queueRequest(
+          request,
+          bodyBytes: requestBodyBytes,
+          idempotencyKey: idempotencyKey,
+        );
       }
 
       _cacheMisses++;
@@ -2732,8 +2973,11 @@ window.__offline_web_proxy_web_storage_bridge = {
 
         return _buildUpstreamUnreachableResponse(request);
       } else if (!_isReadRequestMethod(request.method)) {
-        final queueId =
-            await _queueRequest(request, bodyBytes: requestBodyBytes);
+        final queueId = await _queueRequest(
+          request,
+          bodyBytes: requestBodyBytes,
+          idempotencyKey: idempotencyKey,
+        );
         return _buildQueuedResponse(queueId);
       }
 
@@ -3220,6 +3464,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       })> _forwardToUpstream(
     shelf.Request request, {
     Uint8List? requestBodyBytes,
+    String? idempotencyKey,
   }) async {
     if (_config?.origin.isEmpty ?? true) {
       throw Exception('No upstream origin configured');
@@ -3252,6 +3497,14 @@ window.__offline_web_proxy_web_storage_bridge = {
           .timeout(_remainingUntil(deadline));
       ioRequest.followRedirects = false;
       await _copyRequestHeaders(request, ioRequest, upstreamUri: uri);
+
+      // 応答を受け取れずキューへ回った場合でも同じキーで再送できるようにする
+      if (idempotencyKey != null && (_config?.enableIdempotencyKey ?? true)) {
+        ioRequest.headers.set(
+          _config?.idempotencyHeaderName ?? _defaultIdempotencyHeaderName,
+          idempotencyKey,
+        );
+      }
 
       // read系以外のリクエストの場合はボディをコピー
       if (!_isReadRequestMethod(request.method)) {
@@ -3962,11 +4215,14 @@ window.__offline_web_proxy_web_storage_bridge = {
   ///
   /// [request] キューに保存するHTTPリクエスト。
   /// [bodyBytes] 既に読み取り済みのリクエストボディ。
+  /// [idempotencyKey] 転送時に使用済みのべき等性キー。
+  ///   省略した場合はこの時点で決定します。
   ///
   /// Returns: 保存に使用したキュー ID。保存領域が使えない場合は `null`。
   Future<String?> _queueRequest(
     shelf.Request request, {
     List<int>? bodyBytes,
+    String? idempotencyKey,
   }) async {
     final List<int> body;
     if (request.method == 'GET') {
@@ -3994,9 +4250,136 @@ window.__offline_web_proxy_web_storage_bridge = {
       return null;
     }
 
+    if (_config?.enableIdempotencyKey ?? true) {
+      final resolved = idempotencyKey != null
+          ? (value: idempotencyKey, suppliedByClient: true)
+          : _resolveIdempotencyKey(request);
+
+      // クライアントが同じキーで送り直した場合、キューへ二重に積まない。
+      // 生成したキーは一致し得ないため、指定された場合だけ探索する。
+      if (resolved.suppliedByClient) {
+        final existingKey = _findQueuedKeyByIdempotencyKey(box, resolved.value);
+        if (existingKey != null) {
+          return existingKey;
+        }
+      }
+
+      queueData['idempotencyKey'] = resolved.value;
+    }
+
     final key = _generateUniqueStorageKey(box);
     await box.put(key, queueData);
     return key;
+  }
+
+  /// リクエストに適用するべき等性キーを決定します。
+  ///
+  /// クライアントが付与済みの場合はその値を尊重し、無い場合は生成します。
+  ///
+  /// [request] 対象のHTTPリクエスト。
+  ///
+  /// Returns: べき等性キーと、クライアントが指定した値かどうか。
+  ({String value, bool suppliedByClient}) _resolveIdempotencyKey(
+    shelf.Request request,
+  ) {
+    final headerName =
+        _config?.idempotencyHeaderName ?? _defaultIdempotencyHeaderName;
+    final supplied = request.headers[headerName]?.trim();
+    if (supplied != null && supplied.isNotEmpty) {
+      return (value: supplied, suppliedByClient: true);
+    }
+
+    // 同じ内容の会計が連続しても別の要求として扱えるよう、内容ではなく乱数で採番する
+    final buffer = StringBuffer();
+    for (var i = 0; i < 4; i++) {
+      buffer.write(
+        _idempotencyKeyRandom
+            .nextInt(0x100000000)
+            .toRadixString(16)
+            .padLeft(8, '0'),
+      );
+    }
+    return (value: buffer.toString(), suppliedByClient: false);
+  }
+
+  /// 同じべき等性キーを持つキュー項目のキーを探します。
+  ///
+  /// [box] 対象のキュー保存領域。
+  /// [idempotencyKey] 検索するべき等性キー。
+  ///
+  /// Returns: 見つかったキュー ID。無い場合は `null`。
+  String? _findQueuedKeyByIdempotencyKey(Box box, String idempotencyKey) {
+    for (final key in box.keys) {
+      final data = box.get(key) as Map?;
+      if (data != null && data['idempotencyKey'] == idempotencyKey) {
+        return key.toString();
+      }
+    }
+
+    return null;
+  }
+
+  /// 上流へ届いたことが確認済みのべき等性キーかどうかを返します。
+  ///
+  /// [idempotencyKey] 判定するべき等性キー。
+  ///
+  /// Returns: 送信済みとして扱う場合は `true`。
+  bool _isIdempotencyKeyCompleted(String idempotencyKey) {
+    final box = _idempotencyBox;
+    if (box == null || !box.isOpen) {
+      return false;
+    }
+
+    final completedAt = box.get(idempotencyKey) as String?;
+    if (completedAt == null) {
+      return false;
+    }
+
+    final parsed = DateTime.tryParse(completedAt);
+    if (parsed == null) {
+      return false;
+    }
+
+    final retention =
+        _config?.idempotencyRetention ?? _defaultIdempotencyRetention;
+    return DateTime.now().difference(parsed) < retention;
+  }
+
+  /// 上流へ届いたべき等性キーを記録します。
+  ///
+  /// [idempotencyKey] 記録するべき等性キー。
+  Future<void> _recordIdempotencyKey(String idempotencyKey) async {
+    final box = _idempotencyBox;
+    if (box == null || !box.isOpen) {
+      return;
+    }
+
+    await box.put(idempotencyKey, DateTime.now().toIso8601String());
+  }
+
+  /// 保持期間を過ぎたべき等性キーを削除します。
+  ///
+  /// エラーが発生しても例外をスローしません。
+  Future<void> _purgeExpiredIdempotencyKeys() async {
+    final box = _idempotencyBox;
+    if (box == null || !box.isOpen) {
+      return;
+    }
+
+    try {
+      final retention =
+          _config?.idempotencyRetention ?? _defaultIdempotencyRetention;
+      final threshold = DateTime.now().subtract(retention);
+
+      for (final key in box.keys.toList()) {
+        final recordedAt = DateTime.tryParse(box.get(key) as String? ?? '');
+        if (recordedAt == null || recordedAt.isBefore(threshold)) {
+          await box.delete(key);
+        }
+      }
+    } catch (e) {
+      // 期限切れの削除に失敗しても運用は継続する
+    }
   }
 
   /// 上流サーバからリソースを取得します。
@@ -4080,6 +4463,8 @@ window.__offline_web_proxy_web_storage_bridge = {
     _cachePurgeTimer = Timer.periodic(const Duration(hours: 1), (timer) {
       // ignore: discarded_futures
       _purgeExpiredCache();
+      // ignore: discarded_futures
+      _purgeExpiredIdempotencyKeys();
     });
 
     // 定期ヘルスチェックを設定（既定では無効）
@@ -4188,17 +4573,41 @@ window.__offline_web_proxy_web_storage_bridge = {
         await box.delete(key);
         _emitEvent(ProxyEventType.queueDrained, itemUrl, {});
       } else if (result.shouldDrop) {
-        await box.delete(key);
-        await _recordDroppedRequest(
-          data,
-          statusCode: result.statusCode,
-          dropReason: result.dropReason ?? 'dropped',
-          errorMessage: result.errorMessage ?? 'HTTP ${result.statusCode}',
-        );
-        _emitEvent(ProxyEventType.requestDropped, itemUrl, {
-          'statusCode': result.statusCode,
-          'dropReason': result.dropReason,
-        });
+        final reason = result.dropReason ?? 'dropped';
+        final errorMessage = result.errorMessage ?? 'HTTP ${result.statusCode}';
+
+        if ((_config?.dropPolicy ?? DropPolicy.quarantine) ==
+            DropPolicy.quarantine) {
+          // 本文ごと隔離してから取り除き、退避に失敗した場合は消さない
+          final quarantineId = await _quarantineRequest(
+            data,
+            statusCode: result.statusCode,
+            reason: reason,
+            errorMessage: errorMessage,
+          );
+          if (quarantineId == null) {
+            return;
+          }
+
+          await box.delete(key);
+          _emitEvent(ProxyEventType.requestQuarantined, itemUrl, {
+            'quarantineId': quarantineId,
+            'statusCode': result.statusCode,
+            'reason': reason,
+          });
+        } else {
+          await box.delete(key);
+          await _recordDroppedRequest(
+            data,
+            statusCode: result.statusCode,
+            dropReason: reason,
+            errorMessage: errorMessage,
+          );
+          _emitEvent(ProxyEventType.requestDropped, itemUrl, {
+            'statusCode': result.statusCode,
+            'dropReason': result.dropReason,
+          });
+        }
       } else {
         _updateRetrySchedule(data);
         await box.put(key, data);
@@ -4243,6 +4652,18 @@ window.__offline_web_proxy_web_storage_bridge = {
     final method = data['method'] as String;
     final headers = Map<String, String>.from(data['headers'] as Map? ?? {});
     final body = data['body'] as List<int>? ?? [];
+    final idempotencyKey = data['idempotencyKey'] as String?;
+
+    // 既に上流へ届いたことが分かっている場合は送り直さない
+    if (idempotencyKey != null && _isIdempotencyKeyCompleted(idempotencyKey)) {
+      return (
+        success: true,
+        shouldDrop: false,
+        statusCode: HttpStatus.ok,
+        dropReason: null,
+        errorMessage: null,
+      );
+    }
 
     final client = _getOrCreateHttpClient();
     client.autoUncompress = true;
@@ -4277,6 +4698,14 @@ window.__offline_web_proxy_web_storage_bridge = {
         requestHeaders: headers,
       );
 
+      // 再送のたびに同じキーを送り、上流側で重複を判別できるようにする
+      if (idempotencyKey != null) {
+        request.headers.set(
+          _config?.idempotencyHeaderName ?? _defaultIdempotencyHeaderName,
+          idempotencyKey,
+        );
+      }
+
       if (body.isNotEmpty && method != 'GET') {
         request.add(body);
       }
@@ -4288,6 +4717,10 @@ window.__offline_web_proxy_web_storage_bridge = {
         // 2xxステータスコードを成功とみなす
         final statusCode = response.statusCode;
         if (statusCode >= 200 && statusCode < 300) {
+          if (idempotencyKey != null) {
+            await _recordIdempotencyKey(idempotencyKey);
+          }
+
           return (
             success: true,
             shouldDrop: false,
@@ -4510,6 +4943,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       dropReason: data['dropReason'] as String? ?? 'dropped',
       statusCode: data['statusCode'] as int? ?? 0,
       errorMessage: data['errorMessage'] as String? ?? '',
+      // 旧バージョンの履歴には項目が無いため、未確認として扱う
+      acknowledged: data['acknowledged'] as bool? ?? false,
     );
   }
 
@@ -5043,6 +5478,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       'dropReason': dropReason,
       'statusCode': statusCode,
       'errorMessage': errorMessage,
+      'acknowledged': false,
     };
 
     final box = _droppedRequestBox;
@@ -5053,6 +5489,63 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     final key = _generateUniqueStorageKey(box);
     await box.put(key, droppedData);
+    _unacknowledgedDroppedCount = null;
+  }
+
+  /// リクエストを隔離領域へ退避します。
+  ///
+  /// 本文を含むキューデータをそのまま保持するため、原因を解消したあとに
+  /// [retryQuarantinedRequest] で再送できます。
+  ///
+  /// [data] 退避するキューデータ。
+  /// [statusCode] 上流から返されたステータスコード。
+  /// [reason] 退避理由。
+  /// [errorMessage] 詳細なエラーメッセージ。
+  ///
+  /// Returns: 退避に使用した ID。保存領域が使えない場合は `null`。
+  Future<String?> _quarantineRequest(
+    Map data, {
+    required int statusCode,
+    required String reason,
+    required String errorMessage,
+  }) async {
+    final box = _quarantinedRequestBox;
+    // 停止処理と競合した場合は閉じた保存領域へ書き込まない
+    if (box == null || !box.isOpen) {
+      return null;
+    }
+
+    final quarantinedData = Map<String, dynamic>.from(data);
+    quarantinedData['quarantinedAt'] = DateTime.now().toIso8601String();
+    quarantinedData['statusCode'] = statusCode;
+    quarantinedData['reason'] = reason;
+    quarantinedData['errorMessage'] = errorMessage;
+
+    final key = _generateUniqueStorageKey(box);
+    await box.put(key, quarantinedData);
+    return key;
+  }
+
+  /// 隔離データを [QuarantinedRequest] へ変換します。
+  ///
+  /// [id] 隔離領域内での識別子。
+  /// [data] 保存されている隔離データ。
+  ///
+  /// Returns: 変換した隔離リクエスト情報。
+  QuarantinedRequest _mapToQuarantinedRequest(String id, Map data) {
+    final now = DateTime.now();
+
+    return QuarantinedRequest(
+      id: id,
+      url: data['url'] as String? ?? '',
+      method: data['method'] as String? ?? 'GET',
+      quarantinedAt:
+          DateTime.tryParse(data['quarantinedAt'] as String? ?? '') ?? now,
+      queuedAt: DateTime.tryParse(data['queuedAt'] as String? ?? '') ?? now,
+      reason: data['reason'] as String? ?? 'dropped',
+      statusCode: data['statusCode'] as int? ?? 0,
+      errorMessage: data['errorMessage'] as String? ?? '',
+    );
   }
 
   /// ファイルパスからMIMEタイプを取得します。

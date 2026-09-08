@@ -794,8 +794,10 @@ void main() {
 
         try {
           final proxyPort = await proxy.start(
+            // 履歴だけを残す運用を検証するため、隔離ではなく破棄を指定する
             config: ProxyConfig(
               origin: 'http://127.0.0.1:${upstreamServer.port}',
+              dropPolicy: DropPolicy.drop,
             ),
           );
 

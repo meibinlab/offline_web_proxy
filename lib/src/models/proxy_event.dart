@@ -57,6 +57,9 @@ enum ProxyEventType {
   /// リクエストドロップ
   requestDropped,
 
+  /// リクエストを隔離領域へ退避
+  requestQuarantined,
+
   /// ネットワーク復旧
   networkOnline,
 

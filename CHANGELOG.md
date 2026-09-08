@@ -1,3 +1,39 @@
+## 0.11.0
+
+### 機能追加
+
+- **隔離キューを追加**: 上流が 4xx で拒否した更新系リクエストを破棄せず、本文を保持したまま隔離領域へ退避する `ProxyConfig.dropPolicy`（既定 `DropPolicy.quarantine`）を追加。`getQuarantinedRequests()`、`retryQuarantinedRequest()`、`discardQuarantinedRequest()`、`clearQuarantinedRequests()` で確認・再送・破棄を操作できます
+- **未確認のドロップ履歴を検知可能に**: `DroppedRequest.acknowledged` と `acknowledgeDroppedRequests()` を追加し、監視していない間に破棄されたリクエストへ起動時に気付けるように改善
+- **統計項目を追加**: `ProxyStats.quarantinedCount` と `ProxyStats.unacknowledgedDroppedCount` を追加
+- **べき等性キーを実装**: 更新系リクエストへ 1 つのキーを割り当て、最初の転送とキュー再送の両方で同じ値を送るように改善。応答を受け取れなかったリクエストが再送で二重に適用されることを上流側で判別できます。`ProxyConfig.enableIdempotencyKey`（既定 `true`）、`idempotencyHeaderName`（既定 `Idempotency-Key`）、`idempotencyRetention`（既定 24 時間）で制御します
+- **イベントを追加**: `ProxyEventType.requestQuarantined` を追加
+
+### 改善
+
+- **キューの重複投入を防止**: クライアントが同じべき等性キーで送り直した場合、キューへ二重に積まないように改善
+- **送信済みリクエストの再送を抑止**: 保持期間内に上流へ届いたことが確認できているキーは再送しないように改善
+- **統計取得の負荷を軽減**: 未確認件数をキャッシュし、`getStats()` のたびに履歴を全走査しないように改善
+
+### 破壊的変更の注意
+
+- 上流が 4xx で拒否した更新系リクエストは、既定では破棄されず隔離領域へ移ります。ドロップ履歴には記録されないため、履歴だけを使う運用を続ける場合は `dropPolicy: DropPolicy.drop` を指定してください。
+- 更新系リクエストへ `Idempotency-Key` ヘッダが付与されます。上流でヘッダ名が衝突する場合は `idempotencyHeaderName` を変更するか、`enableIdempotencyKey: false` を指定してください。
+- `ProxyEventType` に値を追加したため、網羅的に `switch` している利用側は分岐の追加が必要です。
+
+### ドキュメント
+
+- **仕様書と README を更新**: 隔離キューの運用、未確認件数の検知、べき等性キーの責務分担を追記
+- **べき等性の章を実装に合わせて改訂**: 未実装の記載を削除し、proxy が保証する範囲と上流サーバ側で必要な対応を明記
+
+### テスト
+
+- **隔離キューのテストを追加**: 隔離、再送、破棄、破棄方針の切り替え、統計への反映を検証
+- **未確認件数のテストを追加**: 確認前後の件数と履歴の保持を検証
+- **不安定なテストを修正**: 起動時の接続状態取得中に変化イベントが届く検証が、実時間に依存して並列実行時に失敗する場合があった問題を修正
+- **べき等性のテストを追加**: 再送時のキー付与、同一内容でのキー重複回避、クライアント指定キーの尊重と重複投入の抑止、転送時と再送時のキー一致、無効化設定を検証
+
+---
+
 ## 0.10.0
 
 ### 機能追加

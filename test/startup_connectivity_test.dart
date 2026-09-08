@@ -120,6 +120,11 @@ void main() {
   /// `checkConnectivity()` の応答を遅延させる時間。タイムアウト検証で使う。
   Duration? initialConnectivityDelay;
 
+  /// `checkConnectivity()` の処理中に実行する割り込み。
+  ///
+  /// 取得を待っている最中に変化イベントが届く状況を、実時間に依存せず再現する。
+  Future<void> Function()? onInitialConnectivityCheck;
+
   setUpAll(() {
     const pathProviderChannel =
         MethodChannel('plugins.flutter.io/path_provider');
@@ -139,6 +144,11 @@ void main() {
         .setMockMethodCallHandler(connectivityChannel,
             (MethodCall methodCall) async {
       if (methodCall.method == 'check') {
+        final interrupt = onInitialConnectivityCheck;
+        if (interrupt != null) {
+          await interrupt();
+        }
+
         final delay = initialConnectivityDelay;
         if (delay != null) {
           await Future<void>.delayed(delay);
@@ -169,6 +179,7 @@ void main() {
     await Hive.close();
     initialConnectivity = <String>['wifi'];
     initialConnectivityDelay = null;
+    onInitialConnectivityCheck = null;
     proxy = OfflineWebProxy();
   });
 
@@ -304,14 +315,12 @@ void main() {
         // 取得が上限時間を超える間にオフラインイベントが届く状況を再現する
         initialConnectivity = <String>['wifi'];
         initialConnectivityDelay = const Duration(seconds: 2);
+        onInitialConnectivityCheck = () => _emitConnectivity(['none']);
         upstream = await _startMockUpstream();
 
-        final startFuture = proxy.start(
+        final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        await _emitConnectivity(['none']);
-        final port = await startFuture;
 
         final result =
             await _performRequest(Uri.parse('http://127.0.0.1:$port/page'));
@@ -328,14 +337,12 @@ void main() {
         // 初期取得はオンラインを返すが、取得中にオフラインイベントが届く状況を再現する
         initialConnectivity = <String>['wifi'];
         initialConnectivityDelay = const Duration(milliseconds: 200);
+        onInitialConnectivityCheck = () => _emitConnectivity(['none']);
         upstream = await _startMockUpstream();
 
-        final startFuture = proxy.start(
+        final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        await _emitConnectivity(['none']);
-        final port = await startFuture;
 
         final result =
             await _performRequest(Uri.parse('http://127.0.0.1:$port/page'));

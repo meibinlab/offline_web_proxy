@@ -12,15 +12,6 @@ const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
 };
 
-/// 同時に投入する更新系リクエストの件数。
-///
-/// ミリ秒精度のキーでは同一ミリ秒内の保存が上書きされるため、
-/// 保存漏れを検出できる程度の件数を指定する。
-const int _concurrentRequestCount = 20;
-
-/// 再送順の確認に使用する更新系リクエストの件数。
-const int _orderedRequestCount = 5;
-
 /// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
 class _RealHttpOverrides extends HttpOverrides {
   @override
@@ -30,13 +21,14 @@ class _RealHttpOverrides extends HttpOverrides {
   }
 }
 
-/// 応答するステータスコードを切り替えられる上流サーバのモック。
+/// 受信したリクエストのヘッダと本文を記録する上流サーバのモック。
 class _MockUpstream {
   _MockUpstream(this._server) {
     _server.listen((HttpRequest request) async {
       try {
         final body = await utf8.decoder.bind(request).join();
         receivedBodies.add(body);
+        receivedIdempotencyKeys.add(request.headers.value('Idempotency-Key'));
         request.response
           ..statusCode = statusCode
           ..headers.contentType = ContentType('text', 'plain', charset: 'utf-8')
@@ -48,10 +40,13 @@ class _MockUpstream {
     });
   }
 
+  final HttpServer _server;
+
   /// 上流が受信したリクエスト本文の一覧。受信順に追加される。
   final List<String> receivedBodies = <String>[];
 
-  final HttpServer _server;
+  /// 上流が受信したべき等性キーの一覧。付与が無い場合は `null` が入る。
+  final List<String?> receivedIdempotencyKeys = <String?>[];
 
   /// 応答するステータスコード。テスト中に変更できる。
   int statusCode = HttpStatus.ok;
@@ -81,28 +76,19 @@ Future<void> _emitConnectivity(List<String> statuses) async {
   );
 }
 
-/// HTTP 応答の検証に必要な要素だけを保持する型。
-typedef _HttpResult = ({int statusCode, Map<String, String> headers});
-
-/// 実 HttpClient で更新系リクエストを実行し、ステータスコードを返す。
-Future<int> _performPost(Uri uri, String body) async {
-  final result = await _performPostWithHeaders(uri, body);
-  return result.statusCode;
-}
-
-/// 実 HttpClient で更新系リクエストを実行し、ステータスとヘッダを返す。
-Future<_HttpResult> _performPostWithHeaders(Uri uri, String body) async {
+/// 実 HttpClient で更新系リクエストを実行する。
+Future<void> _performPost(
+  Uri uri,
+  String body, {
+  Map<String, String> headers = const {},
+}) async {
   final client = HttpClient();
   try {
     final request = await client.openUrl('POST', uri);
+    headers.forEach(request.headers.set);
     request.write(body);
     final response = await request.close();
-    final headers = <String, String>{};
-    response.headers.forEach((name, values) {
-      headers[name.toLowerCase()] = values.join(', ');
-    });
     await response.drain<void>();
-    return (statusCode: response.statusCode, headers: headers);
   } finally {
     client.close(force: true);
   }
@@ -113,7 +99,7 @@ Future<_HttpResult> _performPostWithHeaders(Uri uri, String body) async {
 /// [timeout] を超えた場合は待機を打ち切り、呼び出し側のアサーションに委ねます。
 Future<void> _waitUntil(
   Future<bool> Function() check, {
-  Duration timeout = const Duration(seconds: 20),
+  Duration timeout = const Duration(seconds: 30),
 }) async {
   final deadline = DateTime.now().add(timeout);
   while (DateTime.now().isBefore(deadline)) {
@@ -155,8 +141,9 @@ void main() {
   _MockUpstream? upstream;
 
   setUp(() async {
-    hiveTestDirectory =
-        Directory.systemTemp.createTempSync('offline_web_proxy_queue').path;
+    hiveTestDirectory = Directory.systemTemp
+        .createTempSync('offline_web_proxy_idempotency')
+        .path;
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
     proxy = OfflineWebProxy();
@@ -178,134 +165,171 @@ void main() {
     );
   }
 
-  group('キュー保存の一意性（doc/specs.ja.md 【5】キュー再送ポリシー）', () {
-    /// 同時に投入した更新系リクエストが 1 件も失われずキューに保存されること
-    test('keeps every queued request when many are stored at once', () async {
+  group('べき等性キー（doc/specs.ja.md 【6】Idempotency）', () {
+    /// オフライン中に保存した更新系が、再送時にべき等性キーを伴うこと
+    test('sends an idempotency key when a queued request is resent', () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
         final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
 
-        // オフラインへ遷移させ、更新系リクエストがキューへ回るようにする
         await _emitConnectivity(['none']);
+        await _performPost(
+          Uri.parse('http://127.0.0.1:$port/api/sales'),
+          '{"total":1000}',
+        );
+        expect(await proxy.getQueuedRequests(), hasLength(1));
 
-        final postUri = Uri.parse('http://127.0.0.1:$port/api/sales');
-        await Future.wait([
-          for (var i = 0; i < _concurrentRequestCount; i++)
-            _performPost(postUri, '{"index":$i}'),
-        ]);
+        await _emitConnectivity(['wifi']);
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
 
-        final queued = await proxy.getQueuedRequests();
-        // 保存キーの衝突で上書きされず、投入件数と保存件数が一致すること
-        expect(queued.length, equals(_concurrentRequestCount));
-        // 全件が更新系リクエストとして保存されていること
+        // 上流が重複を判別できるようキーが付与されること
+        expect(upstream!.receivedBodies, equals(['{"total":1000}']));
+        expect(upstream!.receivedIdempotencyKeys.single, isNotNull);
+        expect(upstream!.receivedIdempotencyKeys.single, isNotEmpty);
+      });
+    });
+
+    /// 同じ内容の会計が連続しても、別のキーとして扱うこと
+    test('assigns a distinct key to each request with the same body', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+        final salesUri = Uri.parse('http://127.0.0.1:$port/api/sales');
+
+        await _emitConnectivity(['none']);
+        await _performPost(salesUri, '{"total":1000}');
+        await _performPost(salesUri, '{"total":1000}');
+        // 内容が同じでも別々の要求として保存されること
+        expect(await proxy.getQueuedRequests(), hasLength(2));
+
+        await _emitConnectivity(['wifi']);
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+
+        final keys = upstream!.receivedIdempotencyKeys;
+        expect(keys, hasLength(2));
+        // 片方が重複として消えないよう、キーが異なること
+        expect(keys.first, isNot(equals(keys.last)));
+      });
+    });
+
+    /// クライアントが指定したキーを尊重し、二重にキューへ積まないこと
+    test('keeps a client supplied key and skips a duplicate submission',
+        () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+        final salesUri = Uri.parse('http://127.0.0.1:$port/api/sales');
+
+        await _emitConnectivity(['none']);
+        await _performPost(
+          salesUri,
+          '{"total":1000}',
+          headers: {'Idempotency-Key': 'sale-0001'},
+        );
+        await _performPost(
+          salesUri,
+          '{"total":1000}',
+          headers: {'Idempotency-Key': 'sale-0001'},
+        );
+
+        // 同じキーの再送はキューへ二重に積まないこと
+        expect(await proxy.getQueuedRequests(), hasLength(1));
+
+        await _emitConnectivity(['wifi']);
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+
+        // 上流へは 1 回だけ、指定されたキーで送信されること
+        expect(upstream!.receivedBodies, hasLength(1));
+        expect(upstream!.receivedIdempotencyKeys.single, equals('sale-0001'));
+      });
+    });
+
+    /// 転送時とキュー再送で同じキーが送られること
+    test('reuses the same key for the forwarded attempt and the resend',
+        () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+        final salesUri = Uri.parse('http://127.0.0.1:$port/api/sales');
+
+        // 上流が 5xx を返し、再送用にキューへ保存される状況を作る
+        upstream!.statusCode = HttpStatus.internalServerError;
+        await _performPost(
+          salesUri,
+          '{"total":1000}',
+          headers: {'Idempotency-Key': 'sale-9999'},
+        );
+        expect(await proxy.getQueuedRequests(), hasLength(1));
+
+        upstream!.statusCode = HttpStatus.ok;
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+
+        // 転送時と再送時の両方が同じキーで送られること
+        expect(upstream!.receivedIdempotencyKeys.length, greaterThan(1));
         expect(
-          queued.every((request) => request.method == 'POST'),
+          upstream!.receivedIdempotencyKeys.every((key) => key == 'sale-9999'),
           isTrue,
         );
       });
     });
 
-    /// キューが保存順（FIFO）で再送されること
-    test('resends queued requests in the order they were stored', () async {
+    /// 生成したキーも転送時と再送時で一致すること
+    test('reuses a generated key across the forwarded attempt and the resend',
+        () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
         final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
 
-        // オフライン中に投入順が判別できる本文で順番にキューへ保存する
-        await _emitConnectivity(['none']);
-        final postUri = Uri.parse('http://127.0.0.1:$port/api/sales');
-        for (var i = 0; i < _orderedRequestCount; i++) {
-          await _performPost(postUri, '{"index":$i}');
-        }
-        expect(
-          (await proxy.getQueuedRequests()).length,
-          equals(_orderedRequestCount),
+        upstream!.statusCode = HttpStatus.internalServerError;
+        await _performPost(
+          Uri.parse('http://127.0.0.1:$port/api/sales'),
+          '{"total":1000}',
         );
 
-        // オンライン復帰でキューを消化させる
-        await _emitConnectivity(['wifi']);
+        upstream!.statusCode = HttpStatus.ok;
         await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
 
-        // 上流が受信した順序が投入順と一致すること
-        expect(
-          upstream!.receivedBodies,
-          equals([
-            for (var i = 0; i < _orderedRequestCount; i++) '{"index":$i}',
-          ]),
-        );
+        final keys = upstream!.receivedIdempotencyKeys;
+        // 転送時に採番したキーが再送でも使われること
+        expect(keys.length, greaterThan(1));
+        expect(keys.first, isNotNull);
+        expect(keys.every((key) => key == keys.first), isTrue);
       });
     });
 
-    /// 短時間に連続してドロップされた履歴が 1 件も失われず保存されること
-    test('keeps every dropped request history entry', () async {
+    /// 設定で無効にした場合はキーを付与しないこと
+    test('omits the key when the feature is disabled', () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
         final port = await proxy.start(
-          // 履歴だけを残す運用を検証するため、隔離ではなく破棄を指定する
           config: ProxyConfig(
             origin: upstream!.origin,
-            dropPolicy: DropPolicy.drop,
+            enableIdempotencyKey: false,
           ),
         );
 
-        // オフライン中に複数の更新系リクエストをキューへ保存する
         await _emitConnectivity(['none']);
-        final postUri = Uri.parse('http://127.0.0.1:$port/api/sales');
-        await Future.wait([
-          for (var i = 0; i < _concurrentRequestCount; i++)
-            _performPost(postUri, '{"index":$i}'),
-        ]);
-        expect(
-          (await proxy.getQueuedRequests()).length,
-          equals(_concurrentRequestCount),
+        await _performPost(
+          Uri.parse('http://127.0.0.1:$port/api/sales'),
+          '{"total":1000}',
         );
 
-        // 上流が 4xx を返す状態でオンライン復帰させ、キューをドロップさせる
-        upstream!.statusCode = HttpStatus.badRequest;
         await _emitConnectivity(['wifi']);
         await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
 
-        final dropped = await proxy.getDroppedRequests();
-        // 履歴キーの衝突で上書きされず、ドロップ件数と履歴件数が一致すること
-        expect(dropped.length, equals(_concurrentRequestCount));
-        // 4xx によるドロップとして記録されていること
-        expect(
-          dropped.every((request) => request.dropReason == '4xx_error'),
-          isTrue,
-        );
-      });
-    });
-  });
-
-  group('キュー投入時の応答（doc/specs.ja.md 【5】キュー再送ポリシー）', () {
-    /// オフライン経路とオンライン経路のどちらでも接続を閉じる指定を返すこと
-    test('closes the connection on both queued responses', () async {
-      await withRealHttpClient(() async {
-        upstream = await _startMockUpstream();
-        final port = await proxy.start(
-          config: ProxyConfig(origin: upstream!.origin),
-        );
-        final postUri = Uri.parse('http://127.0.0.1:$port/api/sales');
-
-        // 上流が停止した状態（オンライン経路の失敗）でキューへ回す
-        await upstream!.close();
-        final onlinePathResult =
-            await _performPostWithHeaders(postUri, '{"index":0}');
-        expect(onlinePathResult.headers['connection'], equals('close'));
-
-        // オフラインへ遷移させ、オフライン経路でキューへ回す
-        await _emitConnectivity(['none']);
-        final offlinePathResult =
-            await _performPostWithHeaders(postUri, '{"index":1}');
-        // 経路が違ってもクライアント接続の扱いが揃っていること
-        expect(offlinePathResult.headers['connection'], equals('close'));
-
-        // どちらの経路でもキューへ保存されていること
-        expect((await proxy.getQueuedRequests()).length, equals(2));
+        // 上流へ送信はされるが、キーは付与されないこと
+        expect(upstream!.receivedBodies, hasLength(1));
+        expect(upstream!.receivedIdempotencyKeys.single, isNull);
       });
     });
   });
