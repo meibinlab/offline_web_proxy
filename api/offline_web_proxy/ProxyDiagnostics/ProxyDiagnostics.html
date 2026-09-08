@@ -73,6 +73,12 @@
 <li><span class="parameter" id="-param-lastRecoveryCause"><span>required</span> <span class="type-annotation"><a href="../../offline_web_proxy/ProxyRecoveryCause.html">ProxyRecoveryCause</a>?</span> <span class="parameter-name">lastRecoveryCause</span>, </span></li>
 <li><span class="parameter" id="-param-lastRecoveryError"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">lastRecoveryError</span>, </span></li>
 <li><span class="parameter" id="-param-lastDowntimeMs"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">lastDowntimeMs</span>, </span></li>
+<li><span class="parameter" id="-param-isOnline"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">isOnline</span>, </span></li>
+<li><span class="parameter" id="-param-onlineDecisionSource"><span>required</span> <span class="type-annotation"><a href="../../offline_web_proxy/OnlineDecisionSource.html">OnlineDecisionSource</a></span> <span class="parameter-name">onlineDecisionSource</span>, </span></li>
+<li><span class="parameter" id="-param-isUpstreamReachable"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">isUpstreamReachable</span>, </span></li>
+<li><span class="parameter" id="-param-upstreamCircuitState"><span>required</span> <span class="type-annotation"><a href="../../offline_web_proxy/UpstreamCircuitState.html">UpstreamCircuitState</a></span> <span class="parameter-name">upstreamCircuitState</span>, </span></li>
+<li><span class="parameter" id="-param-consecutiveUpstreamFailures"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">consecutiveUpstreamFailures</span>, </span></li>
+<li><span class="parameter" id="-param-lastUpstreamSuccessAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a>?</span> <span class="parameter-name">lastUpstreamSuccessAt</span>, </span></li>
 </ol>})
     </section>
 
@@ -89,7 +95,13 @@
 <a href="../../offline_web_proxy/ProxyDiagnostics/restartCount.html">restartCount</a> は再バインドを実行した回数です。
 <a href="../../offline_web_proxy/ProxyDiagnostics/lastRecoveryCause.html">lastRecoveryCause</a> は最終復旧処理の判定種別です。
 <a href="../../offline_web_proxy/ProxyDiagnostics/lastRecoveryError.html">lastRecoveryError</a> は最終復旧処理の失敗内容です。
-<a href="../../offline_web_proxy/ProxyDiagnostics/lastDowntimeMs.html">lastDowntimeMs</a> は直近の停止推定時間（ミリ秒）です。</p>
+<a href="../../offline_web_proxy/ProxyDiagnostics/lastDowntimeMs.html">lastDowntimeMs</a> は直近の停止推定時間（ミリ秒）です。
+<a href="../../offline_web_proxy/ProxyDiagnostics/isOnline.html">isOnline</a> はリンク層の接続状態に基づくオンライン判定です。
+<a href="../../offline_web_proxy/ProxyDiagnostics/onlineDecisionSource.html">onlineDecisionSource</a> は <a href="../../offline_web_proxy/ProxyDiagnostics/isOnline.html">isOnline</a> の判定根拠です。
+<a href="../../offline_web_proxy/ProxyDiagnostics/isUpstreamReachable.html">isUpstreamReachable</a> は上流へ転送できる状態かどうかです。
+<a href="../../offline_web_proxy/ProxyDiagnostics/upstreamCircuitState.html">upstreamCircuitState</a> は上流到達性のサーキットブレーカ状態です。
+<a href="../../offline_web_proxy/ProxyDiagnostics/consecutiveUpstreamFailures.html">consecutiveUpstreamFailures</a> は上流へ到達できなかった連続回数です。
+<a href="../../offline_web_proxy/ProxyDiagnostics/lastUpstreamSuccessAt.html">lastUpstreamSuccessAt</a> は最後に上流へ到達できた日時です。</p>
 </section>
 
 
@@ -108,6 +120,12 @@
   required this.lastRecoveryCause,
   required this.lastRecoveryError,
   required this.lastDowntimeMs,
+  required this.isOnline,
+  required this.onlineDecisionSource,
+  required this.isUpstreamReachable,
+  required this.upstreamCircuitState,
+  required this.consecutiveUpstreamFailures,
+  required this.lastUpstreamSuccessAt,
 });</code></pre>
 </section>
 
@@ -142,7 +160,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

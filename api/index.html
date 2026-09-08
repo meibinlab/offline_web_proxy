@@ -206,8 +206,27 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
     'image/*': 2592000,
     'default': 259200,
   },
-  connectTimeout: Duration(seconds: 10),
-  requestTimeout: Duration(seconds: 60),
+  connectTimeout: Duration(seconds: 5),
+  requestTimeout: Duration(seconds: 20),
+  upstreamFailureThreshold: 3,
+  upstreamProbePath: '/',
+  upstreamProbeMethod: 'HEAD',
+  upstreamProbeTimeout: Duration(seconds: 3),
+  upstreamProbeBackoffSeconds: [1, 2, 5, 10, 30],
+  queuedResponse: ProxyResponseConfig(
+    statusCode: 202,
+    contentType: 'application/json; charset=utf-8',
+    body: '{"queued":true}',
+  ),
+  dropPolicy: DropPolicy.quarantine,
+  enableIdempotencyKey: true,
+  idempotencyHeaderName: 'Idempotency-Key',
+  idempotencyRetention: Duration(hours: 24),
+  offlineMissResponse: ProxyResponseConfig(
+    statusCode: 504,
+    contentType: 'application/json; charset=utf-8',
+    body: '{"offline":true}',
+  ),
   retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
   enableAdminApi: false,
   logLevel: 'info',
@@ -228,8 +247,44 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>healthCheckPath</code> is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.</li>
 <li>Setting <code>healthCheckInterval</code> above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by <code>ProxyLifecycleGuard</code> is the primary path.</li>
 <li><code>offlineFallbackHtml</code> and <code>gatewayTimeoutHtml</code> replace the built-in offline and timeout response bodies with wording supplied by your app.</li>
+<li><code>upstreamFailureThreshold</code> is how many consecutive unreachable attempts stop forwarding. It prevents every request from waiting for the timeout when the link layer is up but the upstream is down. Set it to <code>0</code> to disable the behavior.</li>
+<li><code>upstreamProbePath</code>, <code>upstreamProbeMethod</code>, <code>upstreamProbeTimeout</code> and <code>upstreamProbeBackoffSeconds</code> control the reachability probe used while forwarding is stopped. Any response counts as reachable, regardless of status code.</li>
+<li><code>queuedResponse</code> and <code>offlineMissResponse</code> define the responses the proxy generates itself. Both default to JSON so that <code>response.json()</code> succeeds in the web app.</li>
+<li><code>dropPolicy</code> decides what happens to an update request the upstream rejected with 4xx. The default <code>quarantine</code> keeps it, body included, so <code>getQuarantinedRequests()</code> can surface it for a resend-or-discard decision. <code>drop</code> discards it and keeps only a history entry, as before.</li>
+<li><code>enableIdempotencyKey</code> attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. <strong>Deduplication itself must be implemented on the upstream server.</strong></li>
+</ul>
+<h3 id="handling-offline-responses-in-the-web-app">Handling offline responses in the web app</h3>
+<p>An update stored while offline has not reached the upstream, so the web app must be able to tell it apart from a success. The proxy answers with <code>202 Accepted</code> and <code>{"queued":true}</code> by default, plus headers that make the decision explicit.</p>
+<pre class="language-js"><code class="language-js">const res = await fetch('/api/sales_histories.json', {
+  method: 'POST',
+  body: JSON.stringify(sale),
+});
+
+if (res.headers.get('X-Offline-Queued') === '1') {
+  // Not sent upstream yet; the proxy resends it once connectivity returns
+  showPendingBadge(res.headers.get('X-Offline-Queue-Id'));
+  return;
+}
+
+const saved = await res.json();
+</code></pre>
+<p>An offline read with no cached entry answers with <code>504</code> and <code>{"offline":true}</code> by default, so <code>response.ok</code> is false and normal error handling applies. Only page navigations (<code>Sec-Fetch-Mode: navigate</code>) receive the readable HTML fallback page.</p>
+<p>The same body is returned when the link layer is up but the upstream cannot be reached. That response carries <code>X-Offline-Source: none</code>, so it can be told apart from a <code>504</code> the upstream itself returned.</p>
+<ul>
 <li>The supported configuration entry point is <code>ProxyConfig</code>. The package does not currently load an external YAML file automatically.</li>
 </ul>
+<h3 id="waiting-times-for-webview-front-ends">Waiting times for WebView front ends</h3>
+<p>The defaults (<code>connectTimeout</code> 5 seconds, <code>requestTimeout</code> 20 seconds) are tuned for sitting in front of a WebView. A person is waiting for the screen, so a stalled upstream must not keep them waiting; a browser engine only opens a handful of connections per origin, so a few stalled requests can freeze the whole page.</p>
+<p><code>requestTimeout</code> is the deadline for one whole request. Waiting for a free connection slot, establishing the connection, receiving the headers and receiving the body share that single budget, so per-stage waits never stack up.</p>
+<p>Link-layer connectivity is not proof that the upstream is reachable. When the device is attached to a network whose upstream is down, the first few requests still wait for <code>requestTimeout</code> until the upstream circuit breaker opens; after that they fall back to cache or the queue without waiting. The worst-case wait is <code>requestTimeout</code> × <code>upstreamFailureThreshold</code>, so tune the two values together.</p>
+<p>Consider shortening <code>serverIdleTimeout</code> (120 seconds by default) to 30-60 seconds as well, so idle WebView connections do not linger.</p>
+<p>For background-synchronization workloads that can afford to wait, extend them:</p>
+<pre class="language-dart"><code class="language-dart">const config = ProxyConfig(
+  origin: 'https://api.example.com',
+  connectTimeout: Duration(seconds: 10),
+  requestTimeout: Duration(seconds: 60),
+);
+</code></pre>
 <h2 id="webview-navigation-helper-apis">WebView Navigation Helper APIs</h2>
 <p>Use the URL resolution APIs when your WebView needs to decide whether a target should stay inside the proxy, be rewritten to a proxy URL, or be delegated outside the app.</p>
 <pre class="language-dart"><code class="language-dart">final resolution = proxy.resolveNavigationTarget(
@@ -317,6 +372,21 @@ print('port=${diagnostics.port} restarts=${diagnostics.restartCount}');
 <li>This package carries no end-user wording. Decide what to show from <code>onFailed</code> or from the result of <code>recoverFromWebResourceError()</code>.</li>
 <li>See <code>example/lib/main.dart</code> for a working integration.</li>
 </ul>
+<h3 id="upstream-reachability-diagnostics">Upstream reachability diagnostics</h3>
+<p><code>getDiagnostics()</code> reports upstream reachability alongside the proxy's own state, which is what on-site troubleshooting needs.</p>
+<pre class="language-dart"><code class="language-dart">final diagnostics = await proxy.getDiagnostics();
+
+print('link=${diagnostics.isOnline} (${diagnostics.onlineDecisionSource})');
+print('upstream=${diagnostics.isUpstreamReachable} '
+    '(${diagnostics.upstreamCircuitState})');
+print('failures=${diagnostics.consecutiveUpstreamFailures} '
+    'lastSuccess=${diagnostics.lastUpstreamSuccessAt}');
+</code></pre>
+<ul>
+<li><code>isOnline</code> is the link-layer decision and <code>onlineDecisionSource</code> says what it is based on: the value read at startup, or a later change event.</li>
+<li><code>isUpstreamReachable</code> is whether requests can actually be forwarded, reflecting both the link layer and the circuit breaker.</li>
+<li><code>consecutiveUpstreamFailures</code> and <code>lastUpstreamSuccessAt</code> show how long the upstream has been out of reach.</li>
+</ul>
 <h2 id="cookie-apis">Cookie APIs</h2>
 <p>Cookies are persisted in encrypted storage and can be restored before the proxy starts.</p>
 <pre class="language-dart"><code class="language-dart">await proxy.restoreCookies([
@@ -357,8 +427,17 @@ final queued = await proxy.getQueuedRequests();
 final dropped = await proxy.getDroppedRequests(limit: 50);
 await proxy.clearDroppedRequests();
 
+// 上流に拒否されて再送を打ち切ったリクエスト
+final quarantined = await proxy.getQuarantinedRequests();
+for (final request in quarantined) {
+  // 原因を解消したら再送、送らないと判断したら破棄する
+  await proxy.retryQuarantinedRequest(request.id);
+}
+
 final stats = await proxy.getStats();
 print('requests=${stats.totalRequests} hitRate=${stats.cacheHitRate}');
+print('quarantined=${stats.quarantinedCount} '
+    'unacknowledged=${stats.unacknowledgedDroppedCount}');
 
 proxy.events.listen((event) {
   if (event.type == ProxyEventType.requestReceived) {
@@ -376,7 +455,7 @@ proxy.events.listen((event) {
 <ul>
 <li>Online GET/HEAD requests are forwarded upstream and are not short-circuited by the proxy cache.</li>
 <li>The proxy cache is used only as a substitute response for offline requests or GET/HEAD requests that could not reach the upstream. Connection refused, a dropped connection, and exceeding <code>requestTimeout</code> are covered, while a 4xx / 5xx returned by the upstream is passed through. When no eligible cache exists, 504 is returned.</li>
-<li><code>warmupCache()</code> is intended to prepare fallback responses in advance, not to optimize normal online browsing.</li>
+<li><code>warmupCache()</code> is intended to prepare fallback responses in advance, not to optimize normal online browsing. While the upstream is considered unreachable, it returns a failure entry for each path instead of waiting, and its results feed the reachability decision.</li>
 </ul>
 <p>The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. <code>redirectHandled</code> includes fields such as <code>redirectStatusCode</code>, <code>locationHeader</code>, <code>redirectAction</code>, <code>resolvedProxyUrl</code>, and <code>externalUrl</code>.
 Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailable</code>, which carry <code>cause</code>, <code>previousPort</code>, <code>newPort</code>, <code>downtimeMs</code>, <code>restartCount</code>, and <code>probeError</code>.</p>
@@ -481,7 +560,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

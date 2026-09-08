@@ -101,7 +101,7 @@ print('Proxy running for $days days, $hours hours');
 
     <dl class="constructor-summary-list">
         <dt id="ProxyStats" class="callable">
-          <span class="name"><a href="../offline_web_proxy/ProxyStats/ProxyStats.html">ProxyStats</a></span><span class="signature">({<span class="parameter" id="-param-totalRequests"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">totalRequests</span>, </span><span class="parameter" id="-param-cacheHits"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">cacheHits</span>, </span><span class="parameter" id="-param-cacheMisses"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">cacheMisses</span>, </span><span class="parameter" id="-param-cacheHitRate"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/double-class.html">double</a></span> <span class="parameter-name">cacheHitRate</span>, </span><span class="parameter" id="-param-queueLength"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">queueLength</span>, </span><span class="parameter" id="-param-droppedRequestsCount"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">droppedRequestsCount</span>, </span><span class="parameter" id="-param-startedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">startedAt</span>, </span><span class="parameter" id="-param-uptime"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">uptime</span></span>})</span>
+          <span class="name"><a href="../offline_web_proxy/ProxyStats/ProxyStats.html">ProxyStats</a></span><span class="signature">({<span class="parameter" id="-param-totalRequests"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">totalRequests</span>, </span><span class="parameter" id="-param-cacheHits"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">cacheHits</span>, </span><span class="parameter" id="-param-cacheMisses"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">cacheMisses</span>, </span><span class="parameter" id="-param-cacheHitRate"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/double-class.html">double</a></span> <span class="parameter-name">cacheHitRate</span>, </span><span class="parameter" id="-param-queueLength"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">queueLength</span>, </span><span class="parameter" id="-param-droppedRequestsCount"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">droppedRequestsCount</span>, </span><span class="parameter" id="-param-unacknowledgedDroppedCount"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">unacknowledgedDroppedCount</span> = <span class="default-value">0</span>, </span><span class="parameter" id="-param-quarantinedCount"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">quarantinedCount</span> = <span class="default-value">0</span>, </span><span class="parameter" id="-param-startedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">startedAt</span>, </span><span class="parameter" id="-param-uptime"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">uptime</span></span>})</span>
         </dt>
         <dd>
           
@@ -175,6 +175,18 @@ print('Proxy running for $days days, $hours hours');
 
 </dd>
 
+        <dt id="quarantinedCount" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyStats/quarantinedCount.html">quarantinedCount</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
+  
+
+</dt>
+<dd>
+  Number of requests waiting in the quarantine store.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
         <dt id="queueLength" class="property">
   <span class="name"><a href="../offline_web_proxy/ProxyStats/queueLength.html">queueLength</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
@@ -219,6 +231,18 @@ print('Proxy running for $days days, $hours hours');
 </dt>
 <dd>
   Total number of HTTP requests processed since proxy startup.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="unacknowledgedDroppedCount" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyStats/unacknowledgedDroppedCount.html">unacknowledgedDroppedCount</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
+  
+
+</dt>
+<dd>
+  Number of dropped requests the application has not acknowledged yet.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -326,7 +350,7 @@ print('Proxy running for $days days, $hours hours');
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

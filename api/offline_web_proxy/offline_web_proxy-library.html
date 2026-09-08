@@ -217,6 +217,14 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   稼働確認と復旧処理の結果を表すクラスです。
 </dd>
 
+          <dt id="ProxyResponseConfig">
+  <span class="name "><a href="../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> 
+
+</dt>
+<dd>
+  A response the proxy generates on its own instead of forwarding upstream.
+</dd>
+
           <dt id="ProxyStats">
   <span class="name "><a href="../offline_web_proxy/ProxyStats-class.html">ProxyStats</a></span> 
 
@@ -231,6 +239,14 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
 </dt>
 <dd>
   WebView delegate 向けの推奨処理結果です。
+</dd>
+
+          <dt id="QuarantinedRequest">
+  <span class="name "><a href="../offline_web_proxy/QuarantinedRequest-class.html">QuarantinedRequest</a></span> 
+
+</dt>
+<dd>
+  上流に拒否され、隔離領域へ退避した更新系リクエストを表すクラス
 </dd>
 
           <dt id="QueuedRequest">
@@ -280,6 +296,22 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   キャッシュの状態
 </dd>
 
+          <dt id="DropPolicy">
+  <span class="name "><a href="../offline_web_proxy/DropPolicy.html">DropPolicy</a></span> 
+
+</dt>
+<dd>
+  How the proxy handles a queued update request the upstream rejected.
+</dd>
+
+          <dt id="OnlineDecisionSource">
+  <span class="name "><a href="../offline_web_proxy/OnlineDecisionSource.html">OnlineDecisionSource</a></span> 
+
+</dt>
+<dd>
+  What the current link-layer online decision is based on.
+</dd>
+
           <dt id="ProxyEventType">
   <span class="name "><a href="../offline_web_proxy/ProxyEventType.html">ProxyEventType</a></span> 
 
@@ -318,6 +350,14 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
 </dt>
 <dd>
   WebView delegate 向けの推奨アクションです。
+</dd>
+
+          <dt id="UpstreamCircuitState">
+  <span class="name "><a href="../offline_web_proxy/UpstreamCircuitState.html">UpstreamCircuitState</a></span> 
+
+</dt>
+<dd>
+  State of the upstream reachability circuit breaker.
 </dd>
 
       </dl>
@@ -504,7 +544,7 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

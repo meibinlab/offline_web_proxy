@@ -68,6 +68,8 @@
 <li><span class="parameter" id="-param-cacheHitRate"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/double-class.html">double</a></span> <span class="parameter-name">cacheHitRate</span>, </span></li>
 <li><span class="parameter" id="-param-queueLength"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">queueLength</span>, </span></li>
 <li><span class="parameter" id="-param-droppedRequestsCount"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">droppedRequestsCount</span>, </span></li>
+<li><span class="parameter" id="-param-unacknowledgedDroppedCount"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">unacknowledgedDroppedCount</span> = <span class="default-value">0</span>, </span></li>
+<li><span class="parameter" id="-param-quarantinedCount"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">quarantinedCount</span> = <span class="default-value">0</span>, </span></li>
 <li><span class="parameter" id="-param-startedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">startedAt</span>, </span></li>
 <li><span class="parameter" id="-param-uptime"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">uptime</span>, </span></li>
 </ol>})
@@ -86,6 +88,8 @@
   required this.cacheHitRate,
   required this.queueLength,
   required this.droppedRequestsCount,
+  this.unacknowledgedDroppedCount = 0,
+  this.quarantinedCount = 0,
   required this.startedAt,
   required this.uptime,
 });</code></pre>
@@ -122,7 +126,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

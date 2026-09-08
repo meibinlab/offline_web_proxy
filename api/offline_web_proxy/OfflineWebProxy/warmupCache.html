@@ -78,7 +78,8 @@
 <section class="desc markdown">
   <p>指定したパス一覧でキャッシュの事前ウォームアップを実行します。</p>
 <p><code>paths</code> ウォームアップ対象の相対パス一覧。
-<code>timeout</code> 各リクエストのタイムアウト秒数。
+<code>timeout</code> 各リクエストの締め切り秒数。省略時は
+  <a href="../../offline_web_proxy/ProxyConfig/requestTimeout.html">ProxyConfig.requestTimeout</a> を使用します。
 <code>maxConcurrency</code> 同時実行する最大リクエスト数。
 <code>onProgress</code> 進捗状態を通知するコールバック関数。
 <code>onError</code> エラー発生時に呼ばれるコールバック関数。</p>
@@ -127,8 +128,29 @@
       await semaphore.acquire(timeout: const Duration(seconds: 30));
       try {
         final entryStartTime = DateTime.now();
+
+        &#47;&#47; 上流断を検知済みの間は待たせず、復帰確認に判定を委ねる
+        if (_isRunning &amp;&amp; !_isUpstreamReachable) {
+          onError?.call(path, _upstreamUnreachableWarmupMessage);
+          failureCount++;
+          onProgress?.call(index + 1, targetPaths.length);
+          return WarmupEntry(
+            path: path,
+            success: false,
+            statusCode: null,
+            errorMessage: _upstreamUnreachableWarmupMessage,
+            duration: DateTime.now().difference(entryStartTime),
+          );
+        }
+
         try {
           final response = await _fetchFromUpstream(path, timeout: timeout);
+
+          &#47;&#47; 上流が応答した以上は到達可能とみなし、遮断中なら解除する
+          if (_isRunning) {
+            _recordUpstreamSuccess();
+          }
+
           if (response.statusCode == HttpStatus.ok) {
             final upstreamUri = _buildUpstreamUriFromParts(path: path);
             final cacheKey = _generateCacheKey(upstreamUri.toString());
@@ -149,6 +171,12 @@
             duration: duration,
           );
         } catch (e) {
+          &#47;&#47; 画面操作が無い状況でも上流断を検知できるよう、判定材料に含める。
+          &#47;&#47; 停止中は復帰確認を予約できないため数えない。
+          if (_isRunning &amp;&amp; _shouldCountUpstreamFailure(e)) {
+            _recordUpstreamFailure();
+          }
+
           final duration = DateTime.now().difference(entryStartTime);
           onError?.call(path, e.toString());
           failureCount++;
@@ -216,7 +244,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

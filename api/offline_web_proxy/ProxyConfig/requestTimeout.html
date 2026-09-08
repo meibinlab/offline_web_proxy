@@ -69,10 +69,14 @@
       </section>
       
 <section class="desc markdown">
-  <p>Total timeout for completing HTTP requests to upstream server.</p>
-<p>Covers the entire request lifecycle from connection to response.
-Should be longer than <a href="../../offline_web_proxy/ProxyConfig/connectTimeout.html">connectTimeout</a>.</p>
-<p><strong>Default</strong>: <code>Duration(seconds: 60)</code></p>
+  <p>Total time budget for one upstream request.</p>
+<p>Acts as a deadline covering the whole attempt: waiting for a free
+upstream connection slot, opening the connection, receiving the response
+headers and receiving the body. Once the budget is spent, the attempt
+fails and the proxy falls back to cache or to the queue.</p>
+<p>A person is usually waiting in front of a WebView, so the default is kept
+short. Should be longer than <a href="../../offline_web_proxy/ProxyConfig/connectTimeout.html">connectTimeout</a>.</p>
+<p><strong>Default</strong>: <code>Duration(seconds: 20)</code></p>
 </section>
 
       
@@ -112,7 +116,7 @@ Should be longer than <a href="../../offline_web_proxy/ProxyConfig/connectTimeou
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

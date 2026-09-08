@@ -87,6 +87,8 @@
   try {
     final queueLength = _queueBox?.length ?? 0;
     final droppedRequestsCount = _droppedRequestBox?.length ?? 0;
+    final quarantinedCount = _quarantinedRequestBox?.length ?? 0;
+    final unacknowledgedDroppedCount = _countUnacknowledgedDroppedRequests();
     final uptime = _startedAt != null
         ? DateTime.now().difference(_startedAt!)
         : Duration.zero;
@@ -98,6 +100,8 @@
       cacheHitRate: _totalRequests &gt; 0 ? _cacheHits &#47; _totalRequests : 0.0,
       queueLength: queueLength,
       droppedRequestsCount: droppedRequestsCount,
+      unacknowledgedDroppedCount: unacknowledgedDroppedCount,
+      quarantinedCount: quarantinedCount,
       startedAt: _startedAt ?? DateTime.now(),
       uptime: uptime,
     );
@@ -139,7 +143,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

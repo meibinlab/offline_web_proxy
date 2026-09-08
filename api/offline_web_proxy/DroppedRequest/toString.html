@@ -94,7 +94,8 @@ mainly for debugging or logging.</p>
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">@override
 String toString() {
-  return &#39;DroppedRequest{url: $url, reason: $dropReason, status: $statusCode}&#39;;
+  return &#39;DroppedRequest{url: $url, reason: $dropReason, &#39;
+      &#39;status: $statusCode, acknowledged: $acknowledged}&#39;;
 }</code></pre>
 </section>
 
@@ -129,7 +130,7 @@ String toString() {
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

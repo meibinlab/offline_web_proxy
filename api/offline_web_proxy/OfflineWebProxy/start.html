@@ -118,8 +118,12 @@
     &#47;&#47; 静的リソース一覧を初期化
     await _initializeStaticResourceIndex();
 
-    &#47;&#47; 接続状態の監視を開始
+    &#47;&#47; 上流到達性の判定状態を初期化する
+    _resetUpstreamCircuit();
+
+    &#47;&#47; 接続状態の監視を開始し、起動時の実状態で初期値を確定する
     _startConnectivityMonitoring();
+    await _initializeOnlineState();
 
     &#47;&#47; ルーターとミドルウェアを作成し、再バインドで再利用できるよう保持する
     final router = _createRouter();
@@ -192,7 +196,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

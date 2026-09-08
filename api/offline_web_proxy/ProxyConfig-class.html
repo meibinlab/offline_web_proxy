@@ -77,7 +77,7 @@ final advancedConfig = ProxyConfig(
   port: 8080,                    // Fixed port instead of auto-assign
   preferredPort: 8787,           // Prefer this port, then fallback automatically
   cacheMaxSize: 500 * 1024 * 1024, // 500MB cache
-  connectTimeout: Duration(seconds: 5),
+  connectTimeout: Duration(seconds: 3),
   cacheTtl: {
     'application/json': 1800,    // 30 min for API responses
     'image/*': 604800 * 4,       // 4 weeks for images
@@ -97,7 +97,7 @@ final advancedConfig = ProxyConfig(
 
     <dl class="constructor-summary-list">
         <dt id="ProxyConfig" class="callable">
-          <span class="name"><a href="../offline_web_proxy/ProxyConfig/ProxyConfig.html">ProxyConfig</a></span><span class="signature">({<span class="parameter" id="-param-origin"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">origin</span>, </span><span class="parameter" id="-param-host"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">host</span> = <span class="default-value">&#39;127.0.0.1&#39;</span>, </span><span class="parameter" id="-param-port"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">port</span> = <span class="default-value">0</span>, </span><span class="parameter" id="-param-preferredPort"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">preferredPort</span> = <span class="default-value">0</span>, </span><span class="parameter" id="-param-cacheMaxSize"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">cacheMaxSize</span> = <span class="default-value">200 * 1024 * 1024</span>, </span><span class="parameter" id="-param-cacheTtl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">cacheTtl</span> = <span class="default-value">const {&#39;text&#47;html&#39; : 3600, &#39;text&#47;css&#39; : 86400, &#39;application&#47;javascript&#39; : 86400, &#39;image&#47;*&#39; : 604800, &#39;default&#39; : 86400}</span>, </span><span class="parameter" id="-param-cacheStale"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">cacheStale</span> = <span class="default-value">const {&#39;text&#47;html&#39; : 86400, &#39;text&#47;css&#39; : 604800, &#39;image&#47;*&#39; : 2592000, &#39;default&#39; : 259200}</span>, </span><span class="parameter" id="-param-connectTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">connectTimeout</span> = <span class="default-value">const Duration(seconds: 10)</span>, </span><span class="parameter" id="-param-requestTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">requestTimeout</span> = <span class="default-value">const Duration(seconds: 60)</span>, </span><span class="parameter" id="-param-retryBackoffSeconds"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">retryBackoffSeconds</span> = <span class="default-value">const [1, 2, 5, 10, 20, 30]</span>, </span><span class="parameter" id="-param-enableAdminApi"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableAdminApi</span> = <span class="default-value">false</span>, </span><span class="parameter" id="-param-enableWebStorageInheritance"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableWebStorageInheritance</span> = <span class="default-value">false</span>, </span><span class="parameter" id="-param-logLevel"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">logLevel</span> = <span class="default-value">&#39;info&#39;</span>, </span><span class="parameter" id="-param-startupPaths"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span> <span class="parameter-name">startupPaths</span> = <span class="default-value">const []</span>, </span><span class="parameter" id="-param-healthCheckPath"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">healthCheckPath</span> = <span class="default-value">&#39;&#47;__offline_web_proxy&#47;health&#39;</span>, </span><span class="parameter" id="-param-healthCheckInterval"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">healthCheckInterval</span> = <span class="default-value">Duration.zero</span>, </span><span class="parameter" id="-param-serverIdleTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">serverIdleTimeout</span> = <span class="default-value">const Duration(seconds: 120)</span>, </span><span class="parameter" id="-param-maxRestartAttemptsPerMinute"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">maxRestartAttemptsPerMinute</span> = <span class="default-value">5</span>, </span><span class="parameter" id="-param-offlineFallbackHtml"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">offlineFallbackHtml</span>, </span><span class="parameter" id="-param-gatewayTimeoutHtml"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">gatewayTimeoutHtml</span></span>})</span>
+          <span class="name"><a href="../offline_web_proxy/ProxyConfig/ProxyConfig.html">ProxyConfig</a></span><span class="signature">({<span class="parameter" id="-param-origin"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">origin</span>, </span><span class="parameter" id="-param-host"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">host</span> = <span class="default-value">&#39;127.0.0.1&#39;</span>, </span><span class="parameter" id="-param-port"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">port</span> = <span class="default-value">0</span>, </span><span class="parameter" id="-param-preferredPort"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">preferredPort</span> = <span class="default-value">0</span>, </span><span class="parameter" id="-param-cacheMaxSize"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">cacheMaxSize</span> = <span class="default-value">200 * 1024 * 1024</span>, </span><span class="parameter" id="-param-cacheTtl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">cacheTtl</span> = <span class="default-value">const {&#39;text&#47;html&#39; : 3600, &#39;text&#47;css&#39; : 86400, &#39;application&#47;javascript&#39; : 86400, &#39;image&#47;*&#39; : 604800, &#39;default&#39; : 86400}</span>, </span><span class="parameter" id="-param-cacheStale"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">cacheStale</span> = <span class="default-value">const {&#39;text&#47;html&#39; : 86400, &#39;text&#47;css&#39; : 604800, &#39;image&#47;*&#39; : 2592000, &#39;default&#39; : 259200}</span>, </span><span class="parameter" id="-param-upstreamFailureThreshold"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">upstreamFailureThreshold</span> = <span class="default-value">3</span>, </span><span class="parameter" id="-param-upstreamProbePath"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">upstreamProbePath</span> = <span class="default-value">&#39;&#47;&#39;</span>, </span><span class="parameter" id="-param-upstreamProbeMethod"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">upstreamProbeMethod</span> = <span class="default-value">&#39;HEAD&#39;</span>, </span><span class="parameter" id="-param-upstreamProbeTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">upstreamProbeTimeout</span> = <span class="default-value">const Duration(seconds: 3)</span>, </span><span class="parameter" id="-param-upstreamProbeBackoffSeconds"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">upstreamProbeBackoffSeconds</span> = <span class="default-value">const [1, 2, 5, 10, 30]</span>, </span><span class="parameter" id="-param-connectTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">connectTimeout</span> = <span class="default-value">const Duration(seconds: 5)</span>, </span><span class="parameter" id="-param-requestTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">requestTimeout</span> = <span class="default-value">const Duration(seconds: 20)</span>, </span><span class="parameter" id="-param-retryBackoffSeconds"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">retryBackoffSeconds</span> = <span class="default-value">const [1, 2, 5, 10, 20, 30]</span>, </span><span class="parameter" id="-param-enableAdminApi"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableAdminApi</span> = <span class="default-value">false</span>, </span><span class="parameter" id="-param-enableWebStorageInheritance"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableWebStorageInheritance</span> = <span class="default-value">false</span>, </span><span class="parameter" id="-param-logLevel"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">logLevel</span> = <span class="default-value">&#39;info&#39;</span>, </span><span class="parameter" id="-param-startupPaths"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span> <span class="parameter-name">startupPaths</span> = <span class="default-value">const []</span>, </span><span class="parameter" id="-param-healthCheckPath"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">healthCheckPath</span> = <span class="default-value">&#39;&#47;__offline_web_proxy&#47;health&#39;</span>, </span><span class="parameter" id="-param-healthCheckInterval"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">healthCheckInterval</span> = <span class="default-value">Duration.zero</span>, </span><span class="parameter" id="-param-serverIdleTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">serverIdleTimeout</span> = <span class="default-value">const Duration(seconds: 120)</span>, </span><span class="parameter" id="-param-maxRestartAttemptsPerMinute"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">maxRestartAttemptsPerMinute</span> = <span class="default-value">5</span>, </span><span class="parameter" id="-param-offlineFallbackHtml"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">offlineFallbackHtml</span>, </span><span class="parameter" id="-param-gatewayTimeoutHtml"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">gatewayTimeoutHtml</span>, </span><span class="parameter" id="-param-enableIdempotencyKey"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableIdempotencyKey</span> = <span class="default-value">true</span>, </span><span class="parameter" id="-param-idempotencyHeaderName"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">idempotencyHeaderName</span> = <span class="default-value">&#39;Idempotency-Key&#39;</span>, </span><span class="parameter" id="-param-idempotencyRetention"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">idempotencyRetention</span> = <span class="default-value">const Duration(hours: 24)</span>, </span><span class="parameter" id="-param-dropPolicy"><span class="type-annotation"><a href="../offline_web_proxy/DropPolicy.html">DropPolicy</a></span> <span class="parameter-name">dropPolicy</span> = <span class="default-value">DropPolicy.quarantine</span>, </span><span class="parameter" id="-param-queuedResponse"><span class="type-annotation"><a href="../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">queuedResponse</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 202, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;queued&quot;:true}&#39;)</span>, </span><span class="parameter" id="-param-offlineMissResponse"><span class="type-annotation"><a href="../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">offlineMissResponse</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 504, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;offline&quot;:true}&#39;)</span></span>})</span>
         </dt>
         <dd>
           
@@ -159,6 +159,18 @@ final advancedConfig = ProxyConfig(
 
 </dd>
 
+        <dt id="dropPolicy" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/dropPolicy.html">dropPolicy</a></span>
+  <span class="signature">&#8594; <a href="../offline_web_proxy/DropPolicy.html">DropPolicy</a></span>
+  
+
+</dt>
+<dd>
+  What happens to a queued update request the upstream rejected with 4xx.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
         <dt id="enableAdminApi" class="property">
   <span class="name"><a href="../offline_web_proxy/ProxyConfig/enableAdminApi.html">enableAdminApi</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
@@ -167,6 +179,18 @@ final advancedConfig = ProxyConfig(
 </dt>
 <dd>
   Enable administrative API endpoints for debugging.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="enableIdempotencyKey" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/enableIdempotencyKey.html">enableIdempotencyKey</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
+  
+
+</dt>
+<dd>
+  Whether the proxy attaches an idempotency key to queued update requests.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -243,6 +267,30 @@ final advancedConfig = ProxyConfig(
 
 </dd>
 
+        <dt id="idempotencyHeaderName" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/idempotencyHeaderName.html">idempotencyHeaderName</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+  
+
+</dt>
+<dd>
+  Name of the header carrying the idempotency key.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="idempotencyRetention" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/idempotencyRetention.html">idempotencyRetention</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span>
+  
+
+</dt>
+<dd>
+  How long a completed idempotency key is remembered.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
         <dt id="logLevel" class="property">
   <span class="name"><a href="../offline_web_proxy/ProxyConfig/logLevel.html">logLevel</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
@@ -275,6 +323,18 @@ final advancedConfig = ProxyConfig(
 </dt>
 <dd>
   HTML body returned instead of the built-in offline fallback page.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="offlineMissResponse" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/offlineMissResponse.html">offlineMissResponse</a></span>
+  <span class="signature">&#8594; <a href="../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span>
+  
+
+</dt>
+<dd>
+  Response returned when an offline read cannot be served from cache.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -315,6 +375,18 @@ final advancedConfig = ProxyConfig(
 
 </dd>
 
+        <dt id="queuedResponse" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/queuedResponse.html">queuedResponse</a></span>
+  <span class="signature">&#8594; <a href="../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span>
+  
+
+</dt>
+<dd>
+  Response returned when an update request is stored in the offline queue.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
         <dt id="requestTimeout" class="property">
   <span class="name"><a href="../offline_web_proxy/ProxyConfig/requestTimeout.html">requestTimeout</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span>
@@ -322,7 +394,7 @@ final advancedConfig = ProxyConfig(
 
 </dt>
 <dd>
-  Total timeout for completing HTTP requests to upstream server.
+  Total time budget for one upstream request.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -371,6 +443,67 @@ final advancedConfig = ProxyConfig(
 </dt>
 <dd>
   List of paths to warm up (pre-cache) during server startup.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="upstreamFailureThreshold" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/upstreamFailureThreshold.html">upstreamFailureThreshold</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
+  
+
+</dt>
+<dd>
+  Number of consecutive unreachable upstream attempts that opens the
+upstream circuit breaker.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="upstreamProbeBackoffSeconds" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/upstreamProbeBackoffSeconds.html">upstreamProbeBackoffSeconds</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span>
+  
+
+</dt>
+<dd>
+  Backoff intervals between upstream reachability probes.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="upstreamProbeMethod" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/upstreamProbeMethod.html">upstreamProbeMethod</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+  
+
+</dt>
+<dd>
+  HTTP method used for the upstream reachability probe.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="upstreamProbePath" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/upstreamProbePath.html">upstreamProbePath</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+  
+
+</dt>
+<dd>
+  Path requested to check whether the upstream became reachable again.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="upstreamProbeTimeout" class="property">
+  <span class="name"><a href="../offline_web_proxy/ProxyConfig/upstreamProbeTimeout.html">upstreamProbeTimeout</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span>
+  
+
+</dt>
+<dd>
+  Timeout applied to the upstream reachability probe.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -466,7 +599,7 @@ final advancedConfig = ProxyConfig(
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

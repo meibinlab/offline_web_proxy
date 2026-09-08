@@ -85,6 +85,7 @@
   <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearDroppedRequests() async {
   try {
     await _droppedRequestBox?.clear();
+    _unacknowledgedDroppedCount = null;
   } catch (e) {
     throw QueueOperationException(&#39;clearDropped&#39;,
         &#39;ドロップされたリクエスト履歴の削除に失敗しました: $e&#39;, e is Exception ? e : null);
@@ -123,7 +124,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   

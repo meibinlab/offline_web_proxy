@@ -69,8 +69,13 @@
 <li><span class="parameter" id="-param-cacheMaxSize"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">cacheMaxSize</span> = <span class="default-value">200 * 1024 * 1024</span>, </span></li>
 <li><span class="parameter" id="-param-cacheTtl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">cacheTtl</span> = <span class="default-value">const {&#39;text&#47;html&#39; : 3600, &#39;text&#47;css&#39; : 86400, &#39;application&#47;javascript&#39; : 86400, &#39;image&#47;*&#39; : 604800, &#39;default&#39; : 86400}</span>, </span></li>
 <li><span class="parameter" id="-param-cacheStale"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">cacheStale</span> = <span class="default-value">const {&#39;text&#47;html&#39; : 86400, &#39;text&#47;css&#39; : 604800, &#39;image&#47;*&#39; : 2592000, &#39;default&#39; : 259200}</span>, </span></li>
-<li><span class="parameter" id="-param-connectTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">connectTimeout</span> = <span class="default-value">const Duration(seconds: 10)</span>, </span></li>
-<li><span class="parameter" id="-param-requestTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">requestTimeout</span> = <span class="default-value">const Duration(seconds: 60)</span>, </span></li>
+<li><span class="parameter" id="-param-upstreamFailureThreshold"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">upstreamFailureThreshold</span> = <span class="default-value">3</span>, </span></li>
+<li><span class="parameter" id="-param-upstreamProbePath"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">upstreamProbePath</span> = <span class="default-value">&#39;&#47;&#39;</span>, </span></li>
+<li><span class="parameter" id="-param-upstreamProbeMethod"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">upstreamProbeMethod</span> = <span class="default-value">&#39;HEAD&#39;</span>, </span></li>
+<li><span class="parameter" id="-param-upstreamProbeTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">upstreamProbeTimeout</span> = <span class="default-value">const Duration(seconds: 3)</span>, </span></li>
+<li><span class="parameter" id="-param-upstreamProbeBackoffSeconds"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">upstreamProbeBackoffSeconds</span> = <span class="default-value">const [1, 2, 5, 10, 30]</span>, </span></li>
+<li><span class="parameter" id="-param-connectTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">connectTimeout</span> = <span class="default-value">const Duration(seconds: 5)</span>, </span></li>
+<li><span class="parameter" id="-param-requestTimeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">requestTimeout</span> = <span class="default-value">const Duration(seconds: 20)</span>, </span></li>
 <li><span class="parameter" id="-param-retryBackoffSeconds"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">retryBackoffSeconds</span> = <span class="default-value">const [1, 2, 5, 10, 20, 30]</span>, </span></li>
 <li><span class="parameter" id="-param-enableAdminApi"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableAdminApi</span> = <span class="default-value">false</span>, </span></li>
 <li><span class="parameter" id="-param-enableWebStorageInheritance"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableWebStorageInheritance</span> = <span class="default-value">false</span>, </span></li>
@@ -82,6 +87,12 @@
 <li><span class="parameter" id="-param-maxRestartAttemptsPerMinute"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">maxRestartAttemptsPerMinute</span> = <span class="default-value">5</span>, </span></li>
 <li><span class="parameter" id="-param-offlineFallbackHtml"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">offlineFallbackHtml</span>, </span></li>
 <li><span class="parameter" id="-param-gatewayTimeoutHtml"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">gatewayTimeoutHtml</span>, </span></li>
+<li><span class="parameter" id="-param-enableIdempotencyKey"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableIdempotencyKey</span> = <span class="default-value">true</span>, </span></li>
+<li><span class="parameter" id="-param-idempotencyHeaderName"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">idempotencyHeaderName</span> = <span class="default-value">&#39;Idempotency-Key&#39;</span>, </span></li>
+<li><span class="parameter" id="-param-idempotencyRetention"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">idempotencyRetention</span> = <span class="default-value">const Duration(hours: 24)</span>, </span></li>
+<li><span class="parameter" id="-param-dropPolicy"><span class="type-annotation"><a href="../../offline_web_proxy/DropPolicy.html">DropPolicy</a></span> <span class="parameter-name">dropPolicy</span> = <span class="default-value">DropPolicy.quarantine</span>, </span></li>
+<li><span class="parameter" id="-param-queuedResponse"><span class="type-annotation"><a href="../../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">queuedResponse</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 202, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;queued&quot;:true}&#39;)</span>, </span></li>
+<li><span class="parameter" id="-param-offlineMissResponse"><span class="type-annotation"><a href="../../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">offlineMissResponse</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 504, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;offline&quot;:true}&#39;)</span>, </span></li>
 </ol>})
     </section>
 
@@ -110,8 +121,13 @@
     &#39;image&#47;*&#39;: 2592000,
     &#39;default&#39;: 259200,
   },
-  this.connectTimeout = const Duration(seconds: 10),
-  this.requestTimeout = const Duration(seconds: 60),
+  this.upstreamFailureThreshold = 3,
+  this.upstreamProbePath = &#39;&#47;&#39;,
+  this.upstreamProbeMethod = &#39;HEAD&#39;,
+  this.upstreamProbeTimeout = const Duration(seconds: 3),
+  this.upstreamProbeBackoffSeconds = const [1, 2, 5, 10, 30],
+  this.connectTimeout = const Duration(seconds: 5),
+  this.requestTimeout = const Duration(seconds: 20),
   this.retryBackoffSeconds = const [1, 2, 5, 10, 20, 30],
   this.enableAdminApi = false,
   this.enableWebStorageInheritance = false,
@@ -123,6 +139,20 @@
   this.maxRestartAttemptsPerMinute = 5,
   this.offlineFallbackHtml,
   this.gatewayTimeoutHtml,
+  this.enableIdempotencyKey = true,
+  this.idempotencyHeaderName = &#39;Idempotency-Key&#39;,
+  this.idempotencyRetention = const Duration(hours: 24),
+  this.dropPolicy = DropPolicy.quarantine,
+  this.queuedResponse = const ProxyResponseConfig(
+    statusCode: 202,
+    contentType: &#39;application&#47;json; charset=utf-8&#39;,
+    body: &#39;{&quot;queued&quot;:true}&#39;,
+  ),
+  this.offlineMissResponse = const ProxyResponseConfig(
+    statusCode: 504,
+    contentType: &#39;application&#47;json; charset=utf-8&#39;,
+    body: &#39;{&quot;offline&quot;:true}&#39;,
+  ),
 });</code></pre>
 </section>
 
@@ -157,7 +187,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.9.0
+      0.11.0
   </span>
 
   
