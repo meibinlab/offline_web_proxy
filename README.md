@@ -240,6 +240,8 @@ const saved = await res.json();
 ```
 
 An offline read with no cached entry answers with `504` and `{"offline":true}` by default, so `response.ok` is false and normal error handling applies. Only page navigations (`Sec-Fetch-Mode: navigate`) receive the readable HTML fallback page.
+
+The same body is returned when the link layer is up but the upstream cannot be reached. That response carries `X-Offline-Source: none`, so it can be told apart from a `504` the upstream itself returned.
 - The supported configuration entry point is `ProxyConfig`. The package does not currently load an external YAML file automatically.
 
 ### Waiting times for WebView front ends
@@ -451,7 +453,7 @@ Notes:
 
 - Online GET/HEAD requests are forwarded upstream and are not short-circuited by the proxy cache.
 - The proxy cache is used only as a substitute response for offline requests or GET/HEAD requests that could not reach the upstream. Connection refused, a dropped connection, and exceeding `requestTimeout` are covered, while a 4xx / 5xx returned by the upstream is passed through. When no eligible cache exists, 504 is returned.
-- `warmupCache()` is intended to prepare fallback responses in advance, not to optimize normal online browsing.
+- `warmupCache()` is intended to prepare fallback responses in advance, not to optimize normal online browsing. While the upstream is considered unreachable, it returns a failure entry for each path instead of waiting, and its results feed the reachability decision.
 
 The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. `redirectHandled` includes fields such as `redirectStatusCode`, `locationHeader`, `redirectAction`, `resolvedProxyUrl`, and `externalUrl`.
 Connection recovery emits `serverRecovered` and `serverUnavailable`, which carry `cause`, `previousPort`, `newPort`, `downtimeMs`, `restartCount`, and `probeError`.

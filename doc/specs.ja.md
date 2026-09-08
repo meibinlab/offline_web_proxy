@@ -232,6 +232,8 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 - **キーの一意性**: マイクロ秒精度のタイムスタンプと同一マイクロ秒内の連番でキーを採番し、同時に保存したリクエストが上書きで失われないようにする
 - **永続化**: Hive でキュー状態を保存。アプリ再起動後も再送を継続
 - **再試行待ちの扱い**: バックオフ待機中のリクエストは今回の送信対象から外し、待機時間を過ぎた後続のリクエストを先に送信する
+- **接続の解放**: 再送では上流の応答本文を必ず読み切り、接続を解放してから次の要求へ進む。件数が同時接続数の上限を超えても最後まで送り切れるようにする
+- **隔離できない場合**: 隔離領域へ退避できない状況では、キューから取り除かずバックオフを適用して再試行する
 
 ### 再試行戦略
 
@@ -532,8 +534,9 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 | halfOpen | 復帰確認中 | 確認用リクエストだけを上流へ送り、通常のリクエストは open と同じ扱い |
 
 - **失敗の定義**: 接続失敗、名前解決失敗、TLS ハンドシェイク失敗、タイムアウトなど上流へ到達できなかった場合のみを数えます。4xx や 5xx の応答は上流が生きている証拠であるため、失敗として数えず連続失敗回数を 0 に戻します
-- **遮断条件**: 連続失敗が `ProxyConfig.upstreamFailureThreshold`（既定 3、0 で無効）に達した時点で open へ遷移します。転送を試みたリクエストに加えて、キュー再送の失敗も判定材料に含めます
-- **遮断中の動作**: 上流へは転送しません。キューの消化も停止し、復帰後にまとめて再送します
+- **遮断条件**: 連続失敗が `ProxyConfig.upstreamFailureThreshold`（既定 3、0 で無効）に達した時点で open へ遷移します。転送を試みたリクエストに加えて、キュー再送とウォームアップの失敗も判定材料に含めます。キュー再送は接続を確立できなかった場合（接続拒否など）も数えます
+- **遮断中の動作**: 上流へは転送しません。キューの消化とウォームアップも停止し、復帰後にまとめて再送します
+- **同時接続の空き待ち**: proxy 側の同時上流接続数の上限による待機は proxy の混雑が原因のため、上流断としては数えません
 - **復帰確認**: `ProxyConfig.upstreamProbeMethod`（既定 `HEAD`）で `ProxyConfig.upstreamProbePath`（既定 `/`）へ軽量リクエストを送ります。タイムアウトは `ProxyConfig.upstreamProbeTimeout`（既定 3 秒）、間隔は `ProxyConfig.upstreamProbeBackoffSeconds`（既定 [1, 2, 5, 10, 30] 秒）です。ステータスコードは問わず、応答が返れば到達可能と判定します
 - **リンク層イベントの扱い**: リンク層の復帰は復帰確認を即時実行する契機として扱い、判定の唯一の根拠にはしません。リンク層が切断されている間は確認を行いません
 - **イベント**: 遮断時に `ProxyEventType.upstreamCircuitOpened`、復帰時に `ProxyEventType.upstreamCircuitClosed` を通知します
@@ -548,6 +551,12 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 ### レスポンス種別とヘッダ
 
 本章はオフライン時の応答を示します。上流到達不能時の代替応答も同じキャッシュ選択ルールに従いますが、デバッグヘッダの契約はオフライン時のものを基準にします。
+
+上流到達不能時の応答は次のとおりです。リンク層は接続済みであるため `X-Offline` は付与しません。
+
+- **キャッシュを代替として返した場合**: 上流がオンラインで応答した場合と同じ扱いとし、追加のヘッダは付与しません
+- **代替できるキャッシュが無い場合**: proxy が生成した応答であることを判別できるよう `X-Offline-Source: none` を付与します（上流自身が返した 504 には付きません）
+- **サーキットブレーカが遮断中の場合**: オフライン時と同じ経路で応答するため、本章のヘッダ（`X-Offline: 1` を含む）がそのまま適用されます
 
 オフライン時の応答には、デバッグ用のカスタムヘッダを付与します：
 
@@ -671,6 +680,7 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **connectTimeout**: 5 秒（TCP 接続確立の制限時間）
 - **requestTimeout**: 20 秒（1 リクエスト全体の締め切り）
 - **締め切りの範囲**: 同時接続数の空き待ち、接続確立、ヘッダ受信、本文受信のすべてを 1 つの予算で管理します。段階ごとに待ち時間が積み上がることはありません
+- **締め切り超過時の接続**: 本文の受信を打ち切る場合は購読を中止して接続を破棄します。受信途中の接続が上流への接続枠を占有し続けないようにするためです
 - **既定値の考え方**: WebView の前段では人が画面の前で待つため、バックグラウンド同期より短い既定値にしています
 - **上流到達不能時フォールバック**: GET/HEAD は上流への接続に失敗した場合、または requestTimeout を超過した場合に保存済みキャッシュへフォールバック可能
 - **キュー再送**: 再送 1 回にも同じ締め切りを適用します
@@ -1192,6 +1202,7 @@ print('Cache size: ${stats.totalSize} bytes');
 - **例外**:
   - `ArgumentError`: 無効なパスが含まれている場合
   - `WarmupException`: 事前取得処理全体が失敗した場合
+- **上流到達性との連動**: サーキットブレーカが遮断中（またはリンク層が切断中）の場合は上流へ要求せず、各パスを失敗として返します。取得の成否は上流到達性の判定に反映します
 
 ```dart
 // 設定済みのパスリストで事前取得
@@ -1429,6 +1440,87 @@ for (final request in dropped) {
 await proxy.clearDroppedRequests();
 ```
 
+#### `Future<int> acknowledgeDroppedRequests()`
+
+ドロップされたリクエストの履歴を確認済みにします。
+
+- **戻り値**: 確認済みへ変更した件数
+- **例外**:
+  - `QueueOperationException`: 更新に失敗した場合
+- **用途**: 起動時に `ProxyStats.unacknowledgedDroppedCount` で未確認の履歴を検知し、利用者へ提示し終えた時点で呼び出します。履歴自体は削除しないため、内容は後から参照できます
+
+```dart
+final stats = await proxy.getStats();
+if (stats.unacknowledgedDroppedCount > 0) {
+  // 未送信のまま失われた要求を利用者へ提示してから確認済みにする
+  await proxy.acknowledgeDroppedRequests();
+}
+```
+
+### 隔離キュー管理
+
+`ProxyConfig.dropPolicy` が `DropPolicy.quarantine`（既定）の場合、上流に拒否されたリクエストは本文を保持したまま隔離領域へ退避します。以下の API で内容を確認し、再送または破棄を選択します。
+
+#### `Future<List<QuarantinedRequest>> getQuarantinedRequests({int? limit})`
+
+隔離されたリクエストの一覧を取得します。
+
+- **パラメータ**:
+  - `limit`: 取得件数の上限（デフォルト: 100）
+- **戻り値**: 隔離されているリクエストのリスト（隔離した順）
+- **例外**:
+  - `QueueOperationException`: 取得に失敗した場合
+- **注意**: 本文は返しません。再送する場合は `retryQuarantinedRequest()` を使用します
+
+```dart
+final quarantined = await proxy.getQuarantinedRequests();
+for (final request in quarantined) {
+  print('${request.method} ${request.url} -> ${request.statusCode}');
+}
+```
+
+#### `Future<bool> retryQuarantinedRequest(String id)`
+
+隔離されたリクエストをキューへ戻して再送します。
+
+- **パラメータ**:
+  - `id`: `getQuarantinedRequests()` が返した識別子
+- **戻り値**: キューへ戻した場合は `true`、該当が無い場合は `false`
+- **例外**:
+  - `QueueOperationException`: 操作に失敗した場合
+- **注意**: 再試行回数は初期化されます。拒否の原因を解消してから呼び出してください
+
+```dart
+// 上流側の不備を修正したあとで再送する
+await proxy.retryQuarantinedRequest(quarantined.first.id);
+```
+
+#### `Future<bool> discardQuarantinedRequest(String id)`
+
+隔離されたリクエストを破棄します。
+
+- **パラメータ**:
+  - `id`: `getQuarantinedRequests()` が返した識別子
+- **戻り値**: 破棄した場合は `true`、該当が無い場合は `false`
+- **例外**:
+  - `QueueOperationException`: 操作に失敗した場合
+
+```dart
+await proxy.discardQuarantinedRequest(quarantined.first.id);
+```
+
+#### `Future<void> clearQuarantinedRequests()`
+
+隔離されたリクエストを全て破棄します。
+
+- **戻り値**: なし
+- **例外**:
+  - `QueueOperationException`: 破棄に失敗した場合
+
+```dart
+await proxy.clearQuarantinedRequests();
+```
+
 ### 統計・監視
 
 #### `Future<ProxyStats> getStats()`
@@ -1533,8 +1625,28 @@ class DroppedRequest {
   final String dropReason; // ドロップ理由（"4xx_error", "5xx_error", "network_timeout"等）
   final int statusCode; // エラー時のHTTPステータスコード
   final String errorMessage; // 詳細なエラーメッセージ
+  final bool acknowledged; // 利用者へ提示済みか（既定: false）
 }
 ```
+
+#### `QuarantinedRequest`
+
+上流に拒否され、隔離領域へ退避した更新系リクエストを表すクラス。
+
+```dart
+class QuarantinedRequest {
+  final String id; // 隔離領域内での識別子（再送・破棄で指定）
+  final String url; // 隔離されたリクエストのURL
+  final String method; // HTTPメソッド
+  final DateTime quarantinedAt; // 隔離された日時
+  final DateTime queuedAt; // 最初にキューへ保存された日時
+  final String reason; // 隔離理由（"4xx_error" 等）
+  final int statusCode; // 上流から返されたHTTPステータスコード
+  final String errorMessage; // 詳細なエラーメッセージ
+}
+```
+
+本文は保持していますが、この一覧では返しません。再送する場合は `retryQuarantinedRequest(id)` を使用します。
 
 #### `ProxyStats`
 
@@ -1548,6 +1660,8 @@ class ProxyStats {
   final double cacheHitRate; // キャッシュヒット率（0.0～1.0）
   final int queueLength; // 現在のキュー長
   final int droppedRequestsCount; // ドロップされたリクエスト数
+  final int unacknowledgedDroppedCount; // 未確認のドロップ履歴件数
+  final int quarantinedCount; // 隔離されているリクエスト数
   final DateTime startedAt; // プロキシサーバ開始日時
   final Duration uptime; // 稼働時間
 }
@@ -1608,10 +1722,22 @@ class ProxyConfig {
   final int cacheMaxSize; // キャッシュ最大容量（バイト）
   final Map<String, int> cacheTtl; // Content-Type別TTL設定（秒）
   final Map<String, int> cacheStale; // Content-Type別Stale期間設定（秒）
-  final Duration connectTimeout; // 接続タイムアウト
-  final Duration requestTimeout; // リクエストタイムアウト
+  final int upstreamFailureThreshold; // 上流断とみなす連続失敗回数（既定: 3、0=無効）
+  final String upstreamProbePath; // 復帰確認のパス（既定: "/"）
+  final String upstreamProbeMethod; // 復帰確認のHTTPメソッド（既定: "HEAD"）
+  final Duration upstreamProbeTimeout; // 復帰確認のタイムアウト（既定: 3 秒）
+  final List<int> upstreamProbeBackoffSeconds; // 復帰確認の間隔（既定: [1, 2, 5, 10, 30]）
+  final Duration connectTimeout; // 接続タイムアウト（既定: 5 秒）
+  final Duration requestTimeout; // リクエスト全体の締め切り（既定: 20 秒）
   final List<int> retryBackoffSeconds; // 再試行バックオフ間隔
+  final bool enableIdempotencyKey; // べき等性キーの付与（既定: true）
+  final String idempotencyHeaderName; // べき等性キーのヘッダ名（既定: "Idempotency-Key"）
+  final Duration idempotencyRetention; // 送信済みキーの保持期間（既定: 24 時間）
+  final DropPolicy dropPolicy; // 再送を打ち切った要求の扱い（既定: quarantine）
+  final ProxyResponseConfig queuedResponse; // キュー投入時の応答（既定: 202 / JSON）
+  final ProxyResponseConfig offlineMissResponse; // 代替できない場合の応答（既定: 504 / JSON）
   final bool enableAdminApi; // 管理API有効化（開発時のみ）
+  final bool enableWebStorageInheritance; // WebStorage 引き継ぎ（既定: false）
   final String logLevel; // ログレベル（"debug", "info", "warn", "error"）
   final List<String> startupPaths; // 起動時キャッシュ更新パス
   final int preferredPort; // 優先して利用するポート（0=指定なし）
@@ -1623,6 +1749,33 @@ class ProxyConfig {
   final String? gatewayTimeoutHtml; // タイムアウト応答の差し替え HTML（null=内蔵ページ）
 }
 ```
+
+#### `DropPolicy`
+
+再送を打ち切った更新系リクエストの扱いを表す列挙型。
+
+```dart
+enum DropPolicy {
+  quarantine, // 本文ごと隔離領域へ退避する（既定）
+  drop // 履歴だけを残して破棄する（本文は保持しない）
+}
+```
+
+売上のように失うと業務データの欠落になる用途では `quarantine` を使用します。
+
+#### `ProxyResponseConfig`
+
+proxy が自ら生成する応答の内容を表すクラス。
+
+```dart
+class ProxyResponseConfig {
+  final int statusCode; // 生成する応答のステータスコード
+  final String contentType; // Content-Type ヘッダの値
+  final String body; // 応答本文
+}
+```
+
+`ProxyConfig.queuedResponse`（既定: 202 / `{"queued":true}`）と `ProxyConfig.offlineMissResponse`（既定: 504 / `{"offline":true}`）で使用します。Web アプリが解釈できる形式を指定してください。
 
 #### `ProxyEvent`
 
@@ -1647,14 +1800,32 @@ enum ProxyEventType {
   requestQueued, // リクエストキューイング
   queueDrained, // キュー送信完了
   requestDropped, // リクエストドロップ
+  requestQuarantined, // リクエストを隔離領域へ退避
   networkOnline, // ネットワーク復旧
   networkOffline, // ネットワーク切断
+  upstreamCircuitOpened, // 上流断を検知して転送を停止
+  upstreamCircuitClosed, // 上流への到達を確認して転送を再開
   cacheCleared, // キャッシュクリア
   errorOccurred, // エラー発生
   serverUnavailable, // 稼働確認に失敗し復旧できなかった
   serverRecovered // 再バインドにより復旧した
 }
 ```
+
+`requestQuarantined` の `data` には、次のメタ情報が入ります。
+
+- `quarantineId`: 隔離領域内での識別子（`retryQuarantinedRequest` などで指定）
+- `statusCode`: 上流から返されたステータスコード
+- `reason`: 隔離理由（`"4xx_error"` 等）
+
+`upstreamCircuitOpened` の `data` には、次のメタ情報が入ります。
+
+- `consecutiveFailures`: 遮断時点での連続失敗回数
+- `lastSuccessAt`: 最後に上流へ到達できた日時（ISO 8601、無い場合は `null`）
+
+`upstreamCircuitClosed` の `data` には、次のメタ情報が入ります。
+
+- `lastSuccessAt`: 到達を確認した日時（ISO 8601）
 
 `serverUnavailable` と `serverRecovered` の `data` には、次のメタ情報が入ります。
 
@@ -1735,6 +1906,37 @@ class ProxyDiagnostics {
   final ProxyRecoveryCause? lastRecoveryCause; // 最終復旧の判定種別
   final String? lastRecoveryError; // 最終復旧失敗の内容
   final int? lastDowntimeMs; // 直近の停止推定時間（ミリ秒）
+  final bool isOnline; // リンク層の接続状態に基づくオンライン判定
+  final OnlineDecisionSource onlineDecisionSource; // isOnline の根拠
+  final bool isUpstreamReachable; // 実際に転送できる状態か
+  final UpstreamCircuitState upstreamCircuitState; // サーキットブレーカの状態
+  final int consecutiveUpstreamFailures; // 上流へ到達できなかった連続回数
+  final DateTime? lastUpstreamSuccessAt; // 最後に上流へ到達できた日時
+}
+```
+
+`isOnline` から `lastUpstreamSuccessAt` までは必須の引数です。`ProxyDiagnostics` を直接生成しているコードは、指定を追加する必要があります。
+
+#### `UpstreamCircuitState`
+
+上流到達性のサーキットブレーカの状態を表す列挙型。
+
+```dart
+enum UpstreamCircuitState {
+  closed, // 到達可能とみなし、通常どおり転送する
+  open, // 到達不能とみなし、転送せずに代替応答へ回す
+  halfOpen // 復帰確認の実行中
+}
+```
+
+#### `OnlineDecisionSource`
+
+`ProxyDiagnostics.isOnline` の判断根拠を表す列挙型。
+
+```dart
+enum OnlineDecisionSource {
+  initial, // start() 時に取得した接続状態（取得できない場合のフォールバックを含む）
+  linkLayer // 起動後に受け取った接続状態の変化イベント
 }
 ```
 

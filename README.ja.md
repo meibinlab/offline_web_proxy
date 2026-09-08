@@ -240,6 +240,8 @@ const saved = await res.json();
 ```
 
 キャッシュが無い状態のオフライン read には、既定で `504` と `{"offline":true}` を返します。`response.ok` が false になるため、通常のエラー処理で扱えます。ページ遷移（`Sec-Fetch-Mode: navigate`）だけは、人が読める HTML のフォールバックページを返します。
+
+リンク層は接続済みでも上流へ到達できない場合も同じ内容を返します。この応答には `X-Offline-Source: none` が付くため、上流自身が返した `504` と判別できます。
 - 現在サポートされる設定入口は `ProxyConfig` です。外部 YAML の自動読込は実装されていません。
 
 ### WebView 用途の待ち時間
@@ -451,7 +453,7 @@ proxy.events.listen((event) {
 
 - オンライン時の GET/HEAD は upstream へ転送し、proxy キャッシュで応答を省略しません。
 - proxy キャッシュはオフライン時、または上流へ到達できない GET/HEAD の代替応答に使います。接続拒否や接続切断、request timeout の超過が対象で、upstream が応答した 4xx / 5xx はそのまま返します。代替キャッシュが無い場合は 504 を返します。
-- `warmupCache()` は通常時の高速化ではなく、フォールバック用レスポンスの事前取得が目的です。
+- `warmupCache()` は通常時の高速化ではなく、フォールバック用レスポンスの事前取得が目的です。上流断を検知している間は待たずに失敗を返し、取得の成否は上流到達性の判定に反映します。
 
 イベントストリームでは、キャッシュヒット、キュー処理、URL 解決メタ情報に加え、redirect 処理結果も監視できます。`redirectHandled` では `redirectStatusCode`、`locationHeader`、`redirectAction`、`resolvedProxyUrl`、`externalUrl` などを参照できます。
 接続復旧では `serverRecovered` と `serverUnavailable` が発行され、`cause`、`previousPort`、`newPort`、`downtimeMs`、`restartCount`、`probeError` を参照できます。

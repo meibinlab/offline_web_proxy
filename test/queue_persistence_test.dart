@@ -21,6 +21,12 @@ const int _concurrentRequestCount = 20;
 /// 再送順の確認に使用する更新系リクエストの件数。
 const int _orderedRequestCount = 5;
 
+/// 連続再送の確認に使用する更新系リクエストの件数。
+///
+/// 共有 `HttpClient` の `maxConnectionsPerHost`（50）を超える件数にし、
+/// 応答本文を読み捨てずに接続が滞留すると再送が止まることを検出する。
+const int _drainRequestCount = 60;
+
 /// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
 class _RealHttpOverrides extends HttpOverrides {
   @override
@@ -237,6 +243,38 @@ void main() {
             for (var i = 0; i < _orderedRequestCount; i++) '{"index":$i}',
           ]),
         );
+      });
+    });
+
+    /// 接続数の上限を超える件数でも、キューを最後まで送り切れること
+    test('drains more queued requests than the connection limit', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+
+        // 長時間オフラインで大量に貯まった状態を再現する
+        await _emitConnectivity(['none']);
+        final postUri = Uri.parse('http://127.0.0.1:$port/api/sales');
+        for (var i = 0; i < _drainRequestCount; i++) {
+          await _performPost(postUri, '{"index":$i}');
+        }
+        expect(
+          (await proxy.getQueuedRequests()).length,
+          equals(_drainRequestCount),
+        );
+
+        // オンライン復帰でキューを消化させる
+        await _emitConnectivity(['wifi']);
+        // 既定のテスト時間内に判定できるよう、待機は 20 秒までとする
+        await _waitUntil(
+          () async => (await proxy.getQueuedRequests()).isEmpty,
+        );
+
+        // 応答本文を読み捨てて接続を解放しないと、上限に達した時点で止まる
+        expect(await proxy.getQueuedRequests(), isEmpty);
+        expect(upstream!.receivedBodies.length, equals(_drainRequestCount));
       });
     });
 

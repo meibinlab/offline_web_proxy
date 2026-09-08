@@ -186,6 +186,9 @@ const List<int> _defaultUpstreamProbeBackoffSeconds = [1, 2, 5, 10, 30];
 /// プラットフォーム応答が遅い場合でも起動を止めないために設けています。
 const Duration _initialConnectivityTimeout = Duration(milliseconds: 500);
 
+/// 上流断を検知済みのためウォームアップを試行しなかった場合のメッセージ。
+const String _upstreamUnreachableWarmupMessage = '上流へ到達できないため取得しませんでした';
+
 /// 保存領域のキーに使うタイムスタンプの桁数。
 /// マイクロ秒値をゼロ埋めし、辞書順と時系列順を一致させます。
 const int _storageKeyTimestampDigits = 19;
@@ -1388,8 +1391,29 @@ class OfflineWebProxy {
         await semaphore.acquire(timeout: const Duration(seconds: 30));
         try {
           final entryStartTime = DateTime.now();
+
+          // 上流断を検知済みの間は待たせず、復帰確認に判定を委ねる
+          if (_isRunning && !_isUpstreamReachable) {
+            onError?.call(path, _upstreamUnreachableWarmupMessage);
+            failureCount++;
+            onProgress?.call(index + 1, targetPaths.length);
+            return WarmupEntry(
+              path: path,
+              success: false,
+              statusCode: null,
+              errorMessage: _upstreamUnreachableWarmupMessage,
+              duration: DateTime.now().difference(entryStartTime),
+            );
+          }
+
           try {
             final response = await _fetchFromUpstream(path, timeout: timeout);
+
+            // 上流が応答した以上は到達可能とみなし、遮断中なら解除する
+            if (_isRunning) {
+              _recordUpstreamSuccess();
+            }
+
             if (response.statusCode == HttpStatus.ok) {
               final upstreamUri = _buildUpstreamUriFromParts(path: path);
               final cacheKey = _generateCacheKey(upstreamUri.toString());
@@ -1410,6 +1434,12 @@ class OfflineWebProxy {
               duration: duration,
             );
           } catch (e) {
+            // 画面操作が無い状況でも上流断を検知できるよう、判定材料に含める。
+            // 停止中は復帰確認を予約できないため数えない。
+            if (_isRunning && _shouldCountUpstreamFailure(e)) {
+              _recordUpstreamFailure();
+            }
+
             final duration = DateTime.now().difference(entryStartTime);
             onError?.call(path, e.toString());
             failureCount++;
@@ -2879,17 +2909,22 @@ window.__offline_web_proxy_web_storage_bridge = {
         : await _readRequestBodyBytes(request);
 
     // 転送とキュー再送で同じキーを使い、timeout 後の再送を上流が重複と判別できるようにする
-    final String? idempotencyKey = _isReadRequestMethod(request.method)
-        ? null
-        : _resolveIdempotencyKey(request).value;
+    final ({String value, bool suppliedByClient})? idempotency =
+        _isReadRequestMethod(request.method) ||
+                !(_config?.enableIdempotencyKey ?? true)
+            ? null
+            : _resolveIdempotencyKey(request);
 
     // 上流サーバに転送
     try {
       final result = await _forwardToUpstream(
         request,
         requestBodyBytes: requestBodyBytes,
-        idempotencyKey: idempotencyKey,
+        idempotencyKey: idempotency?.value,
       );
+
+      // 上流が応答した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
+      _recordUpstreamSuccess();
 
       final redirectResponse = _tryBuildHandledRedirectResponse(
         request: request,
@@ -2925,16 +2960,13 @@ window.__offline_web_proxy_web_storage_bridge = {
         }
       }
 
-      // 上流が応答した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
-      _recordUpstreamSuccess();
-
       // read系以外のリクエストが失敗した場合はキューに保存
       String? queueId;
       if (!_isReadRequestMethod(request.method) && result.statusCode >= 500) {
         queueId = await _queueRequest(
           request,
           bodyBytes: requestBodyBytes,
-          idempotencyKey: idempotencyKey,
+          idempotency: idempotency,
         );
       }
 
@@ -2976,7 +3008,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         final queueId = await _queueRequest(
           request,
           bodyBytes: requestBodyBytes,
-          idempotencyKey: idempotencyKey,
+          idempotency: idempotency,
         );
         return _buildQueuedResponse(queueId);
       }
@@ -3114,12 +3146,17 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// ページ遷移には人が読める HTML を返し、`fetch` や画像などの部品要求には
   /// [ProxyConfig.offlineMissResponse] を返します。
   ///
+  /// キャッシュを使えなかったことを Web アプリ側が判別できるよう、
+  /// オフライン時と同じ `X-Offline-Source: none` を付与します。リンク層は
+  /// 接続済みのため `X-Offline` は付与しません。
+  ///
   /// [request] 対象のHTTPリクエスト。
   ///
   /// Returns: 504 応答。HEAD の場合は本文を持ちません。
   shelf.Response _buildUpstreamUnreachableResponse(shelf.Request request) {
     if (request.method.toUpperCase() == 'HEAD') {
       return shelf.Response(HttpStatus.gatewayTimeout, headers: {
+        'X-Offline-Source': 'none',
         'Connection': 'close',
       });
     }
@@ -3127,7 +3164,10 @@ window.__offline_web_proxy_web_storage_bridge = {
     if (!_isNavigationRequest(request)) {
       return _buildConfiguredResponse(
         _config?.offlineMissResponse ?? _defaultOfflineMissResponse,
-        extraHeaders: {'Connection': 'close'},
+        extraHeaders: {
+          'X-Offline-Source': 'none',
+          'Connection': 'close',
+        },
       );
     }
 
@@ -3138,6 +3178,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         body: customContent,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
+          'X-Offline-Source': 'none',
           'Connection': 'close',
         },
       );
@@ -3146,7 +3187,10 @@ window.__offline_web_proxy_web_storage_bridge = {
     return shelf.Response(
       HttpStatus.gatewayTimeout,
       body: '上流サーバがタイムアウトしました',
-      headers: {'Connection': 'close'},
+      headers: {
+        'X-Offline-Source': 'none',
+        'Connection': 'close',
+      },
     );
   }
 
@@ -3517,14 +3561,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       final ioResponse =
           await ioRequest.close().timeout(_remainingUntil(deadline));
 
-      final bodyBytes = await (() async {
-        final builder = BytesBuilder(copy: false);
-        await for (final chunk in ioResponse) {
-          builder.add(chunk);
-        }
-        return builder.takeBytes();
-      })()
-          .timeout(_remainingUntil(deadline));
+      final bodyBytes = await _readResponseBytes(ioResponse, deadline);
 
       final headerSnapshot =
           ResponseHeaderSnapshot.fromHttpHeaders(ioResponse.headers);
@@ -4215,14 +4252,14 @@ window.__offline_web_proxy_web_storage_bridge = {
   ///
   /// [request] キューに保存するHTTPリクエスト。
   /// [bodyBytes] 既に読み取り済みのリクエストボディ。
-  /// [idempotencyKey] 転送時に使用済みのべき等性キー。
+  /// [idempotency] 転送時に決定済みのべき等性キーと、その出所。
   ///   省略した場合はこの時点で決定します。
   ///
   /// Returns: 保存に使用したキュー ID。保存領域が使えない場合は `null`。
   Future<String?> _queueRequest(
     shelf.Request request, {
     List<int>? bodyBytes,
-    String? idempotencyKey,
+    ({String value, bool suppliedByClient})? idempotency,
   }) async {
     final List<int> body;
     if (request.method == 'GET') {
@@ -4251,9 +4288,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
 
     if (_config?.enableIdempotencyKey ?? true) {
-      final resolved = idempotencyKey != null
-          ? (value: idempotencyKey, suppliedByClient: true)
-          : _resolveIdempotencyKey(request);
+      final resolved = idempotency ?? _resolveIdempotencyKey(request);
 
       // クライアントが同じキーで送り直した場合、キューへ二重に積まない。
       // 生成したキーは一致し得ないため、指定された場合だけ探索する。
@@ -4586,6 +4621,9 @@ window.__offline_web_proxy_web_storage_bridge = {
             errorMessage: errorMessage,
           );
           if (quarantineId == null) {
+            // 退避できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
+            _updateRetrySchedule(data);
+            await box.put(key, data);
             return;
           }
 
@@ -4710,59 +4748,130 @@ window.__offline_web_proxy_web_storage_bridge = {
         request.add(body);
       }
 
-      try {
-        final response =
-            await request.close().timeout(_remainingUntil(deadline));
+      final response = await request.close().timeout(_remainingUntil(deadline));
 
-        // 2xxステータスコードを成功とみなす
-        final statusCode = response.statusCode;
-        if (statusCode >= 200 && statusCode < 300) {
-          if (idempotencyKey != null) {
-            await _recordIdempotencyKey(idempotencyKey);
-          }
+      // 上流がステータス行を返した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
+      _recordUpstreamSuccess();
 
-          return (
-            success: true,
-            shouldDrop: false,
-            statusCode: statusCode,
-            dropReason: null,
-            errorMessage: null,
-          );
-        }
+      // 本文を読み捨てないと接続が解放されず、後続の再送が空き待ちで止まる
+      await _drainResponse(response, deadline);
 
-        if (statusCode >= 400 && statusCode < 500) {
-          return (
-            success: false,
-            shouldDrop: true,
-            statusCode: statusCode,
-            dropReason: '4xx_error',
-            errorMessage: 'HTTP $statusCode',
-          );
+      // 2xxステータスコードを成功とみなす
+      final statusCode = response.statusCode;
+      if (statusCode >= 200 && statusCode < 300) {
+        if (idempotencyKey != null) {
+          await _recordIdempotencyKey(idempotencyKey);
         }
 
         return (
-          success: false,
+          success: true,
           shouldDrop: false,
           statusCode: statusCode,
           dropReason: null,
-          errorMessage: 'HTTP $statusCode',
-        );
-      } catch (e) {
-        // 画面操作が無い状況でも上流断を検知できるよう、再送の失敗も判定に含める
-        if (_shouldCountUpstreamFailure(e)) {
-          _recordUpstreamFailure();
-        }
-
-        return (
-          success: false,
-          shouldDrop: false,
-          statusCode: 0,
-          dropReason: null,
-          errorMessage: e.toString(),
+          errorMessage: null,
         );
       }
+
+      if (statusCode >= 400 && statusCode < 500) {
+        return (
+          success: false,
+          shouldDrop: true,
+          statusCode: statusCode,
+          dropReason: '4xx_error',
+          errorMessage: 'HTTP $statusCode',
+        );
+      }
+
+      return (
+        success: false,
+        shouldDrop: false,
+        statusCode: statusCode,
+        dropReason: null,
+        errorMessage: 'HTTP $statusCode',
+      );
+    } catch (e) {
+      // 画面操作が無い状況でも上流断を検知できるよう、再送の失敗も判定に含める。
+      // 接続確立の失敗が最も多いため、応答受信より前の例外もここで受け取る。
+      if (_shouldCountUpstreamFailure(e)) {
+        _recordUpstreamFailure();
+      }
+
+      return (
+        success: false,
+        shouldDrop: false,
+        statusCode: 0,
+        dropReason: null,
+        errorMessage: e.toString(),
+      );
     } finally {
       // 共有クライアントをここで閉じない
+    }
+  }
+
+  /// 上流からの応答本文を締め切り付きで読み取ります。
+  ///
+  /// 締め切りを過ぎた場合は購読を打ち切って接続を破棄します。読み取りを
+  /// 放置すると、応答が遅い上流に対して `HttpClient` の接続枠を占有し続け、
+  /// 後続のリクエストが空き待ちで滞留します。
+  ///
+  /// [response] 読み取る上流応答。
+  /// [deadline] リクエスト全体の締め切り。
+  ///
+  /// Returns: 受信した本文。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 締め切りまでに読み切れなかった場合。
+  Future<Uint8List> _readResponseBytes(
+    HttpClientResponse response,
+    DateTime deadline,
+  ) async {
+    final builder = BytesBuilder(copy: false);
+    await _consumeResponseBody(response, deadline, onData: builder.add);
+    return builder.takeBytes();
+  }
+
+  /// 上流からの応答本文を読み捨てて接続を解放します。
+  ///
+  /// 本文を読み切らないと `HttpClient` の接続が解放されず、キューの再送が
+  /// `maxConnectionsPerHost` に達した時点で空き待ちのまま停止します。
+  /// 応答を返した事実だけを使うため、読み切れない場合も例外にしません。
+  ///
+  /// [response] 読み捨てる上流応答。
+  /// [deadline] リクエスト全体の締め切り。
+  Future<void> _drainResponse(
+    HttpClientResponse response,
+    DateTime deadline,
+  ) async {
+    try {
+      await _consumeResponseBody(response, deadline);
+    } catch (_) {
+      // 読み切れなくても、受信済みのステータスによる判定は続行する
+    }
+  }
+
+  /// 上流からの応答本文を締め切り付きで受信します。
+  ///
+  /// [onData] を省略した場合は読み捨てます。締め切りを過ぎた場合や受信に
+  /// 失敗した場合は購読を打ち切り、接続を破棄します。
+  ///
+  /// [response] 受信する上流応答。
+  /// [deadline] リクエスト全体の締め切り。
+  /// [onData] 受信したチャンクの受け取り先。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 締め切りまでに受信し切れなかった場合。
+  Future<void> _consumeResponseBody(
+    HttpClientResponse response,
+    DateTime deadline, {
+    void Function(List<int> chunk)? onData,
+  }) async {
+    final subscription = response.listen(onData, cancelOnError: true);
+    try {
+      await subscription.asFuture<void>().timeout(_remainingUntil(deadline));
+    } catch (_) {
+      // 受信を打ち切る場合も接続を残さない
+      await subscription.cancel();
+      rethrow;
     }
   }
 

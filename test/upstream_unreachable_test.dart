@@ -23,7 +23,11 @@ class _RealHttpOverrides extends HttpOverrides {
 }
 
 /// HTTP 応答の検証に必要な要素だけを保持する型。
-typedef _HttpResult = ({int statusCode, String body});
+typedef _HttpResult = ({
+  int statusCode,
+  String body,
+  Map<String, String> headers,
+});
 
 /// ページ遷移としてリクエストするためのヘッダ。
 ///
@@ -112,7 +116,15 @@ Future<_HttpResult> _performRequest(
     }
     final response = await request.close();
     final responseBody = await response.transform(utf8.decoder).join();
-    return (statusCode: response.statusCode, body: responseBody);
+    final responseHeaders = <String, String>{};
+    response.headers.forEach((name, values) {
+      responseHeaders[name.toLowerCase()] = values.join(', ');
+    });
+    return (
+      statusCode: response.statusCode,
+      body: responseBody,
+      headers: responseHeaders,
+    );
   } finally {
     client.close(force: true);
   }
@@ -212,6 +224,33 @@ void main() {
 
         // 代替できるキャッシュが無い場合は 504 を返すこと
         expect(result.statusCode, equals(HttpStatus.gatewayTimeout));
+        // キャッシュを使えなかったことを判別できること
+        expect(result.headers['x-offline-source'], equals('none'));
+      });
+    });
+
+    /// ページ遷移以外には Web アプリが解釈できる応答を返すこと
+    test('returns a parsable response for non navigation requests', () async {
+      await withRealHttpClient(() async {
+        final closedPort = await _findClosedPort();
+        final port = await proxy.start(
+          config: ProxyConfig(origin: 'http://127.0.0.1:$closedPort'),
+        );
+
+        final result = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/api/items'),
+          headers: const {'Sec-Fetch-Mode': 'cors', 'Accept': '*/*'},
+        );
+
+        // 200 と HTML で「成功したが解釈できない応答」にならないこと
+        expect(result.statusCode, equals(HttpStatus.gatewayTimeout));
+        expect(result.body, equals('{"offline":true}'));
+        expect(
+          result.headers['content-type'],
+          equals('application/json; charset=utf-8'),
+        );
+        // オフライン時と同じ契約で由来を判別できること
+        expect(result.headers['x-offline-source'], equals('none'));
       });
     });
 

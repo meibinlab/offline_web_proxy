@@ -216,6 +216,53 @@ void main() {
       });
     });
 
+    /// 隔離の発生をイベントで検知できること
+    test('notifies a requestQuarantined event', () async {
+      await withRealHttpClient(() async {
+        final events = <ProxyEvent>[];
+        final subscription = proxy.events
+            .where((event) => event.type == ProxyEventType.requestQuarantined)
+            .listen(events.add);
+        addTearDown(subscription.cancel);
+
+        await queueRejectedRequest();
+        await _waitUntil(() async => events.isNotEmpty);
+
+        // 隔離を運用側へ通知できること
+        expect(events, hasLength(1));
+        expect(events.single.url, contains('/api/sales'));
+        expect(events.single.data['statusCode'], equals(HttpStatus.badRequest));
+        expect(events.single.data['reason'], equals('4xx_error'));
+        expect(events.single.data['quarantineId'], isNotNull);
+      });
+    });
+
+    /// 該当しない ID を指定した場合は再送しないこと
+    test('returns false when the quarantined id is unknown', () async {
+      await withRealHttpClient(() async {
+        await queueRejectedRequest();
+        final receivedBefore = upstream!.receivedBodies.length;
+
+        // 存在しない ID では再送を行わないこと
+        expect(await proxy.retryQuarantinedRequest('missing-id'), isFalse);
+        // 隔離されている要求は影響を受けないこと
+        expect(await proxy.getQuarantinedRequests(), hasLength(1));
+        expect(upstream!.receivedBodies.length, equals(receivedBefore));
+      });
+    });
+
+    /// 隔離されたリクエストを一括で破棄できること
+    test('clears every quarantined request at once', () async {
+      await withRealHttpClient(() async {
+        await queueRejectedRequest();
+        expect(await proxy.getQuarantinedRequests(), hasLength(1));
+
+        await proxy.clearQuarantinedRequests();
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+        expect((await proxy.getStats()).quarantinedCount, equals(0));
+      });
+    });
+
     /// 隔離されたリクエストを明示的に破棄できること
     test('discards a quarantined request on request', () async {
       await withRealHttpClient(() async {
