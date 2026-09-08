@@ -1,3 +1,19 @@
+## Unreleased
+
+### ドキュメント
+
+- **`Semaphore` の位置づけを明記**: ライブラリ本体に定義しているため参照できますが、内部実装を目的としたクラスであることを仕様書とコードコメントに記載
+
+### テスト
+
+- **隔離に失敗した場合のテストを追加**: 隔離領域へ退避できない状況で、キューから取り除かずバックオフを適用することを検証
+
+### CI
+
+- **GitHub Actions を更新**: Node.js 20 非推奨の警告を解消するため、`actions/checkout` を v5、`actions/github-script` を v8、`codecov/codecov-action` を v5、`peaceiris/actions-gh-pages` を v4 へ更新。`softprops/action-gh-release` は v2 へ更新（上流が Node.js 20 のため警告は残ります）
+
+---
+
 ## 0.11.0
 
 ### 機能追加

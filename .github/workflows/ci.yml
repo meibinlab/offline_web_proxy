@@ -21,7 +21,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -54,7 +54,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -70,9 +70,10 @@ jobs:
 
     - name: Upload coverage to Codecov
       if: matrix.flutter-version == env.FLUTTER_VERSION
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v5
       with:
-        file: coverage/lcov.info
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: coverage/lcov.info
         flags: unittests
         name: offline_web_proxy-coverage
         fail_ci_if_error: false
@@ -91,7 +92,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -118,7 +119,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -147,7 +148,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -163,7 +164,7 @@ jobs:
         dart doc --output doc/api
         
     - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
+      uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: doc/api
@@ -180,7 +181,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -217,7 +218,7 @@ jobs:
       run: dart pub publish --force
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.ref_name }}
         generate_release_notes: true
@@ -234,7 +235,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -252,7 +253,7 @@ jobs:
     - name: Comment on PR
       if: github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
-      uses: actions/github-script@v7
+      uses: actions/github-script@v8
       with:
         script: |
           await github.rest.issues.createComment({
@@ -276,7 +277,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -295,7 +296,7 @@ jobs:
 
     - name: Report nightly test results
       if: failure()
-      uses: actions/github-script@v7
+      uses: actions/github-script@v8
       with:
         script: |
           github.rest.issues.create({

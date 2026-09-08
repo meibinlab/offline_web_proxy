@@ -1940,6 +1940,26 @@ enum OnlineDecisionSource {
 }
 ```
 
+#### `Semaphore`
+
+同時実行数を制限する内部ユーティリティです。上流への同時接続数の制限とウォームアップの並列度制御に使っています。
+
+```dart
+class Semaphore {
+  final int maxCount; // 最大同時実行数
+
+  Semaphore(this.maxCount);
+
+  // リソースを取得する（空きがない場合は待機し、超過時は TimeoutException）
+  Future<void> acquire({Duration timeout = const Duration(seconds: 30)});
+
+  // リソースを解放する
+  void release();
+}
+```
+
+- **位置づけ**: ライブラリ本体に定義しているため参照できますが、proxy の内部実装を目的としたクラスです。将来の版で非公開へ移す可能性があるため、利用側のコードからの依存は推奨しません
+
 #### 例外クラス
 
 プロキシ操作で発生する可能性のある例外クラス。

@@ -1940,6 +1940,26 @@ enum OnlineDecisionSource {
 }
 ```
 
+#### `Semaphore`
+
+Internal utility that caps the number of concurrent operations. It is used to limit concurrent upstream connections and to bound warmup concurrency.
+
+```dart
+class Semaphore {
+  final int maxCount; // Maximum number of concurrent operations
+
+  Semaphore(this.maxCount);
+
+  // Acquires a slot, waiting when none is free and throwing TimeoutException past the timeout
+  Future<void> acquire({Duration timeout = const Duration(seconds: 30)});
+
+  // Releases a slot
+  void release();
+}
+```
+
+- **Status**: It is reachable because it is declared in the library file, but it exists for the proxy's internal implementation. It may move out of the public surface in a future version, so depending on it from application code is discouraged
+
 #### Exception Classes
 
 Exception classes that may occur during proxy operations.
