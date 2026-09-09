@@ -693,8 +693,11 @@ class OfflineWebProxy {
       return false;
     }
 
-    // 死んだ keep-alive 接続を再利用しないよう、確認専用のクライアントを使う
-    final client = HttpClient()..connectionTimeout = timeout;
+    // 死んだ keep-alive 接続を再利用しないよう、確認専用のクライアントを使う。
+    // 本文は読み捨てるだけだが、自動解凍は共有クライアントと同じ扱いにそろえる。
+    final client = HttpClient()
+      ..connectionTimeout = timeout
+      ..autoUncompress = false;
     try {
       final uri =
           Uri.parse('http://$_effectiveHost:$boundPort$_healthCheckPath');
@@ -3254,7 +3257,10 @@ class OfflineWebProxy {
     }
 
     final timeout = config.upstreamProbeTimeout;
-    final client = HttpClient()..connectionTimeout = timeout;
+    // 本文は読み捨てるだけだが、自動解凍は共有クライアントと同じ扱いにそろえる
+    final client = HttpClient()
+      ..connectionTimeout = timeout
+      ..autoUncompress = false;
     try {
       final uri = _buildUpstreamUriFromParts(path: config.upstreamProbePath);
       final request = await client
@@ -4364,7 +4370,6 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     // HttpClientを再利用する（大量リクエストでの生成コストを削減）
     final client = _getOrCreateHttpClient();
-    client.autoUncompress = false; // 自動解凍を無効化
 
     // 待ち時間が段階ごとに積み上がらないよう、1 リクエスト全体の締め切りを決める
     final deadline =
@@ -5078,7 +5083,8 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
 
     // キャッシュキーは URL のみで、リクエストヘッダ差を区別できない
-    if (_getHeaderValueIgnoreCase(responseHeaders, 'vary') != null) {
+    final vary = _getHeaderValueIgnoreCase(responseHeaders, 'vary');
+    if (vary != null && !_isAcceptEncodingOnlyVary(vary)) {
       return 'vary';
     }
 
@@ -5088,6 +5094,30 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
 
     return null;
+  }
+
+  /// `Vary` が `Accept-Encoding` だけを指しているかどうかを返します。
+  ///
+  /// proxy は転送、キュー再送、ウォームアップのいずれでも上流へ
+  /// `Accept-Encoding: identity` を固定で送るため、受け取る応答は常に
+  /// 非圧縮の 1 種類です。`Accept-Encoding` だけを理由に保存を見送っても
+  /// 守れるものが無く、圧縮を有効にしたサーバでは画面の HTML や JS が
+  /// まとめて保存対象から外れてしまいます。
+  ///
+  /// `*` や他のヘッダ名を含む場合は、URL だけでは応答を復元できないため
+  /// 従来どおり保存を見送ります。
+  ///
+  /// [vary] 応答の `Vary` ヘッダ値。
+  ///
+  /// Returns: `Accept-Encoding` だけを指している場合は `true`。
+  bool _isAcceptEncodingOnlyVary(String vary) {
+    final tokens = vary
+        .split(',')
+        .map((token) => token.trim().toLowerCase())
+        .where((token) => token.isNotEmpty);
+
+    // 値が空の Vary は差の生じる要求ヘッダを示さないため、保存を妨げない
+    return tokens.every((token) => token == 'accept-encoding');
   }
 
   /// HTTP 日時を解析します。
@@ -5427,7 +5457,6 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     final uri = _buildUpstreamUriFromParts(path: path);
     final client = _getOrCreateHttpClient();
-    client.autoUncompress = true;
 
     // 転送と同じく、待ち時間が段階ごとに積み上がらないよう締め切りで管理する
     final deadline = DateTime.now().add(
@@ -5439,8 +5468,8 @@ window.__offline_web_proxy_web_storage_bridge = {
     try {
       final request =
           await client.getUrl(uri).timeout(_remainingUntil(deadline));
-      // keep-aliveを有効にする（persistentConnectionデフォルトを使用）
-      request.headers.set('accept-encoding', 'gzip, deflate');
+      // 転送経路と同じ値を送り、保存する応答が経路によって割れないようにする
+      request.headers.set('accept-encoding', 'identity');
 
       // 転送経路と同じく Cookie Jar を送る。認証が必要な資源を
       // ウォームアップで取得できるようにするために必要。
@@ -5749,7 +5778,6 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
 
     final client = _getOrCreateHttpClient();
-    client.autoUncompress = true;
 
     // 転送と同じく、再送 1 回あたりの待ち時間を締め切りで抑える
     final deadline =
@@ -5928,12 +5956,17 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// 共有HttpClientをインスタンスで保持し、個々のリクエストで
   /// 再生成しないようにします。アプリケーション終了時に `stop()` で
   /// `close()` します。
+  ///
+  /// 自動解凍は生成時に無効へ固定します。共有インスタンスのため、
+  /// 利用箇所ごとに書き換えると同時実行時に互いの設定を上書きします。
+  /// また解凍だけを行うと `Content-Encoding` が残ったまま本文が
+  /// 非圧縮になり、そのまま保存すると復元できない組になります。
   HttpClient _getOrCreateHttpClient() {
     if (_httpClient != null) return _httpClient!;
 
     _httpClient = HttpClient()
       ..connectionTimeout = _config?.connectTimeout ?? _defaultConnectTimeout
-      ..autoUncompress = true
+      ..autoUncompress = false
       ..maxConnectionsPerHost = 50;
 
     return _httpClient!;

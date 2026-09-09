@@ -35,6 +35,11 @@ class _MockUpstream {
         request.response.headers.contentType =
             ContentType('text', 'html', charset: 'utf-8');
         responseHeaders.forEach(request.response.headers.set);
+        multiValueResponseHeaders.forEach((name, values) {
+          for (final value in values) {
+            request.response.headers.add(name, value);
+          }
+        });
         request.response.write(body);
         await request.response.close();
       } catch (_) {
@@ -52,6 +57,10 @@ class _MockUpstream {
   Map<String, String> responseHeaders = <String, String>{
     'Cache-Control': 'no-store',
   };
+
+  /// 応答に複数行で付与するヘッダ。`Vary` のように行が分かれる場合に使う。
+  Map<String, List<String>> multiValueResponseHeaders =
+      <String, List<String>>{};
 
   /// 応答本文。
   String body = '<html><body>screen</body></html>';
@@ -284,6 +293,212 @@ void main() {
 
         expect((await proxy.getCacheStats()).totalEntries, equals(0));
         expect(skippedReasons, equals(['vary']));
+      });
+    });
+
+    /// Vary が Accept-Encoding だけの応答は指定に一致すれば保存すること
+    test('stores a listed response whose vary is accept-encoding only',
+        () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.responseHeaders = <String, String>{
+          'Cache-Control': 'no-store',
+          'Vary': 'Accept-Encoding',
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            forceCachePaths: const ['/app/**'],
+          ),
+        );
+
+        final skippedReasons = <String>[];
+        proxy.events
+            .where((event) => event.type == ProxyEventType.cacheSkipped)
+            .listen((event) => skippedReasons.add('${event.data['reason']}'));
+
+        await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
+
+        // proxy が accept-encoding を固定するため応答は 1 種類に定まる
+        expect((await proxy.getCacheStats()).totalEntries, equals(1));
+        expect(skippedReasons, isEmpty);
+
+        await _emitConnectivity(['none']);
+        final offlineResponse = await _performGet(
+          Uri.parse('http://127.0.0.1:$port/app/index.html'),
+        );
+
+        expect(offlineResponse.statusCode, equals(HttpStatus.ok));
+        expect(offlineResponse.offlineSource, equals('cache'));
+      });
+    });
+
+    /// Vary の大文字小文字と余分な空白を吸収して判定すること
+    test('normalises the vary value before judging it', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.responseHeaders = <String, String>{
+          'Cache-Control': 'no-store',
+          'Vary': '  ACCEPT-ENCODING ,  ',
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            forceCachePaths: const ['/app/**'],
+          ),
+        );
+
+        final skippedReasons = <String>[];
+        proxy.events
+            .where((event) => event.type == ProxyEventType.cacheSkipped)
+            .listen((event) => skippedReasons.add('${event.data['reason']}'));
+
+        await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
+
+        expect((await proxy.getCacheStats()).totalEntries, equals(1));
+        expect(skippedReasons, isEmpty);
+      });
+    });
+
+    /// Accept-Encoding 以外も併記する Vary は従来どおり除外すること
+    test('skips a listed response whose vary lists another header too',
+        () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.responseHeaders = <String, String>{
+          'Cache-Control': 'no-store',
+          'Vary': 'Accept-Encoding, Cookie',
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            forceCachePaths: const ['/app/**'],
+          ),
+        );
+
+        final skippedReasons = <String>[];
+        proxy.events
+            .where((event) => event.type == ProxyEventType.cacheSkipped)
+            .listen((event) => skippedReasons.add('${event.data['reason']}'));
+
+        await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
+
+        // Cookie は利用者ごとに応答が変わるため保存しない
+        expect((await proxy.getCacheStats()).totalEntries, equals(0));
+        expect(skippedReasons, equals(['vary']));
+      });
+    });
+
+    /// Vary: * は従来どおり除外すること
+    test('skips a listed response that carries vary asterisk', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.responseHeaders = <String, String>{
+          'Cache-Control': 'no-store',
+          'Vary': '*',
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            forceCachePaths: const ['/app/**'],
+          ),
+        );
+
+        final skippedReasons = <String>[];
+        proxy.events
+            .where((event) => event.type == ProxyEventType.cacheSkipped)
+            .listen((event) => skippedReasons.add('${event.data['reason']}'));
+
+        await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
+
+        expect((await proxy.getCacheStats()).totalEntries, equals(0));
+        expect(skippedReasons, equals(['vary']));
+      });
+    });
+
+    /// 複数行に分かれた Vary も 1 つの値として判定すること
+    test('judges a vary split across several header lines as one value',
+        () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.multiValueResponseHeaders = <String, List<String>>{
+          'Vary': <String>['Accept-Encoding', 'Cookie'],
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            forceCachePaths: const ['/app/**'],
+          ),
+        );
+
+        final skippedReasons = <String>[];
+        proxy.events
+            .where((event) => event.type == ProxyEventType.cacheSkipped)
+            .listen((event) => skippedReasons.add('${event.data['reason']}'));
+
+        await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
+
+        // 行が分かれていても Cookie を見落とさないこと
+        expect((await proxy.getCacheStats()).totalEntries, equals(0));
+        expect(skippedReasons, equals(['vary']));
+      });
+    });
+
+    /// ヘッダ名を 1 つも挙げない Vary は保存を妨げないこと
+    test('stores a listed response whose vary names no header', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.responseHeaders = <String, String>{
+          'Cache-Control': 'no-store',
+          'Vary': ' , ',
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            forceCachePaths: const ['/app/**'],
+          ),
+        );
+
+        final skippedReasons = <String>[];
+        proxy.events
+            .where((event) => event.type == ProxyEventType.cacheSkipped)
+            .listen((event) => skippedReasons.add('${event.data['reason']}'));
+
+        await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
+
+        // 差の生じる要求ヘッダを 1 つも示していないため保存を妨げないこと
+        expect((await proxy.getCacheStats()).totalEntries, equals(1));
+        expect(skippedReasons, isEmpty);
+      });
+    });
+
+    /// Set-Cookie と Vary: Accept-Encoding が併存する場合は Set-Cookie を優先すること
+    test('reports set-cookie when it accompanies an accept-encoding vary',
+        () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.responseHeaders = <String, String>{
+          'Cache-Control': 'no-store',
+          'Set-Cookie': 'session=abc; Path=/',
+          'Vary': 'Accept-Encoding',
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            forceCachePaths: const ['/app/**'],
+          ),
+        );
+
+        final skippedReasons = <String>[];
+        proxy.events
+            .where((event) => event.type == ProxyEventType.cacheSkipped)
+            .listen((event) => skippedReasons.add('${event.data['reason']}'));
+
+        await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
+
+        // Vary を緩和しても Set-Cookie による除外は変わらないこと
+        expect((await proxy.getCacheStats()).totalEntries, equals(0));
+        expect(skippedReasons, equals(['set-cookie']));
       });
     });
 
