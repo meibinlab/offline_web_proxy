@@ -104,6 +104,7 @@
     &#47;&#47; 設定を読み込み
     _config = config ?? await _loadDefaultConfig();
     _validateHealthCheckPath();
+    _compileConfiguredPatterns();
     _resetRecoveryState();
 
     &#47;&#47; ストレージを初期化

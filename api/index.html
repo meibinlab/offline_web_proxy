@@ -61,6 +61,7 @@
 <h2 id="highlights">Highlights</h2>
 <ul>
 <li>Local proxy server for Flutter WebView</li>
+<li>Serving of static resources bundled under <code>assets/static/</code>, so CDN-hosted files can be shipped inside the app</li>
 <li>Fallback cache limited to offline and unreachable-upstream recovery</li>
 <li>Offline queue for POST, PUT, and DELETE requests</li>
 <li>AES-256 encrypted cookie persistence with restore support</li>
@@ -197,6 +198,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
     'text/html': 3600,
     'text/css': 86400,
     'application/javascript': 86400,
+    'text/javascript': 86400,
     'image/*': 604800,
     'default': 86400,
   },
@@ -206,6 +208,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
     'image/*': 2592000,
     'default': 259200,
   },
+  forceCachePaths: ['/app/**'],
   connectTimeout: Duration(seconds: 5),
   requestTimeout: Duration(seconds: 20),
   upstreamFailureThreshold: 3,
@@ -241,6 +244,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <p>Notes:</p>
 <ul>
 <li><code>origin</code> is required and must be an absolute HTTP or HTTPS URL.</li>
+<li>Settings that name paths (such as <code>forceCachePaths</code>) share one glob notation: <code>*</code> matches within a single path segment, <code>**</code> matches across segments, and a pattern without either is matched exactly. Query strings are not part of the comparison.</li>
 <li><code>port: 0</code> lets the OS assign a free local port.</li>
 <li><code>preferredPort</code> tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.</li>
 <li><code>startupPaths</code> is used by <code>warmupCache()</code> for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.</li>
@@ -252,6 +256,15 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>queuedResponse</code> and <code>offlineMissResponse</code> define the responses the proxy generates itself. Both default to JSON so that <code>response.json()</code> succeeds in the web app.</li>
 <li><code>dropPolicy</code> decides what happens to an update request the upstream rejected with 4xx. The default <code>quarantine</code> keeps it, body included, so <code>getQuarantinedRequests()</code> can surface it for a resend-or-discard decision. <code>drop</code> discards it and keeps only a history entry, as before.</li>
 <li><code>enableIdempotencyKey</code> attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. <strong>Deduplication itself must be implemented on the upstream server.</strong></li>
+<li><code>forceCachePaths</code> lists the paths stored even when the response says <code>Cache-Control: no-store</code>. On a server that sends <code>no-store</code> everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes <code>no-store</code> handling proxy-wide.
+<ul>
+<li>Even on a match, a response carrying <code>Set-Cookie</code> or <code>Vary</code>, or a request carrying <code>Authorization</code>, is not stored. A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason, so a path that never becomes available offline can be diagnosed.</li>
+<li>For a matching path the upstream <code>max-age</code> and <code>Expires</code> are ignored and <code>cacheTtl</code> decides the expiry, because <code>no-store</code> is usually paired with <code>max-age=0</code>, which would make the entry stale the moment it is stored.</li>
+<li><strong>The response cache is not encrypted.</strong> The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.</li>
+</ul>
+</li>
+<li><code>cacheTtl</code> and <code>cacheStale</code> <strong>replace</strong> the default maps rather than merging with them. Always keep a <code>default</code> entry so that unlisted content types still resolve.</li>
+<li><code>text/html</code> defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. <strong>Long offline operation requires tuning both <code>cacheTtl</code> and <code>cacheStale</code>.</strong> <code>cacheStale</code> has no JavaScript entry, so scripts fall back to <code>default</code> (3 days).</li>
 </ul>
 <h3 id="handling-offline-responses-in-the-web-app">Handling offline responses in the web app</h3>
 <p>An update stored while offline has not reached the upstream, so the web app must be able to tell it apart from a success. The proxy answers with <code>202 Accepted</code> and <code>{"queued":true}</code> by default, plus headers that make the decision explicit.</p>
@@ -314,8 +327,16 @@ final newWindowRecommendation = proxy.recommendNewWindowNavigation(
 </ul>
 <p>Relative URLs and scheme-relative URLs depend on <code>sourceUrl</code>. If <code>sourceUrl</code> is missing, some targets remain unresolved by design.
 At startup, the proxy scans <code>AssetManifest.json</code> for files under <code>assets/static/</code> and exposes only those entries as proxy-local static resources. For example, <code>assets/static/app.css</code> is matched by the proxy URL <code>/app.css</code>, while an unlisted <code>/test.css</code> still resolves upstream.
-If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.
-For upstream <code>301</code>, <code>302</code>, <code>303</code>, <code>307</code>, and <code>308</code> responses returned to WebView, the proxy resolves <code>Location</code> explicitly instead of relying on <code>HttpClient</code> auto-follow. Same-origin redirects are rewritten to proxy URLs, relative <code>Location</code> values are resolved against the upstream request URL, and external-launch redirects are surfaced through <code>ProxyEventType.redirectHandled</code>.</p>
+If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.</p>
+<p>A URL that matches the index is answered with the bundled asset itself, so a file previously loaded from a CDN can ship inside the app and be served from a same-origin URL such as <code>/js/haori.iife.js</code>.</p>
+<pre class="language-dart"><code>assets/static/js/haori.iife.js  →  http://127.0.0.1:&lt;port&gt;/js/haori.iife.js
+</code></pre>
+<ul>
+<li>Only <code>GET</code> and <code>HEAD</code> are served this way. An update request on the same path is forwarded upstream instead</li>
+<li>An <code>ETag</code> derived from the content and <code>Cache-Control: no-cache</code> are attached, and a matching <code>If-None-Match</code> is answered with <code>304</code></li>
+<li>If the asset is indexed but cannot be read, the proxy does not answer <code>404</code>; it forwards the request upstream
+For upstream <code>301</code>, <code>302</code>, <code>303</code>, <code>307</code>, and <code>308</code> responses returned to WebView, the proxy resolves <code>Location</code> explicitly instead of relying on <code>HttpClient</code> auto-follow. Same-origin redirects are rewritten to proxy URLs, relative <code>Location</code> values are resolved against the upstream request URL, and external-launch redirects are surfaced through <code>ProxyEventType.redirectHandled</code>.</li>
+</ul>
 <h2 id="connection-recovery-apis">Connection Recovery APIs</h2>
 <p>After device suspension or a process resume, the socket can stop responding even though the internal state still reports the server as running. In that state the WebView shows its own native error page (a message about not being able to connect to <code>127.0.0.1:...</code>), so the proxy verifies responsiveness and rebinds when the app resumes.</p>
 <pre class="language-dart"><code class="language-dart">// Hook into the app lifecycle
@@ -485,7 +506,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 <ul>
 <li>One <code>OfflineWebProxy</code> instance supports one configured upstream origin.</li>
 <li><code>ProxyConfig</code> is the supported configuration path. External YAML configuration loading is not implemented.</li>
-<li>Static-resource serving from <code>assets/static/</code> is not implemented yet. Only files discovered from <code>AssetManifest.json</code> under <code>assets/static/</code> are classified as static resources, and the current server response is a 404 placeholder.</li>
+<li>Static resources under <code>assets/static/</code> are served for <code>GET</code> and <code>HEAD</code> only. An update request on the same path is forwarded upstream instead. Range requests are not supported.</li>
 <li>If <code>AssetManifest.json</code> or its runtime equivalent cannot be loaded, the proxy continues with no indexed static resources and falls back to normal upstream resolution.</li>
 </ul>
 <h2 id="example-and-reference">Example and Reference</h2>

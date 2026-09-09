@@ -122,6 +122,8 @@
     _httpClient?.close(force: true);
     _httpClient = null;
     _staticResourceAssetMap.clear();
+    _staticResourceEntityTags.clear();
+    _forceCachePatterns = const [];
   } catch (e) {
     failure = e;
   } finally {

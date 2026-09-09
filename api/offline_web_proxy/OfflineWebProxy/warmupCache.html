@@ -159,6 +159,13 @@
               response.statusCode,
               response.headers,
               response.bodyBytes,
+              &#47;&#47; ウォームアップも同じ判定で保存し、転送経路と挙動を揃える
+              allowNoStore: _resolveForceCacheAllowance(
+                path: path,
+                requestHeaders: const {},
+                responseHeaders: response.headers,
+                eventUrl: upstreamUri.toString(),
+              ),
             );
           }
           final duration = DateTime.now().difference(entryStartTime);
