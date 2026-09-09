@@ -42,12 +42,19 @@ class WarmupEntry {
   /// この処理にかかった時間
   final Duration duration;
 
+  /// このパスを参照していた HTML のパス
+  ///
+  /// `warmupCache(followReferences: true)` で連鎖して取得した場合に、
+  /// 参照元のパスが入ります。直接指定したパスの場合は `null` です。
+  final String? referencedFrom;
+
   const WarmupEntry({
     required this.path,
     required this.success,
     this.statusCode,
     this.errorMessage,
     required this.duration,
+    this.referencedFrom,
   });
 
   @override

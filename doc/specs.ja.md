@@ -360,6 +360,51 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - **`ProxyStats.quarantinedCount`**: 隔離されているリクエスト件数。0 でなければ要対応です
 - **`ProxyStats.unacknowledgedDroppedCount`**: 未確認のドロップ履歴の件数。アプリ起動時に確認すると、監視していない間に破棄されたリクエストへ気付けます
 
+### 状態通知エンドポイント
+
+未送信件数やオンライン状態は Dart の API でしか取得できないため、表示も判断も画面側で行いたい場合はアプリへ橋渡しの実装が必要でした。`ProxyConfig.statusPath`（既定 `/__offline_web_proxy/status`）は、同じ情報を JSON で返します。
+
+- **メソッド**: `GET` のみ。上流へは転送せず、統計にもイベントにも計上しません
+- **無効化**: 空文字列を指定すると登録しません
+- **検証**: `healthCheckPath` と同じ規則で検証し、`healthCheckPath` と同じ値は起動時に拒否します
+- **応答ヘッダ**: `Cache-Control: no-store` を付与します
+
+```json
+{
+  "isOnline": true,
+  "onlineDecisionSource": "connectivity",
+  "isUpstreamReachable": true,
+  "upstreamCircuitState": "closed",
+  "queueLength": 0,
+  "quarantinedCount": 0,
+  "unacknowledgedDroppedCount": 0,
+  "recentResendResults": []
+}
+```
+
+これにより「未送信があるときは精算させない」「未送信件数を表示する」「オフラインならレジ認証を出さない」が Web 側だけで完結します。
+
+### 管理エンドポイント
+
+`ProxyConfig.enableAdminApi` を `true` にすると、隔離キューの操作を HTTP で公開します。原因を解消して再送する操作は店舗の人が行うため、操作面がレジ画面にある場合に使います。既定は無効です。
+
+| メソッド | パス | 用途 |
+| --- | --- | --- |
+| `GET` | `/__offline_web_proxy/admin/quarantine` | 隔離の一覧（本文は返しません） |
+| `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | キューへ戻して再送 |
+| `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | 破棄 |
+
+### 内部エンドポイントの origin 制御
+
+状態通知と管理の各エンドポイントは、proxy 自身の origin からの要求だけを受け付けます。
+
+- `Origin` ヘッダが無い場合は許可します。同一 origin の `fetch` は `Origin` を送らないためです
+- `Origin` が proxy 自身（`http://<host>:<port>`）と一致する場合は許可します。`127.0.0.1` と `localhost` は同じ proxy を指すため、どちらの表記でも許可します
+- それ以外は `403` を返します
+- CORS ミドルウェアの対象外とし、`Access-Control-Allow-Origin: *` を付与しません
+
+**注意**: この制御は「同じ origin で動くスクリプトすべてに操作を許す」ことでもあります。CDN など第三者のスクリプトを読み込んだままで管理エンドポイントを有効にすると、そのスクリプトから隔離の破棄まで到達し得ます。同梱アセットの配信（【3】）へ切り替えてから有効にしてください。
+
 ## 【6】Idempotency（べき等性）
 
 ### 重複リクエスト防止
@@ -452,6 +497,19 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 **有効期限の扱い**: `no-store` を返すサーバは `no-store, max-age=0, must-revalidate` のように、保存させない意図の指示を併記することが一般的です。これをそのまま採用すると保存直後に stale となり、オフラインで使える期間が stale 期間だけになります。保存可否を設定側で上書きした以上、有効期限も設定側に従うのが一貫するため、一致したパスでは `s-maxage`、`max-age`、`Expires` を使わず `cacheTtl` の値を適用します。
 
 **保存領域の注意**: `no-store` は本来「保存しないこと」を求めるヘッダです。応答キャッシュは暗号化していないため、指定したパスの応答本文は端末内に平文で残ります。画面が含む情報と端末紛失時の影響を踏まえて指定してください。
+
+#### ウォームアップ
+
+- **Cookie の付与**: 転送経路と同じく Cookie Jar の内容を送ります。認証が必要な資源をウォームアップで取得するために必要です
+- **参照資源の連鎖取得**: `warmupCache(followReferences: true)` を指定すると、取得した HTML が参照する同一 origin の資源も続けて取得します
+  - 対象は `<script src>`、`<link href>`、`<img src>` です
+  - `<link>` は資源を指す `rel`（`stylesheet`、`preload`、`prefetch`、`icon`、`apple-touch-icon`、`manifest` 等）だけを対象とします。`canonical` や `alternate` は別ページを指すため取得しません
+  - 辿るのは 1 段だけです。取得した資源が更に参照する URL は追いません
+  - 別 origin、`data:`、`javascript:`、`mailto:`、`blob:` は対象外です
+  - 同じ資源は一度だけ取得します
+  - 抽出は正規表現による最善努力です。**実行時に JavaScript が組み立てる URL には届きません**
+  - 結果は `WarmupEntry.referencedFrom` で参照元を辿れます
+- **既定**: `followReferences` は `false` で、従来どおり指定したパスだけを取得します
 
 #### キャッシュ有効期限の計算優先順位
 
@@ -1299,7 +1357,7 @@ final stats = await proxy.getCacheStats();
 print('Cache size: ${stats.totalSize} bytes');
 ```
 
-#### `Future<WarmupResult> warmupCache({List<String>? paths, int? timeout, int? maxConcurrency, WarmupProgressCallback? onProgress, WarmupErrorCallback? onError})`
+#### `Future<WarmupResult> warmupCache({List<String>? paths, int? timeout, int? maxConcurrency, bool followReferences = false, WarmupProgressCallback? onProgress, WarmupErrorCallback? onError})`
 
 指定されたパスリストのフォールバック用キャッシュを事前取得します。
 
@@ -1307,6 +1365,7 @@ print('Cache size: ${stats.totalSize} bytes');
   - `paths`: 事前取得対象のパスリスト（省略時は設定済みの startup paths を使用）
   - `timeout`: 各パスのタイムアウト秒数（省略時は設定値を使用）
   - `maxConcurrency`: 同時実行数（省略時は設定値を使用）
+  - `followReferences`: 取得した HTML が参照する同一 origin の資源も続けて取得する場合は `true`（既定 `false`）
   - `onProgress`: 進捗コールバック関数
   - `onError`: エラーコールバック関数
 - **戻り値**: 事前取得結果の詳細情報
@@ -1314,6 +1373,7 @@ print('Cache size: ${stats.totalSize} bytes');
   - `ArgumentError`: 無効なパスが含まれている場合
   - `WarmupException`: 事前取得処理全体が失敗した場合
 - **上流到達性との連動**: サーキットブレーカが遮断中（またはリンク層が切断中）の場合は上流へ要求せず、各パスを失敗として返します。取得の成否は上流到達性の判定に反映します
+- **Cookie**: 転送経路と同じく Cookie Jar の内容を送ります。認証が必要な資源も取得できます
 
 ```dart
 // 設定済みのパスリストで事前取得
@@ -1863,6 +1923,7 @@ class WarmupEntry {
   final int? statusCode; // HTTPステータスコード（成功時のみ）
   final String? errorMessage; // エラーメッセージ（失敗時のみ）
   final Duration duration; // この処理にかかった時間
+  final String? referencedFrom; // 参照元の HTML のパス（直接指定は null）
 }
 ```
 
@@ -1902,6 +1963,7 @@ class ProxyConfig {
   final List<String> startupPaths; // 起動時キャッシュ更新パス
   final int preferredPort; // 優先して利用するポート（0=指定なし）
   final String healthCheckPath; // ヘルスチェックパス（デフォルト: "/__offline_web_proxy/health"）
+  final String statusPath; // 状態通知パス（デフォルト: "/__offline_web_proxy/status"、空=無効）
   final Duration healthCheckInterval; // 定期ヘルスチェック間隔（Duration.zero=無効）
   final Duration serverIdleTimeout; // 内部サーバのアイドルタイムアウト（デフォルト: 120 秒）
   final int maxRestartAttemptsPerMinute; // 1 分あたりの再バインド上限回数（デフォルト: 5）

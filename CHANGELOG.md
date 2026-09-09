@@ -9,11 +9,16 @@
 - **受け付けた時刻を上流へ通知**: `ProxyConfig.enableAcceptedAtHeader`（既定 `true`）と `acceptedAtHeaderName`（既定 `X-Offline-Accepted-At`）を追加。proxy が最初にリクエストを受け付けた時刻を、初回転送と以降の再送で同じ値（UTC の ISO 8601）として送ります。オフラインで積んだ更新系が復帰時刻で記録され、日別集計がずれる問題を上流側の 1 箇所で解消できます。隔離からの再送でも値は変わりません
 - **再送結果を通知**: `ProxyEventType.queueResendAttempted` と `QueueResendResult` を追加。再送 1 件ごとの URL、ステータス、成否、べき等性キー、再試行の有無を通知します。本文は含みません。`recentResendResults` で直近 20 件を後から参照できます
 - **モデルへ受付時刻を追加**: `QueuedRequest.acceptedAt` と `QuarantinedRequest.acceptedAt` を追加
+- **状態通知エンドポイントを追加**: `ProxyConfig.statusPath`（既定 `/__offline_web_proxy/status`、空文字列で無効）を追加。オンライン状態、上流到達性、未送信件数、隔離件数、未確認のドロップ件数、直近の再送結果を JSON で返します。`healthCheckPath` と同じく上流へ転送せず統計にも計上しません。「未送信があるときは精算させない」といった判断を Web 側だけで完結できます
+- **管理エンドポイントを実装**: `ProxyConfig.enableAdminApi`（既定 `false`）に実体を追加し、隔離キューの一覧・再送・破棄を `/__offline_web_proxy/admin/quarantine` 配下で公開します。フィールドだけが存在して実装が無い状態を解消しました
+- **内部エンドポイントの origin 制御**: 状態通知と管理の各エンドポイントは proxy 自身の origin からの要求だけを受け付け、CORS ミドルウェアの対象外としました。別 origin の `Origin` を伴う要求には `403` を返します
+- **ウォームアップの参照資源を連鎖取得**: `warmupCache(followReferences: true)` を追加。取得した HTML が参照する同一 origin の `<script src>`、`<link href>`、`<img src>` も続けて取得します。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とし、`canonical` や `alternate` は取得しません。1 段のみ辿り、既定は従来どおり無効です。`WarmupEntry.referencedFrom` で参照元を辿れます
 
 ### 修正
 
 - **静的リソースのパスが上流へ届かなくなる問題を修正**: 一覧に一致した URL へ 404 プレースホルダを返していたため、`assets/static/` にファイルを置いた時点で同名パスの上流応答が受け取れなくなっていました。実配信へ切り替えたうえで、アセットを読み込めない場合は 404 とせず上流へ転送します
 - **解釈できない `Expires` で成功応答が失われる問題を修正**: `Expires: 0` のように日時として解析できない値を受け取ると、キャッシュ有効期限の算出で例外が発生し、上流が返した 200 が転送失敗として扱われていました。504 を返すうえに上流到達性の失敗としても計上され、繰り返すと転送が遮断されます。解析できない値は無視し、既定 TTL を適用します
+- **ウォームアップが Cookie を送っていなかった問題を修正**: 転送経路とキュー再送経路は Cookie Jar を送るのに、`warmupCache()` だけが送っていませんでした。認証が必要な資源はウォームアップでは常に取得できず、`200` 以外は保存しないため何も貯まらない状態でした
 - **キャッシュ保存の失敗で成功応答が失われる問題を修正**: 保存領域へ書き込めない場合（容量不足、停止処理との競合など）に例外が転送処理へ伝播し、上流が 200 を返していても 500 を返していました。保存の失敗は `ProxyEventType.errorOccurred` で通知し、応答はそのまま返します
 
 ### 改善
@@ -38,6 +43,9 @@
 - **キュー除外のテストを追加**: `test/queue_exclusion_test.dart` を追加し、オフライン・上流 5xx・応答なしの 3 経路、メソッド指定、パターン指定、対象外パスの従来動作を検証
 - **受付時刻のテストを追加**: `test/accepted_at_test.dart` を追加し、初回転送への付与、read 系での不付与、応答を受け取れなかった転送と再送での一致、隔離再送での保持、無効化、ヘッダ名変更、旧データの補完を検証
 - **再送結果のテストを追加**: `test/resend_result_test.dart` を追加し、成功・4xx 隔離・5xx 再試行の通知内容、保持件数の上限、`recentResendResults` を検証
+- **状態通知エンドポイントのテストを追加**: `test/status_endpoint_test.dart` を追加し、応答内容、上流へ転送しないこと、統計に計上しないこと、origin 制御、CORS ヘッダを付けないこと、無効化とパス変更、不正な指定の拒否を検証
+- **管理エンドポイントのテストを追加**: `test/admin_api_test.dart` を追加し、既定で無効なこと、一覧・再送・破棄、該当なしの 404、origin 制御を検証
+- **ウォームアップのテストを追加**: `test/warmup_reference_test.dart` を追加し、Cookie の付与、参照資源の連鎖取得、別 origin の除外、重複取得の抑止、HTML 以外を走査しないことを検証
 
 ---
 
