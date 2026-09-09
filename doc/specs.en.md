@@ -260,6 +260,7 @@ Network errors and 5xx errors are treated as temporary failures: they are kept i
 - **Quarantine notification**: Emits `ProxyEventType.requestQuarantined`
 - **Drop notification**: Emits `ProxyEventType.requestDropped`
 - **No double bookkeeping**: A quarantined request is not also written to the dropped history
+- **Recording order**: Both the quarantine store and the dropped history are written before the request is removed from the queue. If the write fails the request stays queued, so it is never removed without a record
 
 ### History Management
 
