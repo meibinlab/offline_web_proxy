@@ -1666,7 +1666,8 @@ void main() {
     });
 
     /// 同名パスへの更新系は静的扱いにせず上流へ転送すること
-    test('should forward non read request on static path to upstream', () async {
+    test('should forward non read request on static path to upstream',
+        () async {
       await HttpOverrides.runZoned(() async {
         final requestedPaths = <String>[];
         upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);

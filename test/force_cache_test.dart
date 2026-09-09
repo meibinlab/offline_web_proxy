@@ -202,7 +202,8 @@ void main() {
         );
 
         expect(offlineResponse.statusCode, equals(HttpStatus.ok));
-        expect(offlineResponse.body, equals('<html><body>screen</body></html>'));
+        expect(
+            offlineResponse.body, equals('<html><body>screen</body></html>'));
         expect(offlineResponse.offlineSource, equals('cache'));
       });
     });

@@ -2916,7 +2916,8 @@ class OfflineWebProxy {
   /// [assetBytes] アセットのバイト列。
   ///
   /// Returns: 引用符で囲んだ `ETag` の値。
-  String _resolveStaticResourceEntityTag(String assetKey, Uint8List assetBytes) {
+  String _resolveStaticResourceEntityTag(
+      String assetKey, Uint8List assetBytes) {
     return _staticResourceEntityTags.putIfAbsent(assetKey, () {
       final digest = sha256.convert(assetBytes).toString();
       return '"${digest.substring(0, 16)}"';
