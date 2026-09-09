@@ -5,6 +5,10 @@
 - **`assets/static/` の静的リソースを配信**: 起動時に一覧化したアセットを実際に返すように実装。`GET` と `HEAD` に対応し、内容から算出した `ETag` と `Cache-Control: no-cache` を付与します。CDN 依存の資材をアプリへ同梱して配信できます
 - **`no-store` を無視して保存するパスを指定可能に**: `ProxyConfig.forceCachePaths` を追加。全応答へ `no-store` を付与するサーバでもオフライン応答を用意できます。既定は空で、全体を一括で無効化する設定は用意していません。一致した場合でも、応答に `Set-Cookie` か `Vary` がある場合、リクエストに `Authorization` がある場合は保存しません。また、一致したパスでは上流の `max-age` や `Expires` を使わず `cacheTtl` を有効期限に使います（`no-store` と `max-age=0` の併記で保存直後に stale になるのを避けるため）。**応答キャッシュは暗号化していないため、指定したパスの本文は端末内に平文で残ります**
 - **イベントを追加**: `ProxyEventType.cacheSkipped` を追加。`forceCachePaths` に一致しても安全のため保存しなかった場合に、理由（`set-cookie` / `vary` / `authorization`）を伝えます
+- **キューへ入れない更新系を指定可能に**: `ProxyConfig.queueExcludePaths` と `QueueExcludeRule` を追加。レジ認証やログアウトのように後から送っても意味が無い更新系を、キューへ保存せず規則ごとの応答で返します。`202 Accepted` を成功と誤認する問題を避けられます。オフライン時、上流へ到達できなかった場合、上流が 5xx を返した場合のすべてに適用します（5xx は上流の応答をそのまま返し、保存だけを行いません）。応答には `X-Offline-Queued: 0` と `X-Offline-Excluded: 1` を付与します。既定は空です
+- **受け付けた時刻を上流へ通知**: `ProxyConfig.enableAcceptedAtHeader`（既定 `true`）と `acceptedAtHeaderName`（既定 `X-Offline-Accepted-At`）を追加。proxy が最初にリクエストを受け付けた時刻を、初回転送と以降の再送で同じ値（UTC の ISO 8601）として送ります。オフラインで積んだ更新系が復帰時刻で記録され、日別集計がずれる問題を上流側の 1 箇所で解消できます。隔離からの再送でも値は変わりません
+- **再送結果を通知**: `ProxyEventType.queueResendAttempted` と `QueueResendResult` を追加。再送 1 件ごとの URL、ステータス、成否、べき等性キー、再試行の有無を通知します。本文は含みません。`recentResendResults` で直近 20 件を後から参照できます
+- **モデルへ受付時刻を追加**: `QueuedRequest.acceptedAt` と `QuarantinedRequest.acceptedAt` を追加
 
 ### 修正
 
@@ -16,12 +20,14 @@
 
 - **既定 TTL に `text/javascript` を追加**: JavaScript を `text/javascript` で返すサーバでも、`application/javascript` と同じ TTL が適用されます
 - **静的リソース判定の対象メソッドを限定**: `GET` と `HEAD` だけを静的扱いとし、同名パスへの更新系は上流へ転送するように変更
+- **`queueDrained` の内容を拡充**: `statusCode` と `idempotencyKey` を追加（キーの追加のみで後方互換）
 - **静的リソースの `ETag` 算出を軽量化**: 同梱アセットはプロセス実行中に変化しないため、asset key ごとに算出結果を保持し、要求のたびに全バイトをハッシュし直さないように改善
 
 ### ドキュメント
 
 - **パスパターン記法を明記**: 設定でパスを指定する項目が共通で使う glob 記法（`*` / `**` / 完全一致）を仕様書と README に記載
 - **キャッシュ設定の注意点を追記**: `cacheTtl` と `cacheStale` は指定すると既定マップを丸ごと置き換えること、`text/html` は約 25 時間でフォールバック対象から外れるため長期のオフライン運用には設定が必要であることを README に明記
+- **API リファレンスを更新**: 仕様書【20】の `ProxyConfig`、`ProxyEventType`、`QueuedRequest`、`QuarantinedRequest` へ追加項目を反映し、`QueueExcludeRule`、`QueueResendResult`、`recentResendResults` を追記
 
 ### テスト
 
@@ -29,6 +35,9 @@
 - **`forceCachePaths` のテストを追加**: `test/force_cache_test.dart` を追加し、保存とオフライン配信、`Set-Cookie` / `Vary` / `Authorization` による除外と通知、対象外パスでの無通知、`no-store, max-age=0` を伴う応答が設定 TTL で保存されること、再起動で前回のパターンが残らないことを検証
 - **静的リソース配信のテストを追加**: 実配信、`ETag` による 304、`HEAD`、更新系の上流転送、アセットを読めない場合の上流フォールバックを検証
 - **キャッシュ有効期限と保存失敗のテストを追加**: 解釈できない `Expires` の無視、解析できる `Expires` の反映、保存に失敗した場合でも上流応答を返すことを検証
+- **キュー除外のテストを追加**: `test/queue_exclusion_test.dart` を追加し、オフライン・上流 5xx・応答なしの 3 経路、メソッド指定、パターン指定、対象外パスの従来動作を検証
+- **受付時刻のテストを追加**: `test/accepted_at_test.dart` を追加し、初回転送への付与、read 系での不付与、応答を受け取れなかった転送と再送での一致、隔離再送での保持、無効化、ヘッダ名変更、旧データの補完を検証
+- **再送結果のテストを追加**: `test/resend_result_test.dart` を追加し、成功・4xx 隔離・5xx 再試行の通知内容、保持件数の上限、`recentResendResults` を検証
 
 ---
 

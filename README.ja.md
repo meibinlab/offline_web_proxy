@@ -191,6 +191,18 @@ const config = ProxyConfig(
   enableIdempotencyKey: true,
   idempotencyHeaderName: 'Idempotency-Key',
   idempotencyRetention: Duration(hours: 24),
+  queueExcludePaths: [
+    QueueExcludeRule(
+      path: '/api/registers/auth.json',
+      response: ProxyResponseConfig(
+        statusCode: 503,
+        contentType: 'application/json; charset=utf-8',
+        body: '{"message":"オフラインのためレジ認証できません"}',
+      ),
+    ),
+  ],
+  enableAcceptedAtHeader: true,
+  acceptedAtHeaderName: 'X-Offline-Accepted-At',
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -227,6 +239,12 @@ const config = ProxyConfig(
   - 一致しても、応答に `Set-Cookie` か `Vary` がある場合、またはリクエストに `Authorization` がある場合は保存しません。除外したときは `ProxyEventType.cacheSkipped` を理由付きで発行するため、オフラインで使えない原因を追跡できます。
   - 一致したパスでは上流の `max-age` や `Expires` を使わず、`cacheTtl` の値を有効期限に使います。`no-store` は `max-age=0` と併記されることが多く、そのまま採用すると保存直後に stale になるためです。
   - **応答キャッシュは暗号化していません。** 指定したパスの応答本文は端末内に平文で残るため、画面が含む情報を踏まえて指定してください。
+- `queueExcludePaths` は、後から送っても意味が無い更新系をキューへ入れないための規則です。レジ認証やログアウトのように、復帰後に送っても業務上の意味が無く、`202 Accepted` が成功と誤認される要求に使います。規則ごとに応答を設定できるため、画面ごとの文言を Web 側の改修なしに返せます。既定は空です。
+  - オフライン時、上流へ到達できなかった場合、上流が 5xx を返した場合のすべてに適用します。ただし 5xx は上流が実際に応答しているため、応答をそのまま返してキューへの保存だけを行いません。
+  - 応答には `X-Offline-Queued: 0` と `X-Offline-Excluded: 1` を付与します。
+- `enableAcceptedAtHeader` と `acceptedAtHeaderName` は、proxy が最初にリクエストを受け付けた時刻を上流へ伝える設定です。初回転送と以降の再送で同じ値（UTC の ISO 8601）を送るため、上流は「業務日時が未指定ならこのヘッダを使う」と 1 箇所で実装できます。オフラインで積んだ会計が復帰時刻で記録される問題を避けられます。既定で有効です。
+  - 隔離からの再送でも値は変わりません。`queuedAt` は再送のたびに更新されるため流用できません。
+  - **値は端末の時計に依存します。** オフライン中に時計がずれた端末は、ずれた時刻を報告します。
 - `cacheTtl` と `cacheStale` は、指定すると既定のマップとマージされず**丸ごと置き換わります**。未掲載の Content-Type が `default` へ落ちるよう、`default` は必ず含めてください。
 - `text/html` の既定は TTL 1 時間、stale 1 日です。最後にオンラインで取得してから約 25 時間でフォールバック対象から外れるため、**長期のオフライン運用では `cacheTtl` と `cacheStale` の設定が必要です**。`cacheStale` には JavaScript のキーが無く、スクリプトは `default`（3 日）になります。
 
@@ -397,6 +415,25 @@ print('failures=${diagnostics.consecutiveUpstreamFailures} '
 - `isOnline` はリンク層の判定、`onlineDecisionSource` はその根拠（起動時の取得か、変化イベントか）です。
 - `isUpstreamReachable` は実際に転送できる状態かどうかで、リンク層とサーキットブレーカの両方を反映します。
 - `consecutiveUpstreamFailures` と `lastUpstreamSuccessAt` で、いつから到達できていないかを確認できます。
+
+### 再送結果の取得
+
+キュー再送は画面の裏側で行われるため、結果が要求元へ返りません。上流が実際に記録した内容と突き合わせたい場合は、イベントか `recentResendResults` を参照します。
+
+```dart
+proxy.events
+    .where((event) => event.type == ProxyEventType.queueResendAttempted)
+    .listen((event) {
+  debugPrint('再送: ${event.data['statusCode']} ${event.url}');
+});
+
+// 直近 20 件を後から確認する（本文は含みません）
+for (final result in proxy.recentResendResults) {
+  debugPrint('${result.method} ${result.url} -> ${result.statusCode}');
+}
+```
+
+結果は監視用にメモリ上へ保持するだけで、永続化しません。アプリのプロセスが終了すると失われます。
 
 ## Cookie API
 

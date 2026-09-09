@@ -1,5 +1,6 @@
 import 'drop_policy.dart';
 import 'proxy_response_config.dart';
+import 'queue_exclude_rule.dart';
 
 /// Configuration settings for the [OfflineWebProxy] server.
 ///
@@ -342,6 +343,52 @@ class ProxyConfig {
   /// **Default**: `Duration(hours: 24)`
   final Duration idempotencyRetention;
 
+  /// Update requests that must not be stored in the offline queue.
+  ///
+  /// An update that only makes sense at the moment it is made — a register
+  /// sign-in, a sign-out, a session refresh — cannot be replayed later, and
+  /// answering [queuedResponse] for one makes the web app believe it
+  /// succeeded. A matching request is answered with the rule's own response
+  /// instead, carrying `X-Offline-Queued: 0` and `X-Offline-Excluded: 1` so
+  /// the decision can be made on a header.
+  ///
+  /// Rules apply wherever the proxy would otherwise queue an update: while
+  /// offline, when the upstream answered 5xx, and when the upstream could not
+  /// be reached. A 5xx response is still returned as-is, because the upstream
+  /// did answer; only the queueing is skipped.
+  ///
+  /// Each rule carries its own response, so a screen can receive the wording
+  /// it already knows how to display.
+  ///
+  /// **Default**: `[]` (every update request is queued)
+  final List<QueueExcludeRule> queueExcludePaths;
+
+  /// Whether the proxy tells the upstream when it first accepted an update.
+  ///
+  /// A request stored while offline reaches the upstream only after the
+  /// connection returns, so a server that stamps its own clock records the
+  /// wrong business time: a sale rung up at midnight becomes a sale of the
+  /// next morning, and every daily total built on it is wrong.
+  ///
+  /// The proxy sends the moment it first accepted the request, and sends the
+  /// same value on every resend, so the upstream can use it whenever the
+  /// payload itself carries no business timestamp.
+  ///
+  /// **Note**: The value comes from the device clock. A device whose clock is
+  /// wrong while offline reports a wrong time.
+  ///
+  /// **Default**: `true`
+  final bool enableAcceptedAtHeader;
+
+  /// Name of the header carrying the acceptance time.
+  ///
+  /// The value is an ISO 8601 timestamp in UTC, such as
+  /// `2026-09-09T08:03:41.474467Z`. Change the name when the upstream expects
+  /// a different one.
+  ///
+  /// **Default**: `'X-Offline-Accepted-At'`
+  final String acceptedAtHeaderName;
+
   /// What happens to a queued update request the upstream rejected with 4xx.
   ///
   /// Resending cannot change a 4xx result, so the request leaves the queue.
@@ -436,6 +483,9 @@ class ProxyConfig {
     this.enableIdempotencyKey = true,
     this.idempotencyHeaderName = 'Idempotency-Key',
     this.idempotencyRetention = const Duration(hours: 24),
+    this.queueExcludePaths = const [],
+    this.enableAcceptedAtHeader = true,
+    this.acceptedAtHeaderName = 'X-Offline-Accepted-At',
     this.dropPolicy = DropPolicy.quarantine,
     this.queuedResponse = const ProxyResponseConfig(
       statusCode: 202,

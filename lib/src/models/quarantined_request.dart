@@ -15,8 +15,16 @@ class QuarantinedRequest {
   /// 隔離された日時
   final DateTime quarantinedAt;
 
-  /// 最初にキューへ保存された日時
+  /// 隔離される前にキューへ保存された日時
+  ///
+  /// 隔離領域から再送すると、再送を受け付けた時点に更新されます。
+  /// 最初に受け付けた時点は [acceptedAt] を参照してください。
   final DateTime queuedAt;
+
+  /// proxy が最初にこのリクエストを受け付けた日時
+  ///
+  /// 隔離と再送を経ても変わりません。
+  final DateTime acceptedAt;
 
   /// 隔離理由（"4xx_error" 等）
   final String reason;
@@ -33,6 +41,7 @@ class QuarantinedRequest {
     required this.method,
     required this.quarantinedAt,
     required this.queuedAt,
+    required this.acceptedAt,
     required this.reason,
     required this.statusCode,
     required this.errorMessage,
