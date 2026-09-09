@@ -278,7 +278,8 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>enableIdempotencyKey</code> attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. <strong>Deduplication itself must be implemented on the upstream server.</strong></li>
 <li><code>forceCachePaths</code> lists the paths stored even when the response says <code>Cache-Control: no-store</code>. On a server that sends <code>no-store</code> everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes <code>no-store</code> handling proxy-wide.
 <ul>
-<li>Even on a match, a response carrying <code>Set-Cookie</code> or <code>Vary</code>, or a request carrying <code>Authorization</code>, is not stored. A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason, so a path that never becomes available offline can be diagnosed.</li>
+<li>Even on a match, a response carrying <code>Set-Cookie</code>, a response carrying <code>Vary</code> (unless it names <code>Accept-Encoding</code> alone), or a request carrying <code>Authorization</code>, is not stored. A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason, so a path that never becomes available offline can be diagnosed.</li>
+<li>A <code>Vary</code> naming <code>Accept-Encoding</code> alone is stored because the proxy pins <code>Accept-Encoding: identity</code> on every upstream request, so the response cannot vary. Tomcat, nginx and Apache all add that <code>Vary</code> by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A <code>Vary</code> naming <code>*</code> or any other header is still skipped.</li>
 <li>For a matching path the upstream <code>max-age</code> and <code>Expires</code> are ignored and <code>cacheTtl</code> decides the expiry, because <code>no-store</code> is usually paired with <code>max-age=0</code>, which would make the entry stale the moment it is stored.</li>
 <li><strong>The response cache is not encrypted.</strong> The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.</li>
 </ul>
@@ -697,7 +698,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.12.0
+      0.13.0
   </span>
 
   

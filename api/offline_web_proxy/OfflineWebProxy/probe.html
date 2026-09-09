@@ -89,8 +89,11 @@
     return false;
   }
 
-  &#47;&#47; 死んだ keep-alive 接続を再利用しないよう、確認専用のクライアントを使う
-  final client = HttpClient()..connectionTimeout = timeout;
+  &#47;&#47; 死んだ keep-alive 接続を再利用しないよう、確認専用のクライアントを使う。
+  &#47;&#47; 本文は読み捨てるだけだが、自動解凍は共有クライアントと同じ扱いにそろえる。
+  final client = HttpClient()
+    ..connectionTimeout = timeout
+    ..autoUncompress = false;
   try {
     final uri =
         Uri.parse(&#39;http:&#47;&#47;$_effectiveHost:$boundPort$_healthCheckPath&#39;);
@@ -141,7 +144,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.12.0
+      0.13.0
   </span>
 
   
