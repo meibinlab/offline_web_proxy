@@ -4634,13 +4634,14 @@ window.__offline_web_proxy_web_storage_bridge = {
             'reason': reason,
           });
         } else {
-          await box.delete(key);
+          // 履歴を残してから取り除き、キューから消えたのに記録が無い状態を作らない
           await _recordDroppedRequest(
             data,
             statusCode: result.statusCode,
             dropReason: reason,
             errorMessage: errorMessage,
           );
+          await box.delete(key);
           _emitEvent(ProxyEventType.requestDropped, itemUrl, {
             'statusCode': result.statusCode,
             'dropReason': result.dropReason,

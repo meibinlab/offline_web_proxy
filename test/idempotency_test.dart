@@ -21,6 +21,12 @@ class _RealHttpOverrides extends HttpOverrides {
   }
 }
 
+/// 応答を受け取れない状況を作るための、1 リクエスト全体の締め切り。
+const Duration _shortRequestTimeout = Duration(milliseconds: 300);
+
+/// 上流が応答するまでの遅延。[_shortRequestTimeout] より長くする必要がある。
+const Duration _upstreamResponseDelay = Duration(seconds: 2);
+
 /// 受信したリクエストのヘッダと本文を記録する上流サーバのモック。
 class _MockUpstream {
   _MockUpstream(this._server) {
@@ -29,6 +35,11 @@ class _MockUpstream {
         final body = await utf8.decoder.bind(request).join();
         receivedBodies.add(body);
         receivedIdempotencyKeys.add(request.headers.value('Idempotency-Key'));
+        if (delayedResponseCount > 0) {
+          // 応答が届く前に proxy 側が打ち切る状況を再現する
+          delayedResponseCount--;
+          await Future<void>.delayed(responseDelay);
+        }
         request.response
           ..statusCode = statusCode
           ..headers.contentType = ContentType('text', 'plain', charset: 'utf-8')
@@ -50,6 +61,12 @@ class _MockUpstream {
 
   /// 応答するステータスコード。テスト中に変更できる。
   int statusCode = HttpStatus.ok;
+
+  /// 応答を遅らせるリクエスト件数。受信順に先頭からこの件数だけ遅延させる。
+  int delayedResponseCount = 0;
+
+  /// [delayedResponseCount] 件のリクエストに対して応答を遅らせる時間。
+  Duration responseDelay = Duration.zero;
 
   /// 上流サーバの origin。
   String get origin => 'http://127.0.0.1:${_server.port}';
@@ -301,6 +318,43 @@ void main() {
 
         final keys = upstream!.receivedIdempotencyKeys;
         // 転送時に採番したキーが再送でも使われること
+        expect(keys.length, greaterThan(1));
+        expect(keys.first, isNotNull);
+        expect(keys.every((key) => key == keys.first), isTrue);
+      });
+    });
+
+    /// 応答を受け取れずに終わった転送と、その再送で同じキーが送られること
+    ///
+    /// クライアント指定のキーは素通しでも一致するため、採番したキーで検証する。
+    test('reuses a generated key when the forwarded attempt times out',
+        () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            requestTimeout: _shortRequestTimeout,
+            // 転送の失敗で遮断されると再送まで進まないため、遮断を無効化する
+            upstreamFailureThreshold: 0,
+          ),
+        );
+
+        // 上流は受信するが、proxy が締め切りで打ち切るまで応答しない
+        upstream!.responseDelay = _upstreamResponseDelay;
+        upstream!.delayedResponseCount = 1;
+        await _performPost(
+          Uri.parse('http://127.0.0.1:$port/api/sales'),
+          '{"total":1000}',
+        );
+
+        // 応答を受け取れなかった更新系は、再送のため保存されること
+        expect(await proxy.getQueuedRequests(), hasLength(1));
+
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+
+        final keys = upstream!.receivedIdempotencyKeys;
+        // 上流には二重に届くため、同じキーで重複を判別できること
         expect(keys.length, greaterThan(1));
         expect(keys.first, isNotNull);
         expect(keys.every((key) => key == keys.first), isTrue);
