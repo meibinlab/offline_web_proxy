@@ -335,8 +335,10 @@ void main() {
         expect(await proxy.getQueuedRequests(), hasLength(22));
 
         await _emitConnectivity(['wifi']);
-        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
-        await _waitUntil(() async => proxy.recentResendResults.length >= 20);
+        // キューから取り除いた後に結果を記録するため、件数ではなく最後の 1 件が
+        // 記録されたことを待つ。件数で待つと 22 件目の記録前に進んでしまう。
+        await _waitUntil(() async => proxy.recentResendResults
+            .any((result) => result.url.endsWith('/api/sales/22.json')));
 
         final results = proxy.recentResendResults;
         // 際限なく増やさず、新しいものを残すこと
