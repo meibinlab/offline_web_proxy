@@ -152,6 +152,11 @@ const String _droppedRequestBoxName = 'proxy_dropped_requests';
 const String _quarantinedRequestBoxName = 'proxy_quarantined_requests';
 const Set<String> _loopbackHosts = {'127.0.0.1', 'localhost'};
 const String _defaultHealthCheckPath = '/__offline_web_proxy/health';
+const String _defaultStatusPath = '/__offline_web_proxy/status';
+
+/// 管理エンドポイントのパス接頭辞。
+/// proxy が予約している名前空間の下に固定し、業務ルートと衝突させない。
+const String _adminPathPrefix = '/__offline_web_proxy/admin';
 const String _defaultLoopbackHost = '127.0.0.1';
 
 /// 復旧の連続失敗時に挟む待機秒数。末尾の値は以降も維持されます。
@@ -216,6 +221,38 @@ const Set<int> _redirectStatusCodes = {
   HttpStatus.temporaryRedirect,
   HttpStatus.permanentRedirect,
 };
+
+/// ウォームアップで参照資源を抽出する対象タグ。
+/// 実行時に組み立てられる URL には届かないため、最善努力の抽出に留める。
+final RegExp _referenceTagPattern = RegExp(
+  r'<\s*(script|link|img)\b([^>]*)>',
+  caseSensitive: false,
+);
+
+/// `<link>` の `rel` を取り出す正規表現。
+final RegExp _linkRelPattern = RegExp(
+  '''\\brel\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))''',
+  caseSensitive: false,
+);
+
+/// ウォームアップ対象として扱う `<link>` の `rel` 値。
+const Set<String> _resourceLinkRelations = {
+  'stylesheet',
+  'preload',
+  'prefetch',
+  'icon',
+  'shortcut',
+  'apple-touch-icon',
+  'apple-touch-icon-precomposed',
+  'manifest',
+};
+
+/// 参照資源のタグ属性から URL を取り出す正規表現。
+final RegExp _referenceUrlPattern = RegExp(
+  '''\\b(?:src|href)\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))''',
+  caseSensitive: false,
+);
+
 const List<String> _staticResourceAssetPrefixes = [
   'assets/static/',
   'packages/offline_web_proxy/assets/static/',
@@ -484,6 +521,7 @@ class OfflineWebProxy {
       // 設定を読み込み
       _config = config ?? await _loadDefaultConfig();
       _validateHealthCheckPath();
+      _validateStatusPath();
       _compileConfiguredPatterns();
       _resetRecoveryState();
 
@@ -842,6 +880,221 @@ class OfflineWebProxy {
     return configuredHost.isNotEmpty ? configuredHost : _defaultLoopbackHost;
   }
 
+  /// 状態通知に使用するパスを返します。
+  ///
+  /// Returns: 設定値。空の場合は空文字列（無効）。
+  String get _statusPath {
+    final configuredPath = _config?.statusPath.trim() ?? _defaultStatusPath;
+    return configuredPath;
+  }
+
+  /// 統計やイベントの対象外とする proxy 内部のエンドポイントかを返します。
+  ///
+  /// [request] 判定する要求。
+  ///
+  /// Returns: 内部エンドポイント宛ての場合は `true`。
+  bool _isInternalEndpointRequest(shelf.Request request) {
+    // 稼働確認は GET / HEAD だけを内部扱いとし、他のメソッドは従来どおり
+    // 通常の転送経路として統計へ計上する
+    if (_isHealthCheckRequest(request)) {
+      return true;
+    }
+
+    final normalizedPath = request.url.path.startsWith('/')
+        ? request.url.path
+        : '/${request.url.path}';
+
+    final statusPath = _statusPath;
+    if (statusPath.isNotEmpty && normalizedPath == statusPath) {
+      return true;
+    }
+
+    // 無効な間は通常の転送経路のため、統計からも外さない
+    if (!(_config?.enableAdminApi ?? false)) {
+      return false;
+    }
+
+    return normalizedPath.startsWith('$_adminPathPrefix/') ||
+        normalizedPath == _adminPathPrefix;
+  }
+
+  /// proxy 自身の origin からの要求かどうかを返します。
+  ///
+  /// 同一 origin の `fetch` は `Origin` を送らないことがあるため、ヘッダが
+  /// 無い場合は許可します。別 origin のページから内部エンドポイントを
+  /// 操作されないよう、値がある場合は proxy 自身の origin とだけ一致させます。
+  ///
+  /// [request] 判定する要求。
+  ///
+  /// Returns: 許可する場合は `true`。
+  bool _isSameOriginInternalRequest(shelf.Request request) {
+    final origin = request.headers['origin'];
+    if (origin == null || origin.trim().isEmpty) {
+      return true;
+    }
+
+    final proxyBaseUri = baseUri;
+    if (proxyBaseUri == null) {
+      return false;
+    }
+
+    final requestOrigin = Uri.tryParse(origin.trim());
+    if (requestOrigin == null) {
+      return false;
+    }
+
+    if (requestOrigin.scheme != proxyBaseUri.scheme ||
+        requestOrigin.port != proxyBaseUri.port) {
+      return false;
+    }
+
+    if (requestOrigin.host == proxyBaseUri.host) {
+      return true;
+    }
+
+    // 127.0.0.1 と localhost は同じ proxy を指すため、どちらでも許可する
+    return _isLoopbackHost(requestOrigin.host) &&
+        _isLoopbackHost(proxyBaseUri.host);
+  }
+
+  /// 内部エンドポイントの JSON 応答を組み立てます。
+  ///
+  /// [statusCode] 応答のステータスコード。
+  /// [body] JSON へ変換する内容。
+  ///
+  /// Returns: JSON 応答。
+  shelf.Response _buildInternalJsonResponse(
+    int statusCode,
+    Map<String, dynamic> body,
+  ) {
+    return shelf.Response(
+      statusCode,
+      body: jsonEncode(body),
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        // 状態は都度変わるため、WebView 側にも保存させない
+        'Cache-Control': 'no-store',
+      },
+    );
+  }
+
+  /// 状態通知エンドポイントの要求を処理します。
+  ///
+  /// [request] 受信した要求。
+  ///
+  /// Returns: 現在の状態を表す JSON 応答。
+  Future<shelf.Response> _handleStatusRequest(shelf.Request request) async {
+    if (!_isSameOriginInternalRequest(request)) {
+      return _buildInternalJsonResponse(
+        HttpStatus.forbidden,
+        {'error': 'origin is not allowed'},
+      );
+    }
+
+    final stats = await getStats();
+
+    return _buildInternalJsonResponse(HttpStatus.ok, {
+      'isOnline': _isOnline,
+      'onlineDecisionSource': _onlineDecisionSource.name,
+      'isUpstreamReachable': _isUpstreamReachable,
+      'upstreamCircuitState': _upstreamCircuitState.name,
+      'queueLength': stats.queueLength,
+      'quarantinedCount': stats.quarantinedCount,
+      'unacknowledgedDroppedCount': stats.unacknowledgedDroppedCount,
+      'recentResendResults': _recentResendResults
+          .map((result) => result.toMap())
+          .toList(growable: false),
+    });
+  }
+
+  /// 隔離キューの一覧を返します。
+  ///
+  /// [request] 受信した要求。
+  ///
+  /// Returns: 隔離されたリクエストの一覧を表す JSON 応答。
+  Future<shelf.Response> _handleAdminQuarantineList(
+    shelf.Request request,
+  ) async {
+    if (!_isSameOriginInternalRequest(request)) {
+      return _buildInternalJsonResponse(
+        HttpStatus.forbidden,
+        {'error': 'origin is not allowed'},
+      );
+    }
+
+    final requests = await getQuarantinedRequests();
+    return _buildInternalJsonResponse(HttpStatus.ok, {
+      'requests': requests
+          .map((request) => {
+                'id': request.id,
+                'url': request.url,
+                'method': request.method,
+                'quarantinedAt':
+                    request.quarantinedAt.toUtc().toIso8601String(),
+                'queuedAt': request.queuedAt.toUtc().toIso8601String(),
+                'acceptedAt': request.acceptedAt.toUtc().toIso8601String(),
+                'reason': request.reason,
+                'statusCode': request.statusCode,
+                'errorMessage': request.errorMessage,
+              })
+          .toList(growable: false),
+    });
+  }
+
+  /// 隔離されたリクエストをキューへ戻します。
+  ///
+  /// [request] 受信した要求。
+  ///
+  /// Returns: 再送を受け付けたかどうかを表す JSON 応答。
+  Future<shelf.Response> _handleAdminQuarantineRetry(
+    shelf.Request request,
+    String id,
+  ) async {
+    if (!_isSameOriginInternalRequest(request)) {
+      return _buildInternalJsonResponse(
+        HttpStatus.forbidden,
+        {'error': 'origin is not allowed'},
+      );
+    }
+
+    final retried = await retryQuarantinedRequest(id);
+    if (!retried) {
+      return _buildInternalJsonResponse(
+        HttpStatus.notFound,
+        {'retried': false, 'error': 'quarantined request was not found'},
+      );
+    }
+
+    return _buildInternalJsonResponse(HttpStatus.ok, {'retried': true});
+  }
+
+  /// 隔離されたリクエストを破棄します。
+  ///
+  /// [request] 受信した要求。
+  ///
+  /// Returns: 破棄したかどうかを表す JSON 応答。
+  Future<shelf.Response> _handleAdminQuarantineDiscard(
+    shelf.Request request,
+    String id,
+  ) async {
+    if (!_isSameOriginInternalRequest(request)) {
+      return _buildInternalJsonResponse(
+        HttpStatus.forbidden,
+        {'error': 'origin is not allowed'},
+      );
+    }
+
+    final discarded = await discardQuarantinedRequest(id);
+    if (!discarded) {
+      return _buildInternalJsonResponse(
+        HttpStatus.notFound,
+        {'discarded': false, 'error': 'quarantined request was not found'},
+      );
+    }
+
+    return _buildInternalJsonResponse(HttpStatus.ok, {'discarded': true});
+  }
+
   /// 稼働確認要求かどうかを返します。
   ///
   /// 稼働確認として扱うのは `GET` と `HEAD` のみです。
@@ -1069,6 +1322,40 @@ class OfflineWebProxy {
       result.url,
       result.toMap(),
     );
+  }
+
+  /// 状態通知パスの設定値を検証します。
+  ///
+  /// Throws:
+  ///   * [ProxyStartException] パスとして使用できない値が指定された場合。
+  void _validateStatusPath() {
+    final configuredPath = _config?.statusPath.trim() ?? '';
+    if (configuredPath.isEmpty) {
+      return;
+    }
+
+    if (!configuredPath.startsWith('/')) {
+      throw ProxyStartException(
+        'statusPath must start with "/": $configuredPath',
+        null,
+      );
+    }
+
+    // shelf_router のパスパラメータ記法を含むと業務ルートを広く奪うため拒否する
+    if (RegExp(r'[<>?#\s]').hasMatch(configuredPath)) {
+      throw ProxyStartException(
+        'statusPath must not contain "<", ">", "?", "#" or whitespace: '
+        '$configuredPath',
+        null,
+      );
+    }
+
+    if (configuredPath == _healthCheckPath) {
+      throw ProxyStartException(
+        'statusPath must differ from healthCheckPath: $configuredPath',
+        null,
+      );
+    }
   }
 
   /// 復旧対象として扱える URL かどうかを返します。
@@ -1542,6 +1829,9 @@ class OfflineWebProxy {
   /// [timeout] 各リクエストの締め切り秒数。省略時は
   ///   [ProxyConfig.requestTimeout] を使用します。
   /// [maxConcurrency] 同時実行する最大リクエスト数。
+  /// [followReferences] 取得した HTML が参照する同一 origin の資源も続けて
+  ///   取得する場合は `true`。`<script src>`、`<link href>`、`<img src>` を
+  ///   対象とし、1 段だけ辿ります。既定は `false` で従来の挙動です。
   /// [onProgress] 進捗状態を通知するコールバック関数。
   /// [onError] エラー発生時に呼ばれるコールバック関数。
   ///
@@ -1553,6 +1843,7 @@ class OfflineWebProxy {
     List<String>? paths,
     int? timeout,
     int? maxConcurrency,
+    bool followReferences = false,
     WarmupProgressCallback? onProgress,
     WarmupErrorCallback? onError,
   }) async {
@@ -1568,110 +1859,313 @@ class OfflineWebProxy {
 
     final startTime = DateTime.now();
     final entries = <WarmupEntry>[];
-    int successCount = 0;
-    int failureCount = 0;
 
     try {
-      // Process paths with concurrency control
-
       final semaphore = Semaphore(maxConcurrency ?? 10);
-      final results =
-          await Future.wait(targetPaths.asMap().entries.map((entry) async {
-        final index = entry.key;
-        final path = entry.value;
+      // 同じ資源を二度取得しないよう、要求済みのパスを覚えておく
+      final requestedPaths = <String>{};
+      var completed = 0;
+      var total = targetPaths.length;
 
+      /// 1 パス分を取得し、進捗を通知します。
+      Future<({WarmupEntry entry, List<String> references})> run(
+        String path,
+        String? referencedFrom,
+      ) async {
         await semaphore.acquire(timeout: const Duration(seconds: 30));
         try {
-          final entryStartTime = DateTime.now();
-
-          // 上流断を検知済みの間は待たせず、復帰確認に判定を委ねる
-          if (_isRunning && !_isUpstreamReachable) {
-            onError?.call(path, _upstreamUnreachableWarmupMessage);
-            failureCount++;
-            onProgress?.call(index + 1, targetPaths.length);
-            return WarmupEntry(
-              path: path,
-              success: false,
-              statusCode: null,
-              errorMessage: _upstreamUnreachableWarmupMessage,
-              duration: DateTime.now().difference(entryStartTime),
-            );
-          }
-
-          try {
-            final response = await _fetchFromUpstream(path, timeout: timeout);
-
-            // 上流が応答した以上は到達可能とみなし、遮断中なら解除する
-            if (_isRunning) {
-              _recordUpstreamSuccess();
-            }
-
-            if (response.statusCode == HttpStatus.ok) {
-              final upstreamUri = _buildUpstreamUriFromParts(path: path);
-              final cacheKey = _generateCacheKey(upstreamUri.toString());
-              await _cacheResponseBytes(
-                cacheKey,
-                response.statusCode,
-                response.headers,
-                response.bodyBytes,
-                // ウォームアップも同じ判定で保存し、転送経路と挙動を揃える
-                allowNoStore: _resolveForceCacheAllowance(
-                  path: path,
-                  requestHeaders: const {},
-                  responseHeaders: response.headers,
-                  eventUrl: upstreamUri.toString(),
-                ),
-              );
-            }
-            final duration = DateTime.now().difference(entryStartTime);
-            successCount++;
-            return WarmupEntry(
-              path: path,
-              success: true,
-              statusCode: response.statusCode,
-              errorMessage: null,
-              duration: duration,
-            );
-          } catch (e) {
-            // 画面操作が無い状況でも上流断を検知できるよう、判定材料に含める。
-            // 停止中は復帰確認を予約できないため数えない。
-            if (_isRunning && _shouldCountUpstreamFailure(e)) {
-              _recordUpstreamFailure();
-            }
-
-            final duration = DateTime.now().difference(entryStartTime);
-            onError?.call(path, e.toString());
-            failureCount++;
-            return WarmupEntry(
-              path: path,
-              success: false,
-              statusCode: null,
-              errorMessage: e.toString(),
-              duration: duration,
-            );
-          } finally {
-            // 成功・失敗問わず進捗コールバックを呼ぶ
-            onProgress?.call(index + 1, targetPaths.length);
-          }
+          return await _warmupSinglePath(
+            path: path,
+            timeout: timeout,
+            followReferences: followReferences,
+            referencedFrom: referencedFrom,
+            onError: onError,
+          );
         } finally {
           semaphore.release();
+          completed++;
+          // 成功・失敗問わず進捗コールバックを呼ぶ
+          onProgress?.call(completed, total);
         }
-      }));
+      }
 
-      entries.addAll(results);
+      for (final path in targetPaths) {
+        requestedPaths.add(_normalizeWarmupPath(path));
+      }
 
-      final totalDuration = DateTime.now().difference(startTime);
+      final results = await Future.wait(
+        targetPaths.map((path) => run(path, null)),
+      );
+      entries.addAll(results.map((result) => result.entry));
+
+      if (followReferences) {
+        // 参照元ごとに、まだ取得していないパスだけを集める
+        final referenceTargets = <({String path, String referencedFrom})>[];
+        for (var index = 0; index < results.length; index++) {
+          for (final reference in results[index].references) {
+            if (requestedPaths.add(_normalizeWarmupPath(reference))) {
+              referenceTargets.add((
+                path: reference,
+                referencedFrom: targetPaths[index],
+              ));
+            }
+          }
+        }
+
+        if (referenceTargets.isNotEmpty) {
+          total += referenceTargets.length;
+          final referenceResults = await Future.wait(
+            referenceTargets
+                .map((target) => run(target.path, target.referencedFrom)),
+          );
+          entries.addAll(referenceResults.map((result) => result.entry));
+        }
+      }
+
+      final successCount = entries.where((entry) => entry.success).length;
 
       return WarmupResult(
         successCount: successCount,
-        failureCount: failureCount,
-        totalDuration: totalDuration,
+        failureCount: entries.length - successCount,
+        totalDuration: DateTime.now().difference(startTime),
         entries: entries,
       );
     } catch (e) {
       throw WarmupException(
           'ウォームアップに失敗しました: $e', entries, e is Exception ? e : null);
     }
+  }
+
+  /// ウォームアップ 1 件分を実行します。
+  ///
+  /// [path] 取得するパス。
+  /// [timeout] 締め切り秒数。
+  /// [followReferences] 参照資源を抽出する場合は `true`。
+  /// [referencedFrom] 参照元のパス。直接指定した場合は `null`。
+  /// [onError] エラー発生時に呼ばれるコールバック関数。
+  ///
+  /// Returns: 結果と、続けて取得すべき同一 origin の参照パス一覧。
+  Future<({WarmupEntry entry, List<String> references})> _warmupSinglePath({
+    required String path,
+    required int? timeout,
+    required bool followReferences,
+    required String? referencedFrom,
+    WarmupErrorCallback? onError,
+  }) async {
+    final entryStartTime = DateTime.now();
+
+    // 上流断を検知済みの間は待たせず、復帰確認に判定を委ねる
+    if (_isRunning && !_isUpstreamReachable) {
+      onError?.call(path, _upstreamUnreachableWarmupMessage);
+      return (
+        entry: WarmupEntry(
+          path: path,
+          success: false,
+          statusCode: null,
+          errorMessage: _upstreamUnreachableWarmupMessage,
+          duration: DateTime.now().difference(entryStartTime),
+          referencedFrom: referencedFrom,
+        ),
+        references: const <String>[],
+      );
+    }
+
+    try {
+      final response = await _fetchFromUpstream(path, timeout: timeout);
+
+      // 上流が応答した以上は到達可能とみなし、遮断中なら解除する
+      if (_isRunning) {
+        _recordUpstreamSuccess();
+      }
+
+      var references = const <String>[];
+      if (response.statusCode == HttpStatus.ok) {
+        final upstreamUri = _buildUpstreamUriFromParts(path: path);
+        final cacheKey = _generateCacheKey(upstreamUri.toString());
+        await _cacheResponseBytes(
+          cacheKey,
+          response.statusCode,
+          response.headers,
+          response.bodyBytes,
+          // ウォームアップも同じ判定で保存し、転送経路と挙動を揃える
+          allowNoStore: _resolveForceCacheAllowance(
+            path: path,
+            requestHeaders: const {},
+            responseHeaders: response.headers,
+            eventUrl: upstreamUri.toString(),
+          ),
+        );
+
+        if (followReferences) {
+          references = _extractSameOriginReferences(
+            response: response,
+            baseUri: upstreamUri,
+          );
+        }
+      }
+
+      return (
+        entry: WarmupEntry(
+          path: path,
+          success: true,
+          statusCode: response.statusCode,
+          errorMessage: null,
+          duration: DateTime.now().difference(entryStartTime),
+          referencedFrom: referencedFrom,
+        ),
+        references: references,
+      );
+    } catch (e) {
+      // 画面操作が無い状況でも上流断を検知できるよう、判定材料に含める。
+      // 停止中は復帰確認を予約できないため数えない。
+      if (_isRunning && _shouldCountUpstreamFailure(e)) {
+        _recordUpstreamFailure();
+      }
+
+      onError?.call(path, e.toString());
+      return (
+        entry: WarmupEntry(
+          path: path,
+          success: false,
+          statusCode: null,
+          errorMessage: e.toString(),
+          duration: DateTime.now().difference(entryStartTime),
+          referencedFrom: referencedFrom,
+        ),
+        references: const <String>[],
+      );
+    }
+  }
+
+  /// ウォームアップ対象のパスを重複判定用に正規化します。
+  ///
+  /// [path] 正規化するパス。
+  ///
+  /// Returns: 先頭に `/` を持つパス。
+  String _normalizeWarmupPath(String path) {
+    final trimmedPath = path.trim();
+    if (trimmedPath.isEmpty) {
+      return '/';
+    }
+    return trimmedPath.startsWith('/') ? trimmedPath : '/$trimmedPath';
+  }
+
+  /// ウォームアップした HTML から同一 origin の参照資源を抽出します。
+  ///
+  /// `<script src>`、`<link href>`、`<img src>` を対象とします。実行時に
+  /// JavaScript が組み立てる URL には届かないため、最善努力の抽出です。
+  ///
+  /// [response] 取得した応答。
+  /// [baseUri] 相対 URL の解決に使う上流 URI。
+  ///
+  /// Returns: 取得すべきパスの一覧。HTML でない場合は空。
+  List<String> _extractSameOriginReferences({
+    required http.Response response,
+    required Uri baseUri,
+  }) {
+    final contentType =
+        (_getHeaderValueIgnoreCase(response.headers, 'content-type') ?? '')
+            .toLowerCase();
+    if (!contentType.contains('text/html')) {
+      return const <String>[];
+    }
+
+    final String html;
+    try {
+      html = utf8.decode(response.bodyBytes, allowMalformed: true);
+    } catch (_) {
+      return const <String>[];
+    }
+
+    final references = <String>{};
+    for (final tagMatch in _referenceTagPattern.allMatches(html)) {
+      final tagName = (tagMatch.group(1) ?? '').toLowerCase();
+      final attributes = tagMatch.group(2) ?? '';
+
+      // canonical や alternate は資源ではなく別ページを指すため取得しない
+      if (tagName == 'link' && !_isResourceLinkTag(attributes)) {
+        continue;
+      }
+
+      for (final urlMatch in _referenceUrlPattern.allMatches(attributes)) {
+        final rawUrl =
+            urlMatch.group(1) ?? urlMatch.group(2) ?? urlMatch.group(3);
+        if (rawUrl == null || rawUrl.trim().isEmpty) {
+          continue;
+        }
+
+        final resolved = _resolveSameOriginReference(rawUrl.trim(), baseUri);
+        if (resolved != null) {
+          references.add(resolved);
+        }
+      }
+    }
+
+    return references.toList(growable: false);
+  }
+
+  /// `<link>` が資源を指しているかどうかを返します。
+  ///
+  /// `canonical` や `alternate` は別ページを指すため、ウォームアップの
+  /// 対象から外します。`rel` が無い場合も対象にしません。
+  ///
+  /// [attributes] タグの属性部分。
+  ///
+  /// Returns: 資源を指す `rel` の場合は `true`。
+  bool _isResourceLinkTag(String attributes) {
+    final relMatch = _linkRelPattern.firstMatch(attributes);
+    final rel = (relMatch?.group(1) ?? relMatch?.group(2) ?? relMatch?.group(3))
+        ?.toLowerCase();
+    if (rel == null || rel.trim().isEmpty) {
+      return false;
+    }
+
+    return rel
+        .split(RegExp(r'\s+'))
+        .any((value) => _resourceLinkRelations.contains(value));
+  }
+
+  /// 参照 URL をウォームアップ用のパスへ変換します。
+  ///
+  /// 別 origin や `data:` などの取得対象にならない URL は除外します。
+  ///
+  /// [rawUrl] HTML に書かれていた URL。
+  /// [baseUri] 相対 URL の解決に使う上流 URI。
+  ///
+  /// Returns: 同一 origin の場合はクエリを含むパス。対象外の場合は `null`。
+  String? _resolveSameOriginReference(String rawUrl, Uri baseUri) {
+    if (rawUrl.startsWith('#') ||
+        rawUrl.startsWith('data:') ||
+        rawUrl.startsWith('javascript:') ||
+        rawUrl.startsWith('mailto:') ||
+        rawUrl.startsWith('blob:')) {
+      return null;
+    }
+
+    final Uri resolved;
+    try {
+      resolved = baseUri.resolve(rawUrl);
+    } catch (_) {
+      return null;
+    }
+
+    if (resolved.scheme != baseUri.scheme ||
+        resolved.host != baseUri.host ||
+        resolved.port != baseUri.port) {
+      return null;
+    }
+
+    // upstream の path 接頭辞を含めたままだと二重に付与されるため取り除く
+    final originPath = _configuredOriginUri?.path ?? '';
+    final strippedPath =
+        _stripConfiguredOriginPathPrefix(resolved.path, originPath);
+    if (strippedPath == null) {
+      return null;
+    }
+
+    return resolved.query.isEmpty
+        ? strippedPath
+        : '$strippedPath?${resolved.query}';
   }
 
   /// 保存されているCookieの一覧を取得します。
@@ -2789,6 +3283,22 @@ class OfflineWebProxy {
     router.add('GET', _healthCheckPath, _handleHealthCheck);
     router.add('HEAD', _healthCheckPath, _handleHealthCheck);
 
+    // 状態通知用のエンドポイント（GET のみ、上流へは転送しない）
+    final statusPath = _statusPath;
+    if (statusPath.isNotEmpty) {
+      router.add('GET', statusPath, _handleStatusRequest);
+    }
+
+    // 管理エンドポイントは既定で無効。有効時のみ登録する。
+    if (_config?.enableAdminApi ?? false) {
+      router.add(
+          'GET', '$_adminPathPrefix/quarantine', _handleAdminQuarantineList);
+      router.add('POST', '$_adminPathPrefix/quarantine/<id>/retry',
+          _handleAdminQuarantineRetry);
+      router.add('DELETE', '$_adminPathPrefix/quarantine/<id>',
+          _handleAdminQuarantineDiscard);
+    }
+
     // 全てのリクエストをプロキシするキャッチオールハンドラ
     router.all('/<path|.*>', _handleRequest);
 
@@ -2805,6 +3315,11 @@ class OfflineWebProxy {
     return (shelf.Handler innerHandler) {
       return (shelf.Request request) async {
         final response = await innerHandler(request);
+
+        // 内部エンドポイントは同一 origin 限定のため、全 origin へ開かない
+        if (_isInternalEndpointRequest(request)) {
+          return response;
+        }
 
         return response.change(headers: {
           'Access-Control-Allow-Origin': '*',
@@ -2850,8 +3365,8 @@ class OfflineWebProxy {
   shelf.Middleware get _statisticsMiddleware {
     return (shelf.Handler innerHandler) {
       return (shelf.Request request) async {
-        // 稼働確認は統計にもイベントにも含めない
-        if (_isHealthCheckRequest(request)) {
+        // proxy 内部のエンドポイントは統計にもイベントにも含めない
+        if (_isInternalEndpointRequest(request)) {
           return innerHandler(request);
         }
 
@@ -4926,6 +5441,13 @@ window.__offline_web_proxy_web_storage_bridge = {
           await client.getUrl(uri).timeout(_remainingUntil(deadline));
       // keep-aliveを有効にする（persistentConnectionデフォルトを使用）
       request.headers.set('accept-encoding', 'gzip, deflate');
+
+      // 転送経路と同じく Cookie Jar を送る。認証が必要な資源を
+      // ウォームアップで取得できるようにするために必要。
+      final cookieHeader = await _buildCookieHeaderForUri(uri);
+      if (cookieHeader != null && cookieHeader.isNotEmpty) {
+        request.headers.set('cookie', cookieHeader);
+      }
 
       final response = await request.close().timeout(_remainingUntil(deadline));
 

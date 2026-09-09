@@ -235,10 +235,25 @@ class ProxyConfig {
   /// **Default**: `[1, 2, 5, 10, 20, 30]` (seconds)
   final List<int> retryBackoffSeconds;
 
-  /// Enable administrative API endpoints for debugging.
+  /// Enable the administrative endpoints under `/__offline_web_proxy/admin`.
   ///
-  /// **Security Warning**: Only enable during development. Provides access
-  /// to cache inspection, statistics, and internal server state.
+  /// A quarantined request is usually resolved by a person standing at the
+  /// screen — a shop assistant who closed a stocktake and now wants the sale
+  /// to go through. These endpoints let that screen list, resend and discard
+  /// quarantined requests without a native bridge.
+  ///
+  /// | Method | Path | Purpose |
+  /// | --- | --- | --- |
+  /// | `GET` | `/__offline_web_proxy/admin/quarantine` | List quarantined requests |
+  /// | `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | Put one back on the queue |
+  /// | `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | Discard one |
+  ///
+  /// **Security Warning**: The endpoints are reachable from every script
+  /// running on the proxy origin, and discarding a request destroys business
+  /// data. Do not enable this while the page still loads scripts from a third
+  /// party such as a CDN. Requests carrying an `Origin` other than the proxy's
+  /// own are refused, and the server binds to loopback only, but neither
+  /// protects against a script already running on the page.
   ///
   /// **Default**: `false` (production safe)
   final bool enableAdminApi;
@@ -286,6 +301,24 @@ class ProxyConfig {
   ///
   /// **Default**: `'/__offline_web_proxy/health'`
   final String healthCheckPath;
+
+  /// Path that reports the proxy state as JSON.
+  ///
+  /// `GET` requests to this path are answered locally, never forwarded, and
+  /// excluded from statistics — the same treatment as [healthCheckPath]. The
+  /// body carries the online decision, upstream reachability, the queue and
+  /// quarantine counts, and the recent resend outcomes, so a web page can
+  /// decide on its own whether to block a settlement or hide a sign-in button
+  /// without a native bridge.
+  ///
+  /// Only same-origin callers are served: a request carrying an `Origin` other
+  /// than the proxy's own is refused with `403`.
+  ///
+  /// Must be a fixed path starting with `/`, following the same rules as
+  /// [healthCheckPath]. An empty value disables the endpoint.
+  ///
+  /// **Default**: `'/__offline_web_proxy/status'`
+  final String statusPath;
 
   /// Interval of the periodic health check performed while the app runs.
   ///
@@ -475,6 +508,7 @@ class ProxyConfig {
     this.logLevel = 'info',
     this.startupPaths = const [],
     this.healthCheckPath = '/__offline_web_proxy/health',
+    this.statusPath = '/__offline_web_proxy/status',
     this.healthCheckInterval = Duration.zero,
     this.serverIdleTimeout = const Duration(seconds: 120),
     this.maxRestartAttemptsPerMinute = 5,

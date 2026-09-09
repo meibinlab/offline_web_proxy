@@ -359,6 +359,51 @@ Provides methods for queue management. See [20] API Reference for details.
 - **`ProxyStats.quarantinedCount`**: Number of quarantined requests. Anything above zero needs a decision
 - **`ProxyStats.unacknowledgedDroppedCount`**: Number of dropped history entries not acknowledged yet. Check it at startup to notice requests discarded while nobody was watching
 
+### Status Endpoint
+
+The unsent count and the online state were reachable only from the Dart API, so showing them on the screen meant writing a bridge in the app. `ProxyConfig.statusPath` (default `/__offline_web_proxy/status`) returns the same information as JSON.
+
+- **Method**: `GET` only. Never forwarded upstream, and excluded from statistics and events
+- **Disabling**: An empty value leaves the route unregistered
+- **Validation**: Same rules as `healthCheckPath`; a value equal to `healthCheckPath` is rejected at startup
+- **Response header**: `Cache-Control: no-store`
+
+```json
+{
+  "isOnline": true,
+  "onlineDecisionSource": "connectivity",
+  "isUpstreamReachable": true,
+  "upstreamCircuitState": "closed",
+  "queueLength": 0,
+  "quarantinedCount": 0,
+  "unacknowledgedDroppedCount": 0,
+  "recentResendResults": []
+}
+```
+
+With it, "block settlement while something is unsent", "show the unsent count" and "hide the sign-in when offline" are decided entirely in the web app.
+
+### Administrative Endpoints
+
+Setting `ProxyConfig.enableAdminApi` to `true` exposes the quarantine store over HTTP. The person who resolves the cause is usually standing at the screen, so the controls belong on the page. Disabled by default.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/__offline_web_proxy/admin/quarantine` | List quarantined requests (never the body) |
+| `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | Put one back on the queue |
+| `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | Discard one |
+
+### Origin Control for Internal Endpoints
+
+The status and administrative endpoints serve only callers on the proxy's own origin.
+
+- A request without an `Origin` header is allowed, because a same-origin `fetch` does not send one
+- A request whose `Origin` equals the proxy's own (`http://<host>:<port>`) is allowed. `127.0.0.1` and `localhost` name the same proxy, so either spelling is accepted
+- Anything else is answered with `403`
+- They are excluded from the CORS middleware and never carry `Access-Control-Allow-Origin: *`
+
+**Note**: Same-origin also means *every script running on the page*. Enabling the administrative endpoints while the page still loads third-party scripts from a CDN would let such a script reach as far as discarding a quarantined request. Move those files into the bundled assets (section [3]) first.
+
 ## [6] Idempotency
 
 ### Duplicate Request Prevention
@@ -451,6 +496,19 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
 **Freshness**: A server that sends `no-store` usually sends something like `no-store, max-age=0, must-revalidate`. Honouring those directives would make the entry stale the moment it is stored, leaving only the stale window for offline use. Since the decision to store was already overridden by configuration, the expiry follows configuration too: for a matching path, `s-maxage`, `max-age` and `Expires` are ignored and `cacheTtl` decides the TTL.
 
 **Storage note**: `no-store` exists to ask that a response never be written to storage. The response cache is not encrypted, so the body of a listed path stays on the device in the clear. Weigh what the screen contains, and the impact of a lost device, before listing it.
+
+#### Warmup
+
+- **Cookies**: The cookie jar is sent, exactly as on the forwarding path. Without it, a resource that requires authentication cannot be warmed up
+- **Following references**: `warmupCache(followReferences: true)` also fetches the same-origin resources referenced by the warmed HTML
+  - `<script src>`, `<link href>` and `<img src>` are covered
+  - A `<link>` counts only when its `rel` names a resource (`stylesheet`, `preload`, `prefetch`, `icon`, `apple-touch-icon`, `manifest` and the like). `canonical` and `alternate` point at another page and are skipped
+  - Only one level is followed; what those resources reference in turn is not
+  - Another origin, `data:`, `javascript:`, `mailto:` and `blob:` are skipped
+  - A shared resource is requested only once
+  - Extraction is a best-effort regular expression scan. **A URL assembled by JavaScript at runtime is out of reach**
+  - `WarmupEntry.referencedFrom` names the HTML that referenced each entry
+- **Default**: `followReferences` is `false`, keeping the previous behaviour of fetching only the listed paths
 
 #### Cache Expiration Calculation Priority
 
@@ -1298,7 +1356,7 @@ final stats = await proxy.getCacheStats();
 print('Cache size: ${stats.totalSize} bytes');
 ```
 
-#### `Future<WarmupResult> warmupCache({List<String>? paths, int? timeout, int? maxConcurrency, WarmupProgressCallback? onProgress, WarmupErrorCallback? onError})`
+#### `Future<WarmupResult> warmupCache({List<String>? paths, int? timeout, int? maxConcurrency, bool followReferences = false, WarmupProgressCallback? onProgress, WarmupErrorCallback? onError})`
 
 Pre-fetch fallback cache for the specified path list.
 
@@ -1306,6 +1364,7 @@ Pre-fetch fallback cache for the specified path list.
   - `paths`: Path list to pre-fetch (uses the configured startup paths when omitted)
   - `timeout`: Timeout seconds for each path (uses configuration value when omitted)
   - `maxConcurrency`: Number of concurrent executions (uses configuration value when omitted)
+  - `followReferences`: Also fetch the same-origin resources referenced by the warmed HTML (default `false`)
   - `onProgress`: Progress callback function
   - `onError`: Error callback function
 - **Return Value**: Detailed information of pre-fetch results
@@ -1313,6 +1372,7 @@ Pre-fetch fallback cache for the specified path list.
   - `ArgumentError`: When invalid path is included
   - `WarmupException`: When the entire pre-fetch process fails
 - **Interaction with upstream reachability**: While the circuit breaker is open (or the link layer is down), no request is sent and every path is reported as a failure. The outcome of each fetch feeds the reachability decision
+- **Cookies**: The cookie jar is sent, exactly as on the forwarding path, so a resource that requires authentication can be warmed up
 
 ```dart
 // Pre-fetch with configured path list
@@ -1862,6 +1922,7 @@ class WarmupEntry {
   final int? statusCode; // HTTP status code (only on success)
   final String? errorMessage; // Error message (only on failure)
   final Duration duration; // Time taken for this process
+  final String? referencedFrom; // Path of the HTML that referenced it (null when listed directly)
 }
 ```
 
@@ -1901,6 +1962,7 @@ class ProxyConfig {
   final List<String> startupPaths; // Startup cache update paths
   final int preferredPort; // Port to use when available (0=unspecified)
   final String healthCheckPath; // Health check path (default: "/__offline_web_proxy/health")
+  final String statusPath; // Status path (default: "/__offline_web_proxy/status", empty = disabled)
   final Duration healthCheckInterval; // Periodic health check interval (Duration.zero=disabled)
   final Duration serverIdleTimeout; // Internal server idle timeout (default: 120 seconds)
   final int maxRestartAttemptsPerMinute; // Rebind limit per minute (default: 5)

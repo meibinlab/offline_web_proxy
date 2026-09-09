@@ -214,6 +214,7 @@ const config = ProxyConfig(
   startupPaths: ['/app/config'],
   preferredPort: 8787,
   healthCheckPath: '/__offline_web_proxy/health',
+  statusPath: '/__offline_web_proxy/status',
   healthCheckInterval: Duration.zero,
   serverIdleTimeout: Duration(seconds: 120),
   maxRestartAttemptsPerMinute: 5,
@@ -227,7 +228,11 @@ const config = ProxyConfig(
 - `port: 0` を指定すると、OS が空きポートを自動割り当てします。
 - `preferredPort` を指定すると、まずそのポートを試し、使えない場合は自動割り当てへフォールバックします。直前に成功したポートも次回起動時に再利用されるため、WebView の origin をより安定させやすくなります。
 - `startupPaths` は `warmupCache()` で、オフライン時または上流到達不能時の代替応答を事前準備したいパスに使います。
+  - ウォームアップは転送経路と同じく Cookie Jar の内容を送ります。認証後に呼び出せば、認証が必要な API も取得できます。
+  - `warmupCache(followReferences: true)` を指定すると、取得した HTML が参照する同一 origin の資源（`<script src>`、`<link href>`、`<img src>`）も続けて取得します。1 段だけ辿り、実行時に JavaScript が組み立てる URL には届きません。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。
 - `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。Web アプリのルートと衝突する場合に変更します。
+- `statusPath` は proxy の状態を JSON で返すパスです。`healthCheckPath` と同じ扱いで、上流へ転送されず統計にも計上されません。空文字列を指定すると無効になります。
+- `enableAdminApi` を `true` にすると、隔離キューの一覧・再送・破棄を HTTP から操作できます。既定は無効です。
 - `healthCheckInterval` に 0 より大きい値を指定すると定期的に稼働確認を行います。既定は無効で、復帰時の確認（`ProxyLifecycleGuard`）を主経路とします。
 - `offlineFallbackHtml` と `gatewayTimeoutHtml` を指定すると、オフライン応答とタイムアウト応答の HTML をアプリ側の文言へ差し替えられます。
 - `upstreamFailureThreshold` は、上流へ到達できない状態が連続した場合に転送を止めるまでの回数です。リンク層は接続済みでも上流が落ちている環境で、リクエストが毎回タイムアウトまで待たされるのを防ぎます。0 を指定すると無効になります。
@@ -434,6 +439,67 @@ for (final result in proxy.recentResendResults) {
 ```
 
 結果は監視用にメモリ上へ保持するだけで、永続化しません。アプリのプロセスが終了すると失われます。
+
+## Web アプリから proxy の状態を見る
+
+未送信件数やオンライン状態は Dart の API でも取得できますが、表示も判断も画面側で行いたい場合は、状態エンドポイントを使うとアプリへ橋渡しを実装せずに済みます。
+
+```js
+const res = await fetch('/__offline_web_proxy/status');
+const status = await res.json();
+
+if (status.queueLength > 0) {
+  // 未送信があるうちは精算させない
+  disableSettlement(`未送信が ${status.queueLength} 件あります`);
+}
+if (!status.isOnline) {
+  // オフラインならレジ認証を出さない
+  hideRegisterAuth();
+}
+```
+
+応答は次の形です。
+
+```json
+{
+  "isOnline": true,
+  "onlineDecisionSource": "connectivity",
+  "isUpstreamReachable": true,
+  "upstreamCircuitState": "closed",
+  "queueLength": 0,
+  "quarantinedCount": 0,
+  "unacknowledgedDroppedCount": 0,
+  "recentResendResults": []
+}
+```
+
+- `GET` のみで、上流へは転送されず、統計にも計上されません。
+- proxy 自身の origin からの要求だけを受け付けます。別 origin の `Origin` を伴う要求には `403` を返し、`Access-Control-Allow-Origin: *` も付与しません。
+- `statusPath` に空文字列を指定すると無効になります。
+
+### 隔離キューを画面から操作する
+
+4xx で隔離された会計は、原因（棚卸の締めなど）を解いてから再送します。操作するのが店舗の人であれば、`enableAdminApi: true` で HTTP からも操作できます。
+
+| メソッド | パス | 用途 |
+| --- | --- | --- |
+| `GET` | `/__offline_web_proxy/admin/quarantine` | 隔離の一覧（本文は返しません） |
+| `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | キューへ戻して再送 |
+| `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | 破棄 |
+
+```js
+const res = await fetch('/__offline_web_proxy/admin/quarantine');
+const { requests } = await res.json();
+
+for (const request of requests) {
+  // 原因を解消したものから再送する
+  await fetch(`/__offline_web_proxy/admin/quarantine/${request.id}/retry`, {
+    method: 'POST',
+  });
+}
+```
+
+**注意**: 既定は無効です。同一 origin 限定とはいえ、これは「同じ origin で動くスクリプトすべてに操作を許す」ことでもあります。CDN など第三者のスクリプトを読み込んだままで有効にすると、そのスクリプトから隔離の破棄まで到達し得ます。`assets/static/` への同梱へ切り替えてから有効にしてください。
 
 ## Cookie API
 
