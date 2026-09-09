@@ -12,6 +12,7 @@ It runs on 127.0.0.1, forwards requests to one configured upstream origin while 
 ## Highlights
 
 - Local proxy server for Flutter WebView
+- Serving of static resources bundled under `assets/static/`, so CDN-hosted files can be shipped inside the app
 - Fallback cache limited to offline and unreachable-upstream recovery
 - Offline queue for POST, PUT, and DELETE requests
 - AES-256 encrypted cookie persistence with restore support
@@ -163,6 +164,7 @@ const config = ProxyConfig(
     'text/html': 3600,
     'text/css': 86400,
     'application/javascript': 86400,
+    'text/javascript': 86400,
     'image/*': 604800,
     'default': 86400,
   },
@@ -172,6 +174,7 @@ const config = ProxyConfig(
     'image/*': 2592000,
     'default': 259200,
   },
+  forceCachePaths: ['/app/**'],
   connectTimeout: Duration(seconds: 5),
   requestTimeout: Duration(seconds: 20),
   upstreamFailureThreshold: 3,
@@ -208,6 +211,7 @@ const config = ProxyConfig(
 Notes:
 
 - `origin` is required and must be an absolute HTTP or HTTPS URL.
+- Settings that name paths (such as `forceCachePaths`) share one glob notation: `*` matches within a single path segment, `**` matches across segments, and a pattern without either is matched exactly. Query strings are not part of the comparison.
 - `port: 0` lets the OS assign a free local port.
 - `preferredPort` tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.
 - `startupPaths` is used by `warmupCache()` for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.
@@ -219,6 +223,12 @@ Notes:
 - `queuedResponse` and `offlineMissResponse` define the responses the proxy generates itself. Both default to JSON so that `response.json()` succeeds in the web app.
 - `dropPolicy` decides what happens to an update request the upstream rejected with 4xx. The default `quarantine` keeps it, body included, so `getQuarantinedRequests()` can surface it for a resend-or-discard decision. `drop` discards it and keeps only a history entry, as before.
 - `enableIdempotencyKey` attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. **Deduplication itself must be implemented on the upstream server.**
+- `forceCachePaths` lists the paths stored even when the response says `Cache-Control: no-store`. On a server that sends `no-store` everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes `no-store` handling proxy-wide.
+  - Even on a match, a response carrying `Set-Cookie` or `Vary`, or a request carrying `Authorization`, is not stored. A skipped response raises `ProxyEventType.cacheSkipped` with the reason, so a path that never becomes available offline can be diagnosed.
+  - For a matching path the upstream `max-age` and `Expires` are ignored and `cacheTtl` decides the expiry, because `no-store` is usually paired with `max-age=0`, which would make the entry stale the moment it is stored.
+  - **The response cache is not encrypted.** The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.
+- `cacheTtl` and `cacheStale` **replace** the default maps rather than merging with them. Always keep a `default` entry so that unlisted content types still resolve.
+- `text/html` defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. **Long offline operation requires tuning both `cacheTtl` and `cacheStale`.** `cacheStale` has no JavaScript entry, so scripts fall back to `default` (3 days).
 
 ### Handling offline responses in the web app
 
@@ -298,6 +308,16 @@ Use cases:
 Relative URLs and scheme-relative URLs depend on `sourceUrl`. If `sourceUrl` is missing, some targets remain unresolved by design.
 At startup, the proxy scans `AssetManifest.json` for files under `assets/static/` and exposes only those entries as proxy-local static resources. For example, `assets/static/app.css` is matched by the proxy URL `/app.css`, while an unlisted `/test.css` still resolves upstream.
 If the manifest cannot be loaded in the current runtime, startup still continues with an empty static-resource index and those URLs resolve upstream instead of failing proxy startup.
+
+A URL that matches the index is answered with the bundled asset itself, so a file previously loaded from a CDN can ship inside the app and be served from a same-origin URL such as `/js/haori.iife.js`.
+
+```
+assets/static/js/haori.iife.js  →  http://127.0.0.1:<port>/js/haori.iife.js
+```
+
+- Only `GET` and `HEAD` are served this way. An update request on the same path is forwarded upstream instead
+- An `ETag` derived from the content and `Cache-Control: no-cache` are attached, and a matching `If-None-Match` is answered with `304`
+- If the asset is indexed but cannot be read, the proxy does not answer `404`; it forwards the request upstream
 For upstream `301`, `302`, `303`, `307`, and `308` responses returned to WebView, the proxy resolves `Location` explicitly instead of relying on `HttpClient` auto-follow. Same-origin redirects are rewritten to proxy URLs, relative `Location` values are resolved against the upstream request URL, and external-launch redirects are surfaced through `ProxyEventType.redirectHandled`.
 
 ## Connection Recovery APIs
@@ -497,7 +517,7 @@ Reference it from `android/app/src/main/AndroidManifest.xml`:
 
 - One `OfflineWebProxy` instance supports one configured upstream origin.
 - `ProxyConfig` is the supported configuration path. External YAML configuration loading is not implemented.
-- Static-resource serving from `assets/static/` is not implemented yet. Only files discovered from `AssetManifest.json` under `assets/static/` are classified as static resources, and the current server response is a 404 placeholder.
+- Static resources under `assets/static/` are served for `GET` and `HEAD` only. An update request on the same path is forwarded upstream instead. Range requests are not supported.
 - If `AssetManifest.json` or its runtime equivalent cannot be loaded, the proxy continues with no indexed static resources and falls back to normal upstream resolution.
 
 ## Example and Reference

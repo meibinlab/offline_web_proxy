@@ -24,12 +24,31 @@ const Map<String, List<String>> _mockAssetManifest = {
 };
 const StringCodec _stringCodec = StringCodec();
 
+/// 同梱アセット本体のモック内容。
+///
+/// `assets/static/app.js` と `assets/static/js/vendor/runtime.js` はあえて
+/// 含めない。一覧に載っていても実体を読めない場合に上流へフォールバック
+/// することを検証するために使う。
+const Map<String, String> _mockAssetContents = {
+  'assets/static/app.css': 'body { color: #000; }',
+  'assets/static/css/app.css': '.nested { color: #111; }',
+  'packages/offline_web_proxy/assets/static/pkg/package.css':
+      '.pkg { color: #222; }',
+};
+
 void _installMockAssetManifestHandler(Map<String, List<String>>? manifest) {
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMessageHandler('flutter/assets', (ByteData? message) async {
     final assetKey = _stringCodec.decodeMessage(message);
     if (assetKey == 'AssetManifest.json' && manifest != null) {
       return _stringCodec.encodeMessage(jsonEncode(manifest));
+    }
+
+    final assetContent = _mockAssetContents[assetKey];
+    if (assetContent != null) {
+      return ByteData.sublistView(
+        Uint8List.fromList(utf8.encode(assetContent)),
+      );
     }
     return null;
   });
@@ -1513,8 +1532,8 @@ void main() {
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 一覧登録された app.css への実リクエストは静的リソース応答になること
-    test('should return static placeholder for indexed static resource request',
+    /// 一覧登録された app.css への実リクエストは同梱アセットを返すこと
+    test('should serve bundled asset for indexed static resource request',
         () async {
       await HttpOverrides.runZoned(() async {
         final proxyPort = await proxy.start(
@@ -1528,18 +1547,22 @@ void main() {
           final response = await request.close();
           final body = await response.transform(utf8.decoder).join();
 
-          expect(response.statusCode, equals(HttpStatus.notFound));
+          expect(response.statusCode, equals(HttpStatus.ok));
           expect(response.headers.value('x-static-resource'), equals('true'));
-          expect(body, contains('assets/static/app.css'));
+          expect(response.headers.contentType?.mimeType, equals('text/css'));
+          expect(body, equals('body { color: #000; }'));
+          // アプリ更新でアセットが入れ替わるため毎回検証させること
+          expect(response.headers.value('cache-control'), equals('no-cache'));
+          expect(response.headers.value('etag'), isNotNull);
         } finally {
           client.close(force: true);
         }
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// 一覧登録された入れ子の css/app.css への実リクエストは静的リソース応答になること
+    /// 一覧登録された入れ子の css/app.css への実リクエストも配信されること
     test(
-        'should return static placeholder for indexed nested static resource request',
+        'should serve bundled asset for indexed nested static resource request',
         () async {
       await HttpOverrides.runZoned(() async {
         final proxyPort = await proxy.start(
@@ -1553,18 +1576,18 @@ void main() {
           final response = await request.close();
           final body = await response.transform(utf8.decoder).join();
 
-          expect(response.statusCode, equals(HttpStatus.notFound));
+          expect(response.statusCode, equals(HttpStatus.ok));
           expect(response.headers.value('x-static-resource'), equals('true'));
-          expect(body, contains('assets/static/css/app.css'));
+          expect(body, equals('.nested { color: #111; }'));
         } finally {
           client.close(force: true);
         }
       }, createHttpClient: _RealHttpOverrides().createHttpClient);
     });
 
-    /// package prefix 由来の package.css への実リクエストは静的リソース応答になること
+    /// package prefix 由来の package.css への実リクエストも配信されること
     test(
-        'should return static placeholder for package prefixed static resource request',
+        'should serve bundled asset for package prefixed static resource request',
         () async {
       await HttpOverrides.runZoned(() async {
         final proxyPort = await proxy.start(
@@ -1578,13 +1601,137 @@ void main() {
           final response = await request.close();
           final body = await response.transform(utf8.decoder).join();
 
-          expect(response.statusCode, equals(HttpStatus.notFound));
+          expect(response.statusCode, equals(HttpStatus.ok));
           expect(response.headers.value('x-static-resource'), equals('true'));
-          expect(
-            body,
-            contains(
-                'packages/offline_web_proxy/assets/static/pkg/package.css'),
-          );
+          expect(body, equals('.pkg { color: #222; }'));
+        } finally {
+          client.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 同じ ETag を提示した再取得は 304 になること
+    test('should answer 304 when if-none-match matches the asset etag',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final proxyPort = await proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'),
+        );
+
+        final client = HttpClient();
+        try {
+          final firstRequest = await client
+              .getUrl(Uri.parse('http://127.0.0.1:$proxyPort/app.css'));
+          final firstResponse = await firstRequest.close();
+          await firstResponse.drain<void>();
+          final entityTag = firstResponse.headers.value('etag');
+          expect(entityTag, isNotNull);
+
+          final secondRequest = await client
+              .getUrl(Uri.parse('http://127.0.0.1:$proxyPort/app.css'));
+          secondRequest.headers.set('if-none-match', entityTag!);
+          final secondResponse = await secondRequest.close();
+          final body = await secondResponse.transform(utf8.decoder).join();
+
+          expect(secondResponse.statusCode, equals(HttpStatus.notModified));
+          expect(body, isEmpty);
+        } finally {
+          client.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// HEAD は本文を持たない静的リソース応答になること
+    test('should answer head request for static resource without body',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final proxyPort = await proxy.start(
+          config: const ProxyConfig(origin: 'https://example.com'),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .headUrl(Uri.parse('http://127.0.0.1:$proxyPort/app.css'));
+          final response = await request.close();
+          final body = await response.transform(utf8.decoder).join();
+
+          expect(response.statusCode, equals(HttpStatus.ok));
+          expect(response.headers.value('x-static-resource'), equals('true'));
+          expect(body, isEmpty);
+        } finally {
+          client.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 同名パスへの更新系は静的扱いにせず上流へ転送すること
+    test('should forward non read request on static path to upstream',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final requestedPaths = <String>[];
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          requestedPaths.add(request.uri.path);
+          await request.drain<void>();
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..write('upstream');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+          ),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .postUrl(Uri.parse('http://127.0.0.1:$proxyPort/app.css'));
+          request.write('payload');
+          final response = await request.close();
+          await response.drain<void>();
+
+          expect(requestedPaths, equals(['/app.css']));
+        } finally {
+          client.close(force: true);
+        }
+      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+    });
+
+    /// 一覧にあってもアセットを読めない場合は上流へ転送すること
+    test('should forward to upstream when the indexed asset cannot be loaded',
+        () async {
+      await HttpOverrides.runZoned(() async {
+        final requestedPaths = <String>[];
+        upstreamServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        upstreamServer!.listen((HttpRequest request) async {
+          requestedPaths.add(request.uri.path);
+          request.response
+            ..statusCode = HttpStatus.ok
+            ..headers.contentType = ContentType('application', 'javascript')
+            ..write('console.log("upstream");');
+          await request.response.close();
+        });
+
+        final proxyPort = await proxy.start(
+          config: ProxyConfig(
+            origin: 'http://127.0.0.1:${upstreamServer!.port}',
+          ),
+        );
+
+        final client = HttpClient();
+        try {
+          final request = await client
+              .getUrl(Uri.parse('http://127.0.0.1:$proxyPort/app.js'));
+          final response = await request.close();
+          final body = await response.transform(utf8.decoder).join();
+
+          expect(response.statusCode, equals(HttpStatus.ok));
+          expect(body, equals('console.log("upstream");'));
+          expect(requestedPaths, equals(['/app.js']));
         } finally {
           client.close(force: true);
         }

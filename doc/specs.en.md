@@ -21,11 +21,32 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 - **Cache**: Store successful GET responses in file-based storage. Do not use proxy cache to suppress online requests, and limit its use to offline or upstream-unreachable fallback
 - **Queue**: Manage POST/PUT/DELETE requests in FIFO (First In First Out). Send sequentially when network recovers
 - **Offline Response**: Return cache when cache hit, display fallback page when uncached
-- **Static Resources**: Index files under `assets/static/` that are declared in `pubspec.yaml` and listed in `AssetManifest.json`. The current response is still the 404 placeholder
+- **Static Resources**: Index files under `assets/static/` that are declared in `pubspec.yaml` and listed in `AssetManifest.json`, and serve them as bundled assets
 
 ### Proxy Target
 
 Relays to the upstream origin server (e.g., https://sample.com). Supports a single origin server.
+
+### Path Pattern Notation Used by Configuration
+
+Every `ProxyConfig` setting that names paths shares one glob notation. Accepting raw regular expressions would let a configuration mistake stall the whole proxy, so the notation is deliberately limited to the following.
+
+| Notation | Meaning |
+| --- | --- |
+| `*` | Any text within one path segment (never crosses `/`) |
+| `**` | Any text, including `/` |
+| (no metacharacter) | Exact match |
+
+- Only the path is compared. Query strings and fragments are excluded
+- Comparison is case sensitive
+- A missing leading `/` is added to both the pattern and the path before comparing
+- Patterns are compiled once at startup, never per request
+
+```
+/api/registers/auth.json … matches only /api/registers/auth.json
+/js/*                   … matches /js/haori.js but not /js/vendor/haori.js
+/js/**                  … also matches /js/vendor/haori.js
+```
 
 ## [2] Port and Connection Specifications
 
@@ -154,8 +175,19 @@ Request: http://127.0.0.1:8080/app.css
            ↓
 Classification: static resource
            ↓
-Current behavior: Return the 404 placeholder response
+Serve the bundled asset with 200
 ```
+
+### Serving Rules
+
+- **Methods**: `GET` and `HEAD` only. An update request on the same path is not treated as static and is forwarded upstream
+- **Content-Type**: Derived from the file extension
+- **ETag**: The first 16 hex digits of the asset's SHA-256. A matching `If-None-Match` is answered with `304`
+- **Cache-Control**: `no-cache`, so the WebView revalidates every time; an app update replaces the asset
+- **When the asset cannot be read**: The proxy does not answer `404`; it falls back to forwarding the request upstream
+- **Marker header**: `X-Static-Resource: true` is always attached
+- **ETag computation**: Bundled assets do not change while the process runs, so the first computation is kept per asset key
+- **HEAD limits**: No body is returned, so `Content-Length` is 0. Range requests are not supported
 
 ### URL Normalization Processing
 
@@ -168,7 +200,7 @@ Current behavior: Return the 404 placeholder response
 
 1. At startup, read `AssetManifest.json` or the runtime-equivalent manifest and convert files under `assets/static/` into proxy URLs
 2. Normalize the incoming request URL
-3. If the URL is in the index: Return the 404 placeholder response
+3. If the method is `GET` / `HEAD` and the URL is in the index: Serve the bundled asset (fall through to 4 when it cannot be read)
 4. Otherwise: Proxy forward to upstream or resolve as a proxy URL
 
 ### Performance Optimization
@@ -180,6 +212,7 @@ Current behavior: Return the 404 placeholder response
 
 - **Path Restriction**: Only URLs derived from files under `assets/static/` are treated as proxy-local static resources
 - **Misclassification Prevention**: Prefer upstream forwarding for URLs that are not present in the startup index instead of relying on file extensions alone
+- **Path Traversal Prevention**: What gets served is decided by an exact match against the startup index. The request path is never joined onto a filesystem path, so a URL containing `../` simply misses the index and falls through to upstream resolution
 
 ### Automatic Content-Type Detection
 
@@ -333,10 +366,11 @@ The proxy guarantees only that the same operation carries the same key. **Dedupl
 #### Storage Policy
 
 - **Stored responses**: Successful GET responses are eligible for storage
-- **no-store**: Do not persist the response
+- **no-store**: Do not persist the response, unless the path matches `ProxyConfig.forceCachePaths` (see below)
 - **max-age / s-maxage / Expires**: Used for internal TTL calculation of cache entries
 - **no-cache / must-revalidate**: Retained as metadata for saved entries, but not used by the proxy to suppress online forwarding
 - **default TTL**: Apply the configured Content-Type-based default TTL when none of the above are present
+- **Storage failure**: A response that was received from the upstream is returned even when it cannot be stored. The response itself is valid, so a storage failure never discards it; the failure is reported through `ProxyEventType.errorOccurred`
 
 #### Fallback Eligibility
 
@@ -347,12 +381,39 @@ The proxy guarantees only that the same operation carries the same key. **Dedupl
 5. **When expired**: Do not return entries whose stale period has also elapsed
 6. **Upstream unreachable with no eligible cache**: GET/HEAD returns 504 (the body can be replaced with `ProxyConfig.gatewayTimeoutHtml`). Mutating requests are queued as before
 
+#### Storing Despite no-store (forceCachePaths)
+
+A web system that sends `no-store` on every response leaves the default policy with nothing to serve offline. Paths listed in `ProxyConfig.forceCachePaths` are stored even when the response says `no-store`.
+
+- **Default**: Empty. Without an entry, `no-store` keeps its usual meaning
+- **No global switch**: Storage has to be opted into per path; `no-store` handling cannot be relaxed proxy-wide
+- **Scope**: Only `GET` responses with status 200
+- **Notation**: See "Path Pattern Notation Used by Configuration" in section [1]
+
+Even on a match, a response is skipped when keeping it would leak or corrupt per-user state:
+
+| Skip condition | Reason |
+| --- | --- |
+| The response carries `Set-Cookie` | The session would persist on the device and be replayed later |
+| The response carries `Vary` | The cache key is the normalized URL alone and cannot honour request-header variance |
+| The request carried `Authorization` | The response belongs to one user |
+
+A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-cookie` / `vary` / `authorization`), so a path that never becomes available offline can be diagnosed. A response without `no-store` is decided by the ordinary storage policy, so neither the check nor the event applies to it.
+
+**Freshness**: A server that sends `no-store` usually sends something like `no-store, max-age=0, must-revalidate`. Honouring those directives would make the entry stale the moment it is stored, leaving only the stale window for offline use. Since the decision to store was already overridden by configuration, the expiry follows configuration too: for a matching path, `s-maxage`, `max-age` and `Expires` are ignored and `cacheTtl` decides the TTL.
+
+**Storage note**: `no-store` exists to ask that a response never be written to storage. The response cache is not encrypted, so the body of a listed path stays on the device in the clear. Weigh what the screen contains, and the impact of a lost device, before listing it.
+
 #### Cache Expiration Calculation Priority
 
 1. **Cache-Control: s-maxage** (treated as proxy-side TTL)
 2. **Cache-Control: max-age**
 3. **Expires** header
 4. **Default TTL in configuration file**
+
+A value that cannot be read as a date, such as `Expires: 0`, is ignored and the default TTL applies. Letting the parse failure escape the storage step would turn an upstream 200 into a forwarding failure, answering 504 and counting against upstream reachability.
+
+For a path matching `ProxyConfig.forceCachePaths`, steps 1 to 3 are skipped and the default TTL in step 4 applies.
 
 #### Conditional Request Support
 

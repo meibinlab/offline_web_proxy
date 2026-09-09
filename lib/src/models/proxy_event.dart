@@ -48,6 +48,9 @@ enum ProxyEventType {
   /// Staleキャッシュ使用
   cacheStaleUsed,
 
+  /// 保存対象のパスに一致したが、安全のため保存を見送った
+  cacheSkipped,
+
   /// リクエストキューイング
   requestQueued,
 

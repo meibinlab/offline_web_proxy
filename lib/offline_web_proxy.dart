@@ -9,7 +9,7 @@
 /// * **インテリジェントキャッシング**: RFC準拠のキャッシュ制御とオフライン戦略
 /// * **リクエストキューイング**: オフライン時のPOST/PUT/DELETEリクエストの自動キュー
 /// * **Cookie管理**: AES-256暗号化による安全なCookie永続化
-/// * **静的リソース一覧**: `assets/static/` 配下を起動時に走査して proxy URL へ対応付け
+/// * **静的リソース配信**: `assets/static/` 配下を起動時に走査し、同梱アセットとして配信
 /// * **シームレスなオフライン対応**: 透過的なオンライン/オフライン切り替え
 ///
 /// ## クイックスタート
@@ -68,6 +68,7 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
 
 import 'src/exceptions/exceptions.dart';
+import 'src/matching/path_pattern.dart';
 import 'src/models/cache_entry.dart';
 import 'src/models/cache_stats.dart';
 import 'src/models/cookie_header_builder.dart';
@@ -370,6 +371,15 @@ class OfflineWebProxy {
   /// 起動時に構築した静的リソースの proxy URL と asset key の対応表。
   final Map<String, String> _staticResourceAssetMap = {};
 
+  /// 起動時に構築した、`no-store` を無視して保存するパスのパターン一覧。
+  /// リクエストのたびに正規表現を組み立てないよう保持する。
+  List<PathPattern> _forceCachePatterns = const [];
+
+  /// asset key ごとに算出した静的リソースの `ETag`。
+  /// 同梱アセットはプロセス実行中に変化しないため、要求のたびに
+  /// 全バイトをハッシュし直さないよう保持する。
+  final Map<String, String> _staticResourceEntityTags = {};
+
   /// 上流サーバへの同時接続数を制限するセマフォ。
   /// WebView が短時間に多数のリクエストを投げた場合にネイティブ側のソケット枯渇を防ぐ。
   final Semaphore _upstreamSemaphore = Semaphore(50);
@@ -454,6 +464,7 @@ class OfflineWebProxy {
       // 設定を読み込み
       _config = config ?? await _loadDefaultConfig();
       _validateHealthCheckPath();
+      _compileConfiguredPatterns();
       _resetRecoveryState();
 
       // ストレージを初期化
@@ -558,6 +569,8 @@ class OfflineWebProxy {
       _httpClient?.close(force: true);
       _httpClient = null;
       _staticResourceAssetMap.clear();
+      _staticResourceEntityTags.clear();
+      _forceCachePatterns = const [];
     } catch (e) {
       failure = e;
     } finally {
@@ -877,6 +890,15 @@ class OfflineWebProxy {
         null,
       );
     }
+  }
+
+  /// 設定に含まれるパスパターンを起動時に組み立てます。
+  ///
+  /// リクエストのたびに正規表現を生成しないよう、`start()` で一度だけ
+  /// 変換して保持します。
+  void _compileConfiguredPatterns() {
+    _forceCachePatterns =
+        PathPattern.compileAll(_config?.forceCachePaths ?? const []);
   }
 
   /// 復旧対象として扱える URL かどうかを返します。
@@ -1422,6 +1444,13 @@ class OfflineWebProxy {
                 response.statusCode,
                 response.headers,
                 response.bodyBytes,
+                // ウォームアップも同じ判定で保存し、転送経路と挙動を揃える
+                allowNoStore: _resolveForceCacheAllowance(
+                  path: path,
+                  requestHeaders: const {},
+                  responseHeaders: response.headers,
+                  eventUrl: upstreamUri.toString(),
+                ),
               );
             }
             final duration = DateTime.now().difference(entryStartTime);
@@ -2698,9 +2727,15 @@ class OfflineWebProxy {
       return await _handleWebStorageBridgeRequest(request);
     }
 
-    // 起動時に構築した静的リソース一覧を先に確認する
-    if (await _isStaticResource(path)) {
-      return await _serveStaticResource(path);
+    // 起動時に構築した静的リソース一覧を先に確認する。
+    // GET と HEAD 以外は同名パスでも上流の処理が必要なため対象にしない。
+    if (_isStaticResourceServableMethod(request.method) &&
+        await _isStaticResource(path)) {
+      final staticResponse = await _serveStaticResource(request, path);
+      if (staticResponse != null) {
+        return staticResponse;
+      }
+      // 一覧にあってもアセットを読めない場合は 404 を返さず上流へ委ねる
     }
 
     // 接続状態と上流到達性に基づいて処理
@@ -2805,32 +2840,106 @@ class OfflineWebProxy {
     return _isIndexedStaticResourcePath(path);
   }
 
-  /// 静的リソースを配信します。
+  /// 静的リソースとして配信できるメソッドかどうかを返します。
   ///
-  /// 一覧に一致した静的リソース URL に対してプレースホルダレスポンスを返却します。
+  /// [method] 判定するHTTPメソッド。
   ///
+  /// Returns: `GET` または `HEAD` の場合は `true`。
+  bool _isStaticResourceServableMethod(String method) {
+    final normalizedMethod = method.toUpperCase();
+    return normalizedMethod == 'GET' || normalizedMethod == 'HEAD';
+  }
+
+  /// 同梱アセットを静的リソースとして配信します。
+  ///
+  /// 一覧に一致した URL に対して、`assets/static/` 配下のファイルを返します。
+  /// アプリの更新でアセットが入れ替わるため、内容から算出した `ETag` を付けて
+  /// 毎回検証させます。
+  ///
+  /// [request] 受信したHTTPリクエスト。
   /// [path] 配信するファイルのパス。
   ///
-  /// Returns: 静的リソースのHTTPレスポンス。
-  Future<shelf.Response> _serveStaticResource(String path) async {
-    try {
-      final assetPath =
-          _staticResourceAssetMap[_normalizeStaticResourceRequestPath(path)] ??
-              path;
-      final mimeType = _getMimeType(path);
-
-      return shelf.Response.notFound(
-        '静的リソースの配信は未実装です。アセットパス: $assetPath',
-        headers: {
-          'Content-Type': mimeType,
-          'X-Static-Resource': 'true',
-        },
-      );
-    } catch (e) {
-      return shelf.Response.internalServerError(
-        body: '静的リソースの配信に失敗しました: $e',
-      );
+  /// Returns: 静的リソースのHTTPレスポンス。アセットを読み込めない場合は
+  ///   `null` を返し、呼び出し側で上流への転送へ委ねます。
+  Future<shelf.Response?> _serveStaticResource(
+    shelf.Request request,
+    String path,
+  ) async {
+    final assetKey =
+        _staticResourceAssetMap[_normalizeStaticResourceRequestPath(path)];
+    if (assetKey == null) {
+      return null;
     }
+
+    final Uint8List assetBytes;
+    try {
+      final assetData = await rootBundle.load(assetKey);
+      assetBytes = assetData.buffer.asUint8List(
+        assetData.offsetInBytes,
+        assetData.lengthInBytes,
+      );
+    } catch (_) {
+      // 一覧に載っていても実体を読めない場合があるため、上流解決へ戻す
+      return null;
+    }
+
+    final entityTag = _resolveStaticResourceEntityTag(assetKey, assetBytes);
+    final headers = <String, String>{
+      'X-Static-Resource': 'true',
+      'ETag': entityTag,
+      // アプリ更新で内容が変わるため、WebView 側にも毎回検証させる
+      'Cache-Control': 'no-cache',
+    };
+
+    if (_matchesIfNoneMatch(request, entityTag)) {
+      return shelf.Response.notModified(headers: headers);
+    }
+
+    final responseHeaders = <String, String>{
+      'Content-Type': _getMimeType(path),
+      ...headers,
+    };
+
+    if (request.method.toUpperCase() == 'HEAD') {
+      return shelf.Response.ok(null, headers: responseHeaders);
+    }
+
+    return shelf.Response.ok(assetBytes, headers: responseHeaders);
+  }
+
+  /// 静的リソースの `ETag` を返します。
+  ///
+  /// 同梱アセットはプロセス実行中に変化しないため、初回に算出した値を
+  /// asset key ごとに保持し、以降の要求ではハッシュを計算し直しません。
+  ///
+  /// [assetKey] アセットの識別子。
+  /// [assetBytes] アセットのバイト列。
+  ///
+  /// Returns: 引用符で囲んだ `ETag` の値。
+  String _resolveStaticResourceEntityTag(
+      String assetKey, Uint8List assetBytes) {
+    return _staticResourceEntityTags.putIfAbsent(assetKey, () {
+      final digest = sha256.convert(assetBytes).toString();
+      return '"${digest.substring(0, 16)}"';
+    });
+  }
+
+  /// `If-None-Match` が指定の `ETag` に一致するかどうかを返します。
+  ///
+  /// [request] 受信したHTTPリクエスト。
+  /// [entityTag] 比較対象の `ETag`。
+  ///
+  /// Returns: 一致する場合は `true`。
+  bool _matchesIfNoneMatch(shelf.Request request, String entityTag) {
+    final ifNoneMatch = request.headers['if-none-match'];
+    if (ifNoneMatch == null || ifNoneMatch.isEmpty) {
+      return false;
+    }
+
+    return ifNoneMatch
+        .split(',')
+        .map((value) => value.trim())
+        .any((value) => value == entityTag || value == '*');
   }
 
   /// HTMLレスポンスに WebStorage 継承用スクリプトを注入します。
@@ -2955,8 +3064,27 @@ window.__offline_web_proxy_web_storage_bridge = {
         final hasRange =
             request.headers.keys.any((k) => k.toLowerCase() == 'range');
         if (!hasRange && result.statusCode == 200) {
-          await _cacheResponseBytes(
-              cacheKey, result.statusCode, result.headers, result.bodyBytes);
+          // 保存できなくても応答自体は成立しているため、
+          // 失敗を転送処理へ伝播させず、受け取れている応答をそのまま返す
+          try {
+            await _cacheResponseBytes(
+              cacheKey,
+              result.statusCode,
+              result.headers,
+              result.bodyBytes,
+              allowNoStore: _resolveForceCacheAllowance(
+                path: request.url.path,
+                requestHeaders: request.headers,
+                responseHeaders: result.headers,
+                eventUrl: request.url.toString(),
+              ),
+            );
+          } catch (e) {
+            _emitEvent(ProxyEventType.errorOccurred, request.url.toString(), {
+              'phase': 'cacheResponse',
+              'error': e.toString(),
+            });
+          }
         }
       }
 
@@ -4042,12 +4170,18 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// レスポンスをキャッシュに保存します（バイト配列版）。
   ///
   /// [cacheKey] キャッシュキー。
-  /// [response] キャッシュするHTTPレスポンス。
+  /// [statusCode] 上流レスポンスのステータスコード。
+  /// [headers] 上流レスポンスのヘッダ。
   /// [bodyBytes] レスポンスボディのバイト配列。
+  /// [allowNoStore] `Cache-Control: no-store` を無視して保存する場合は `true`。
+  ///   [ProxyConfig.forceCachePaths] に一致し、かつ安全側の除外条件に
+  ///   該当しない場合にのみ指定します。
   Future<void> _cacheResponseBytes(String cacheKey, int statusCode,
-      Map<String, String> headers, List<int> bodyBytes) async {
+      Map<String, String> headers, List<int> bodyBytes,
+      {bool allowNoStore = false}) async {
     final sanitizedHeaders = _sanitizeResponseHeaders(headers);
-    if (!_shouldPersistResponse(statusCode, sanitizedHeaders)) {
+    if (!_shouldPersistResponse(statusCode, sanitizedHeaders,
+        allowNoStore: allowNoStore)) {
       return;
     }
     final contentType =
@@ -4058,9 +4192,11 @@ window.__offline_web_proxy_web_storage_bridge = {
       // バイナリも含めてそのまま保存（UTF-8変換は高コストで破損も起こし得る）
       'body': Uint8List.fromList(bodyBytes),
       'createdAt': DateTime.now().toIso8601String(),
-      'expiresAt':
-          _calculateExpirationFromHeaders(sanitizedHeaders, contentType)
-              .toIso8601String(),
+      'expiresAt': _calculateExpirationFromHeaders(
+        sanitizedHeaders,
+        contentType,
+        ignoreUpstreamFreshness: allowNoStore,
+      ).toIso8601String(),
       'contentType': contentType,
       'sizeBytes': bodyBytes.length,
     };
@@ -4069,25 +4205,44 @@ window.__offline_web_proxy_web_storage_bridge = {
   }
 
   /// ヘッダからキャッシュ有効期限を算出します。
+  ///
+  /// [headers] サニタイズ済みの上流レスポンスヘッダ。
+  /// [contentType] レスポンスの Content-Type。
+  /// [ignoreUpstreamFreshness] 上流の鮮度指示を使わない場合は `true`。
+  ///   `no-store` を無視して保存する応答は `no-store, max-age=0` のように
+  ///   保存させない意図の指示を伴うことが多く、そのまま採用すると保存直後に
+  ///   stale となり、オフラインで使える期間が stale 期間だけになります。
+  ///   保存可否を設定側で上書きした以上、有効期限も設定側の TTL に従います。
+  ///
+  /// Returns: キャッシュ有効期限の日時。
   DateTime _calculateExpirationFromHeaders(
-      Map<String, String> headers, String contentType) {
+      Map<String, String> headers, String contentType,
+      {bool ignoreUpstreamFreshness = false}) {
     final now = DateTime.now();
-    final cacheControl = headers['cache-control'];
 
-    final sMaxAge = _extractCacheControlSeconds(cacheControl, 's-maxage');
-    if (sMaxAge != null) {
-      return now.add(Duration(seconds: sMaxAge));
-    }
+    if (!ignoreUpstreamFreshness) {
+      final cacheControl = headers['cache-control'];
 
-    final maxAge = _extractCacheControlSeconds(cacheControl, 'max-age');
-    if (maxAge != null) {
-      return now.add(Duration(seconds: maxAge));
-    }
+      final sMaxAge = _extractCacheControlSeconds(cacheControl, 's-maxage');
+      if (sMaxAge != null) {
+        return now.add(Duration(seconds: sMaxAge));
+      }
 
-    final expiresHeader = headers['expires'];
-    if (expiresHeader != null) {
-      final expiresAt = HttpDate.parse(expiresHeader);
-      return expiresAt.isAfter(now) ? expiresAt : now;
+      final maxAge = _extractCacheControlSeconds(cacheControl, 'max-age');
+      if (maxAge != null) {
+        return now.add(Duration(seconds: maxAge));
+      }
+
+      final expiresHeader = headers['expires'];
+      if (expiresHeader != null) {
+        // `Expires: 0` のように日時として解釈できない値を返すサーバがあるため、
+        // 解析に失敗しても保存処理を中断せず既定 TTL へ委ねる。
+        // ここで例外が伝播すると、上流が返した 200 が転送失敗として扱われる。
+        final expiresAt = _tryParseHttpDate(expiresHeader);
+        if (expiresAt != null) {
+          return expiresAt.isAfter(now) ? expiresAt : now;
+        }
+      }
     }
 
     // デフォルトTTLを使用
@@ -4100,9 +4255,20 @@ window.__offline_web_proxy_web_storage_bridge = {
   }
 
   /// キャッシュ保存可否を判定します。
-  bool _shouldPersistResponse(int statusCode, Map<String, String> headers) {
+  ///
+  /// [statusCode] 上流レスポンスのステータスコード。
+  /// [headers] サニタイズ済みの上流レスポンスヘッダ。
+  /// [allowNoStore] `Cache-Control: no-store` を無視する場合は `true`。
+  ///
+  /// Returns: 保存してよい場合は `true`。
+  bool _shouldPersistResponse(int statusCode, Map<String, String> headers,
+      {bool allowNoStore = false}) {
     if (statusCode != HttpStatus.ok) {
       return false;
+    }
+
+    if (allowNoStore) {
+      return true;
     }
 
     final cacheControl = headers['cache-control']?.toLowerCase();
@@ -4111,6 +4277,112 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
 
     return true;
+  }
+
+  /// `no-store` を無視して保存してよいかどうかを判定します。
+  ///
+  /// [ProxyConfig.forceCachePaths] に一致していても、利用者ごとに異なる応答や
+  /// URL だけでは復元できない応答は保存しません。指定したのにオフラインで
+  /// 使えない原因を追えるよう、除外した場合は
+  /// [ProxyEventType.cacheSkipped] を理由付きで発行します。
+  ///
+  /// [path] リクエストのパス。
+  /// [requestHeaders] リクエストヘッダ。
+  /// [responseHeaders] 上流レスポンスのヘッダ。
+  /// [eventUrl] イベントに載せる URL。
+  ///
+  /// Returns: `no-store` を無視して保存してよい場合は `true`。
+  bool _resolveForceCacheAllowance({
+    required String path,
+    required Map<String, String> requestHeaders,
+    required Map<String, String> responseHeaders,
+    required String eventUrl,
+  }) {
+    // 既定では設定が空のため、ヘッダを走査する前に打ち切る
+    if (_forceCachePatterns.isEmpty) {
+      return false;
+    }
+
+    // no-store が無ければ通常の保存判定で足りるため、判定も通知も行わない
+    final cacheControl =
+        _getHeaderValueIgnoreCase(responseHeaders, 'cache-control')
+            ?.toLowerCase();
+    if (cacheControl == null || !cacheControl.contains('no-store')) {
+      return false;
+    }
+
+    if (!_matchesForceCachePath(path)) {
+      return false;
+    }
+
+    final skipReason = _findForceCacheSkipReason(
+      requestHeaders: requestHeaders,
+      responseHeaders: responseHeaders,
+    );
+    if (skipReason != null) {
+      _emitEvent(ProxyEventType.cacheSkipped, eventUrl, {
+        'reason': skipReason,
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  /// パスが [ProxyConfig.forceCachePaths] に一致するかどうかを返します。
+  ///
+  /// [path] 判定するリクエストのパス。
+  ///
+  /// Returns: 一致する場合は `true`。
+  bool _matchesForceCachePath(String path) {
+    if (_forceCachePatterns.isEmpty) {
+      return false;
+    }
+
+    // 照合対象はパスのみのため、クエリとフラグメントを落とす
+    final pathOnly = path.split('?').first.split('#').first;
+    return _forceCachePatterns.any((pattern) => pattern.matches(pathOnly));
+  }
+
+  /// 保存を見送る理由を返します。
+  ///
+  /// [requestHeaders] リクエストヘッダ。
+  /// [responseHeaders] 上流レスポンスのヘッダ。
+  ///
+  /// Returns: 見送る理由。保存してよい場合は `null`。
+  String? _findForceCacheSkipReason({
+    required Map<String, String> requestHeaders,
+    required Map<String, String> responseHeaders,
+  }) {
+    // セッションを端末へ残し、復元時にそのまま返してしまうため保存しない
+    if (_getHeaderValueIgnoreCase(responseHeaders, 'set-cookie') != null) {
+      return 'set-cookie';
+    }
+
+    // キャッシュキーは URL のみで、リクエストヘッダ差を区別できない
+    if (_getHeaderValueIgnoreCase(responseHeaders, 'vary') != null) {
+      return 'vary';
+    }
+
+    // 利用者ごとに異なる応答を共有の保存領域へ書かない
+    if (_getHeaderValueIgnoreCase(requestHeaders, 'authorization') != null) {
+      return 'authorization';
+    }
+
+    return null;
+  }
+
+  /// HTTP 日時を解析します。
+  ///
+  /// [value] 解析する `Expires` などのヘッダ値。
+  ///
+  /// Returns: 解析できた日時。解釈できない場合は `null`。
+  DateTime? _tryParseHttpDate(String value) {
+    try {
+      return HttpDate.parse(value);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Cache-Control から秒数指定ディレクティブを抽出します。
@@ -5397,6 +5669,7 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// 起動時に AssetManifest を走査して静的リソース一覧を構築します。
   Future<void> _initializeStaticResourceIndex() async {
     _staticResourceAssetMap.clear();
+    _staticResourceEntityTags.clear();
 
     try {
       for (final key in await _loadStaticResourceAssetKeys()) {
