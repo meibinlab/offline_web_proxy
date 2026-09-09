@@ -87,8 +87,13 @@ class ProxyConfig {
   /// * `'text/html'`: 3600 (1 hour)
   /// * `'text/css'`: 86400 (24 hours)
   /// * `'application/javascript'`: 86400 (24 hours)
+  /// * `'text/javascript'`: 86400 (24 hours)
   /// * `'image/*'`: 604800 (7 days)
   /// * `'default'`: 86400 (24 hours)
+  ///
+  /// **Note**: Supplying this map replaces the defaults entirely; the two are
+  /// not merged. Keep a `'default'` entry so that unlisted content types still
+  /// resolve.
   final Map<String, int> cacheTtl;
 
   /// Stale period settings per content type in seconds.
@@ -105,7 +110,48 @@ class ProxyConfig {
   /// * `'text/css'`: 604800 (7 days)
   /// * `'image/*'`: 2592000 (30 days)
   /// * `'default'`: 259200 (3 days)
+  ///
+  /// **Note**: There is no JavaScript entry, so scripts fall back to
+  /// `'default'`. Supplying this map replaces the defaults entirely.
   final Map<String, int> cacheStale;
+
+  /// Paths whose responses are cached even when they carry
+  /// `Cache-Control: no-store`.
+  ///
+  /// Many existing web systems send `no-store` on every response, which leaves
+  /// the proxy with nothing to serve offline. Listing the paths a screen needs
+  /// makes those responses cacheable without weakening the rule everywhere:
+  /// there is deliberately no switch that disables `no-store` handling as a
+  /// whole.
+  ///
+  /// Only `GET` responses are stored, and a listed path is still skipped when
+  /// keeping the response would leak or corrupt per-user state:
+  ///
+  /// * the response carries `Set-Cookie`, which would persist a session on the
+  ///   device and replay it later
+  /// * the response carries `Vary`, which the URL-only cache key cannot honour
+  /// * the request carried `Authorization`, so the response belongs to one user
+  ///
+  /// A skipped response raises `ProxyEventType.cacheSkipped` with the reason,
+  /// so a path that never becomes available offline can be diagnosed.
+  ///
+  /// **Security**: `no-store` asks the client not to write the response to
+  /// storage at all. The response cache is not encrypted, so the body of a
+  /// listed path is kept on the device in the clear. Weigh that against what
+  /// the screen contains before listing it.
+  ///
+  /// **Freshness**: A response that says `no-store` usually says `max-age=0`
+  /// as well. Honouring it would make the entry stale the moment it is stored,
+  /// so the upstream freshness directives are ignored for a listed path and
+  /// [cacheTtl] decides the TTL instead.
+  ///
+  /// Patterns use `*` for one path segment and `**` across segments; a pattern
+  /// without either is matched exactly. Query strings are not part of the
+  /// comparison.
+  ///
+  /// **Example**: `['/app/**', '/js/*.js']`
+  /// **Default**: `[]` (no path is force-cached)
+  final List<String> forceCachePaths;
 
   /// Number of consecutive unreachable upstream attempts that opens the
   /// upstream circuit breaker.
@@ -358,6 +404,7 @@ class ProxyConfig {
       'text/html': 3600,
       'text/css': 86400,
       'application/javascript': 86400,
+      'text/javascript': 86400,
       'image/*': 604800,
       'default': 86400,
     },
@@ -367,6 +414,7 @@ class ProxyConfig {
       'image/*': 2592000,
       'default': 259200,
     },
+    this.forceCachePaths = const [],
     this.upstreamFailureThreshold = 3,
     this.upstreamProbePath = '/',
     this.upstreamProbeMethod = 'HEAD',

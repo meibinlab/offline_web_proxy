@@ -12,6 +12,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 ## 主な機能
 
 - Flutter WebView 向けローカルプロキシサーバ
+- `assets/static/` に同梱した静的リソースの配信（CDN 依存の資材をアプリへ取り込める）
 - オフライン時と上流到達不能時（接続失敗・リクエストタイムアウト）に限定したフォールバックキャッシュ
 - POST、PUT、DELETE のオフラインキューイング
 - AES-256 による Cookie 永続化と復元 API
@@ -163,6 +164,7 @@ const config = ProxyConfig(
     'text/html': 3600,
     'text/css': 86400,
     'application/javascript': 86400,
+    'text/javascript': 86400,
     'image/*': 604800,
     'default': 86400,
   },
@@ -172,6 +174,7 @@ const config = ProxyConfig(
     'image/*': 2592000,
     'default': 259200,
   },
+  forceCachePaths: ['/app/**'],
   connectTimeout: Duration(seconds: 5),
   requestTimeout: Duration(seconds: 20),
   upstreamFailureThreshold: 3,
@@ -208,6 +211,7 @@ const config = ProxyConfig(
 補足:
 
 - `origin` は必須で、絶対 HTTP URL または HTTPS URL である必要があります。
+- パスを指定する設定（`forceCachePaths` など）は共通の glob 記法で照合します。`*` は `/` を含まない 1 セグメント、`**` は `/` を含む任意の文字列に一致し、メタ文字が無い場合は完全一致です。クエリ文字列は照合対象に含みません。
 - `port: 0` を指定すると、OS が空きポートを自動割り当てします。
 - `preferredPort` を指定すると、まずそのポートを試し、使えない場合は自動割り当てへフォールバックします。直前に成功したポートも次回起動時に再利用されるため、WebView の origin をより安定させやすくなります。
 - `startupPaths` は `warmupCache()` で、オフライン時または上流到達不能時の代替応答を事前準備したいパスに使います。
@@ -219,6 +223,12 @@ const config = ProxyConfig(
 - `queuedResponse` と `offlineMissResponse` は、proxy が自分で生成する応答の内容です。既定はどちらも JSON で、Web アプリ側の `response.json()` が成功します。
 - `dropPolicy` は、上流が 4xx で拒否した更新系リクエストの扱いです。既定の `quarantine` では本文を保持したまま隔離し、`getQuarantinedRequests()` で確認して再送または破棄を判断できます。`drop` を指定すると従来どおり破棄し、履歴のみ残します。
 - `enableIdempotencyKey` は更新系リクエストへのべき等性キー付与です。最初の転送と再送で同じキーを送るため、応答を受け取れなかったリクエストが再送で二重に適用されることを上流側で防げます。**重複の排除自体は上流サーバでの実装が必要です。**
+- `forceCachePaths` は `Cache-Control: no-store` を無視して保存するパスです。全応答に `no-store` を付与するサーバでは、既定のままだとオフラインで返せる応答が残りません。既定は空で、指定が無い限り従来どおり保存しません。全体を一括で無効化する設定は用意していません。
+  - 一致しても、応答に `Set-Cookie` か `Vary` がある場合、またはリクエストに `Authorization` がある場合は保存しません。除外したときは `ProxyEventType.cacheSkipped` を理由付きで発行するため、オフラインで使えない原因を追跡できます。
+  - 一致したパスでは上流の `max-age` や `Expires` を使わず、`cacheTtl` の値を有効期限に使います。`no-store` は `max-age=0` と併記されることが多く、そのまま採用すると保存直後に stale になるためです。
+  - **応答キャッシュは暗号化していません。** 指定したパスの応答本文は端末内に平文で残るため、画面が含む情報を踏まえて指定してください。
+- `cacheTtl` と `cacheStale` は、指定すると既定のマップとマージされず**丸ごと置き換わります**。未掲載の Content-Type が `default` へ落ちるよう、`default` は必ず含めてください。
+- `text/html` の既定は TTL 1 時間、stale 1 日です。最後にオンラインで取得してから約 25 時間でフォールバック対象から外れるため、**長期のオフライン運用では `cacheTtl` と `cacheStale` の設定が必要です**。`cacheStale` には JavaScript のキーが無く、スクリプトは `default`（3 日）になります。
 
 ### Web アプリ側でのオフライン応答の扱い
 
@@ -298,6 +308,16 @@ final newWindowRecommendation = proxy.recommendNewWindowNavigation(
 相対 URL や scheme-relative URL の解決には `sourceUrl` が必要です。`sourceUrl` が無い場合、意図的に unresolved になるケースがあります。
 起動時に `AssetManifest.json` を走査し、`assets/static/` 配下に存在するファイルだけを proxy ローカル静的リソースとして扱います。たとえば `assets/static/app.css` は proxy URL の `/app.css` に対応し、一覧に無い `/test.css` は upstream 解決を優先します。
 実行環境で manifest を読み込めない場合でも、proxy 起動は中断せず、静的リソース一覧を空として通常の upstream 解決へフォールバックします。
+
+一覧に一致した URL には、同梱アセットの内容をそのまま返します。CDN から読み込んでいた資材をアプリへ同梱し、`/js/haori.iife.js` のような同一 origin の URL で配信できます。
+
+```
+assets/static/js/haori.iife.js  →  http://127.0.0.1:<port>/js/haori.iife.js
+```
+
+- 対象は `GET` と `HEAD` です。同名パスへの更新系は静的扱いにせず上流へ転送します
+- 内容から算出した `ETag` と `Cache-Control: no-cache` を付与し、`If-None-Match` が一致した場合は `304` を返します
+- 一覧に載っていてもアセットの実体を読み込めない場合は `404` を返さず、上流への転送へ委ねます
 WebView へ返す上流レスポンスが `301`、`302`、`303`、`307`、`308` の場合、proxy は `HttpClient` の自動追従に依存せず `Location` を明示解決します。same-origin redirect は proxy URL へ書き換え、relative `Location` は上流リクエスト URL 基準で解決し、外部起動 redirect は `ProxyEventType.redirectHandled` で app 側へ通知できます。
 
 ## 接続復旧 API
@@ -497,7 +517,7 @@ proxy.events.listen((event) {
 
 - 1 つの `OfflineWebProxy` インスタンスが扱える上流 origin は 1 つです。
 - サポートされる設定経路は `ProxyConfig` です。外部 YAML の自動読込は未実装です。
-- `assets/static/` からの静的リソース実配信は未実装です。起動時に `AssetManifest.json` から検出した `assets/static/` 配下のファイルだけを静的リソースとして分類し、現在のサーバ応答は 404 プレースホルダです。
+- `assets/static/` から配信できるのは `GET` と `HEAD` だけです。同名パスへの更新系は静的扱いにせず上流へ転送します。Range 要求には対応していません。
 - `AssetManifest.json` または実行環境上の同等 manifest を読み込めない場合は、静的リソースを一覧化せず、通常の upstream 解決へフォールバックします。
 
 ## サンプルと参照先
