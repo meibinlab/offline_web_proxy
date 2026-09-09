@@ -248,6 +248,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
   startupPaths: ['/app/config'],
   preferredPort: 8787,
   healthCheckPath: '/__offline_web_proxy/health',
+  statusPath: '/__offline_web_proxy/status',
   healthCheckInterval: Duration.zero,
   serverIdleTimeout: Duration(seconds: 120),
   maxRestartAttemptsPerMinute: 5,
@@ -259,8 +260,15 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li>Settings that name paths (such as <code>forceCachePaths</code>) share one glob notation: <code>*</code> matches within a single path segment, <code>**</code> matches across segments, and a pattern without either is matched exactly. Query strings are not part of the comparison.</li>
 <li><code>port: 0</code> lets the OS assign a free local port.</li>
 <li><code>preferredPort</code> tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.</li>
-<li><code>startupPaths</code> is used by <code>warmupCache()</code> for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.</li>
+<li><code>startupPaths</code> is used by <code>warmupCache()</code> for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.
+<ul>
+<li>Warmup sends the cookie jar exactly as the forwarding path does, so calling it after sign-in also warms up the APIs that require authentication.</li>
+<li><code>warmupCache(followReferences: true)</code> also fetches the same-origin resources referenced by the warmed HTML (<code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code>). Only one level is followed, and a URL assembled by JavaScript at runtime is out of reach. A <code>&lt;link&gt;</code> counts only when its <code>rel</code> names a resource, such as <code>stylesheet</code>.</li>
+</ul>
+</li>
 <li><code>healthCheckPath</code> is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.</li>
+<li><code>statusPath</code> returns the proxy state as JSON. It gets the same treatment as <code>healthCheckPath</code> — never forwarded, never counted — and an empty string disables it.</li>
+<li><code>enableAdminApi</code> set to <code>true</code> exposes listing, resending and discarding of quarantined requests over HTTP. Disabled by default.</li>
 <li>Setting <code>healthCheckInterval</code> above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by <code>ProxyLifecycleGuard</code> is the primary path.</li>
 <li><code>offlineFallbackHtml</code> and <code>gatewayTimeoutHtml</code> replace the built-in offline and timeout response bodies with wording supplied by your app.</li>
 <li><code>upstreamFailureThreshold</code> is how many consecutive unreachable attempts stop forwarding. It prevents every request from waiting for the timeout when the link layer is up but the upstream is down. Set it to <code>0</code> to disable the behavior.</li>
@@ -446,6 +454,76 @@ for (final result in proxy.recentResendResults) {
 }
 </code></pre>
 <p>The outcomes are held in memory for monitoring only and are lost when the app process ends.</p>
+<h2 id="reading-the-proxy-state-from-the-web-app">Reading the proxy state from the web app</h2>
+<p>The unsent count and the online state are available from the Dart API, but when the screen itself has to show them or act on them, the status endpoint removes the need for a bridge in the app.</p>
+<pre class="language-js"><code class="language-js">const res = await fetch('/__offline_web_proxy/status');
+const status = await res.json();
+
+if (status.queueLength &gt; 0) {
+  // Do not allow a settlement while something is unsent
+  disableSettlement(`${status.queueLength} request(s) not yet sent`);
+}
+if (!status.isOnline) {
+  // Hide the register sign-in while offline
+  hideRegisterAuth();
+}
+</code></pre>
+<p>The response looks like this.</p>
+<pre class="language-json"><code class="language-json">{
+  "isOnline": true,
+  "onlineDecisionSource": "connectivity",
+  "isUpstreamReachable": true,
+  "upstreamCircuitState": "closed",
+  "queueLength": 0,
+  "quarantinedCount": 0,
+  "unacknowledgedDroppedCount": 0,
+  "recentResendResults": []
+}
+</code></pre>
+<ul>
+<li><code>GET</code> only, never forwarded upstream, and excluded from statistics.</li>
+<li>Only callers on the proxy's own origin are served. A request carrying another <code>Origin</code> is answered with <code>403</code>, and <code>Access-Control-Allow-Origin: *</code> is never attached.</li>
+<li>Setting <code>statusPath</code> to an empty string disables it.</li>
+</ul>
+<h3 id="operating-the-quarantine-store-from-the-page">Operating the quarantine store from the page</h3>
+<p>A sale quarantined by a 4xx is resent once the cause — a closed stocktake, for example — is resolved. When the person doing that stands at the screen, <code>enableAdminApi: true</code> exposes the same operations over HTTP.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/__offline_web_proxy/admin/quarantine</code></td>
+<td>List quarantined requests (never the body)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/__offline_web_proxy/admin/quarantine/&lt;id&gt;/retry</code></td>
+<td>Put one back on the queue</td>
+</tr>
+<tr>
+<td><code>DELETE</code></td>
+<td><code>/__offline_web_proxy/admin/quarantine/&lt;id&gt;</code></td>
+<td>Discard one</td>
+</tr>
+</tbody>
+</table>
+<pre class="language-js"><code class="language-js">const res = await fetch('/__offline_web_proxy/admin/quarantine');
+const { requests } = await res.json();
+
+for (const request of requests) {
+  // Resend the ones whose cause has been resolved
+  await fetch(`/__offline_web_proxy/admin/quarantine/${request.id}/retry`, {
+    method: 'POST',
+  });
+}
+</code></pre>
+<p><strong>Warning</strong>: Disabled by default. Same-origin also means <em>every script running on the page</em>. Enabling it while the page still loads third-party scripts from a CDN would let such a script reach as far as discarding a quarantined request. Move those files under <code>assets/static/</code> first.</p>
 <h2 id="cookie-apis">Cookie APIs</h2>
 <p>Cookies are persisted in encrypted storage and can be restored before the proxy starts.</p>
 <pre class="language-dart"><code class="language-dart">await proxy.restoreCookies([

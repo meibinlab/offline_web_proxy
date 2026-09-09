@@ -67,6 +67,7 @@
 <span class="name ">warmupCache</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="warmupCache-param-paths"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span>?</span> <span class="parameter-name">paths</span>, </span></li>
 <li><span class="parameter" id="warmupCache-param-timeout"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">timeout</span>, </span></li>
 <li><span class="parameter" id="warmupCache-param-maxConcurrency"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">maxConcurrency</span>, </span></li>
+<li><span class="parameter" id="warmupCache-param-followReferences"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">followReferences</span> = <span class="default-value">false</span>, </span></li>
 <li><span class="parameter" id="warmupCache-param-onProgress"><span class="type-annotation"><a href="../../offline_web_proxy/WarmupProgressCallback.html">WarmupProgressCallback</a>?</span> <span class="parameter-name">onProgress</span>, </span></li>
 <li><span class="parameter" id="warmupCache-param-onError"><span class="type-annotation"><a href="../../offline_web_proxy/WarmupErrorCallback.html">WarmupErrorCallback</a>?</span> <span class="parameter-name">onError</span>, </span></li>
 </ol>})
@@ -81,6 +82,9 @@
 <code>timeout</code> 各リクエストの締め切り秒数。省略時は
   <a href="../../offline_web_proxy/ProxyConfig/requestTimeout.html">ProxyConfig.requestTimeout</a> を使用します。
 <code>maxConcurrency</code> 同時実行する最大リクエスト数。
+<code>followReferences</code> 取得した HTML が参照する同一 origin の資源も続けて
+  取得する場合は <code>true</code>。<code>&lt;script src&gt;</code>、<code>&lt;link href&gt;</code>、<code>&lt;img src&gt;</code> を
+  対象とし、1 段だけ辿ります。既定は <code>false</code> で従来の挙動です。
 <code>onProgress</code> 進捗状態を通知するコールバック関数。
 <code>onError</code> エラー発生時に呼ばれるコールバック関数。</p>
 <p>Returns: ウォームアップ結果の一覧。</p>
@@ -98,6 +102,7 @@
   List&lt;String&gt;? paths,
   int? timeout,
   int? maxConcurrency,
+  bool followReferences = false,
   WarmupProgressCallback? onProgress,
   WarmupErrorCallback? onError,
 }) async {
@@ -113,104 +118,75 @@
 
   final startTime = DateTime.now();
   final entries = &lt;WarmupEntry&gt;[];
-  int successCount = 0;
-  int failureCount = 0;
 
   try {
-    &#47;&#47; Process paths with concurrency control
-
     final semaphore = Semaphore(maxConcurrency ?? 10);
-    final results =
-        await Future.wait(targetPaths.asMap().entries.map((entry) async {
-      final index = entry.key;
-      final path = entry.value;
+    &#47;&#47; 同じ資源を二度取得しないよう、要求済みのパスを覚えておく
+    final requestedPaths = &lt;String&gt;{};
+    var completed = 0;
+    var total = targetPaths.length;
 
+    &#47;&#47;&#47; 1 パス分を取得し、進捗を通知します。
+    Future&lt;({WarmupEntry entry, List&lt;String&gt; references})&gt; run(
+      String path,
+      String? referencedFrom,
+    ) async {
       await semaphore.acquire(timeout: const Duration(seconds: 30));
       try {
-        final entryStartTime = DateTime.now();
-
-        &#47;&#47; 上流断を検知済みの間は待たせず、復帰確認に判定を委ねる
-        if (_isRunning &amp;&amp; !_isUpstreamReachable) {
-          onError?.call(path, _upstreamUnreachableWarmupMessage);
-          failureCount++;
-          onProgress?.call(index + 1, targetPaths.length);
-          return WarmupEntry(
-            path: path,
-            success: false,
-            statusCode: null,
-            errorMessage: _upstreamUnreachableWarmupMessage,
-            duration: DateTime.now().difference(entryStartTime),
-          );
-        }
-
-        try {
-          final response = await _fetchFromUpstream(path, timeout: timeout);
-
-          &#47;&#47; 上流が応答した以上は到達可能とみなし、遮断中なら解除する
-          if (_isRunning) {
-            _recordUpstreamSuccess();
-          }
-
-          if (response.statusCode == HttpStatus.ok) {
-            final upstreamUri = _buildUpstreamUriFromParts(path: path);
-            final cacheKey = _generateCacheKey(upstreamUri.toString());
-            await _cacheResponseBytes(
-              cacheKey,
-              response.statusCode,
-              response.headers,
-              response.bodyBytes,
-              &#47;&#47; ウォームアップも同じ判定で保存し、転送経路と挙動を揃える
-              allowNoStore: _resolveForceCacheAllowance(
-                path: path,
-                requestHeaders: const {},
-                responseHeaders: response.headers,
-                eventUrl: upstreamUri.toString(),
-              ),
-            );
-          }
-          final duration = DateTime.now().difference(entryStartTime);
-          successCount++;
-          return WarmupEntry(
-            path: path,
-            success: true,
-            statusCode: response.statusCode,
-            errorMessage: null,
-            duration: duration,
-          );
-        } catch (e) {
-          &#47;&#47; 画面操作が無い状況でも上流断を検知できるよう、判定材料に含める。
-          &#47;&#47; 停止中は復帰確認を予約できないため数えない。
-          if (_isRunning &amp;&amp; _shouldCountUpstreamFailure(e)) {
-            _recordUpstreamFailure();
-          }
-
-          final duration = DateTime.now().difference(entryStartTime);
-          onError?.call(path, e.toString());
-          failureCount++;
-          return WarmupEntry(
-            path: path,
-            success: false,
-            statusCode: null,
-            errorMessage: e.toString(),
-            duration: duration,
-          );
-        } finally {
-          &#47;&#47; 成功・失敗問わず進捗コールバックを呼ぶ
-          onProgress?.call(index + 1, targetPaths.length);
-        }
+        return await _warmupSinglePath(
+          path: path,
+          timeout: timeout,
+          followReferences: followReferences,
+          referencedFrom: referencedFrom,
+          onError: onError,
+        );
       } finally {
         semaphore.release();
+        completed++;
+        &#47;&#47; 成功・失敗問わず進捗コールバックを呼ぶ
+        onProgress?.call(completed, total);
       }
-    }));
+    }
 
-    entries.addAll(results);
+    for (final path in targetPaths) {
+      requestedPaths.add(_normalizeWarmupPath(path));
+    }
 
-    final totalDuration = DateTime.now().difference(startTime);
+    final results = await Future.wait(
+      targetPaths.map((path) =&gt; run(path, null)),
+    );
+    entries.addAll(results.map((result) =&gt; result.entry));
+
+    if (followReferences) {
+      &#47;&#47; 参照元ごとに、まだ取得していないパスだけを集める
+      final referenceTargets = &lt;({String path, String referencedFrom})&gt;[];
+      for (var index = 0; index &lt; results.length; index++) {
+        for (final reference in results[index].references) {
+          if (requestedPaths.add(_normalizeWarmupPath(reference))) {
+            referenceTargets.add((
+              path: reference,
+              referencedFrom: targetPaths[index],
+            ));
+          }
+        }
+      }
+
+      if (referenceTargets.isNotEmpty) {
+        total += referenceTargets.length;
+        final referenceResults = await Future.wait(
+          referenceTargets
+              .map((target) =&gt; run(target.path, target.referencedFrom)),
+        );
+        entries.addAll(referenceResults.map((result) =&gt; result.entry));
+      }
+    }
+
+    final successCount = entries.where((entry) =&gt; entry.success).length;
 
     return WarmupResult(
       successCount: successCount,
-      failureCount: failureCount,
-      totalDuration: totalDuration,
+      failureCount: entries.length - successCount,
+      totalDuration: DateTime.now().difference(startTime),
       entries: entries,
     );
   } catch (e) {

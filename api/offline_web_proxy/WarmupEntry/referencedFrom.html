@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the enableAdminApi property from the ProxyConfig class, for the Dart programming language.">
-  <title>enableAdminApi property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the referencedFrom property from the WarmupEntry class, for the Dart programming language.">
+  <title>referencedFrom property - WarmupEntry class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">enableAdminApi property</li>
+    <li><a href="../../offline_web_proxy/WarmupEntry-class.html">WarmupEntry</a></li>
+    <li class="self-crumb">referencedFrom property</li>
   </ol>
-  <div class="self-name">enableAdminApi</div>
+  <div class="self-name">referencedFrom</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,65 +54,30 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;WarmupEntry-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">enableAdminApi</span> property 
+<h1><span class="kind-property">referencedFrom</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
-        <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a>
-        <span class="name ">enableAdminApi</span>
+        <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?
+        <span class="name ">referencedFrom</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>Enable the administrative endpoints under <code>/__offline_web_proxy/admin</code>.</p>
-<p>A quarantined request is usually resolved by a person standing at the
-screen — a shop assistant who closed a stocktake and now wants the sale
-to go through. These endpoints let that screen list, resend and discard
-quarantined requests without a native bridge.</p>
-<table>
-<thead>
-<tr>
-<th>Method</th>
-<th>Path</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>GET</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine</code></td>
-<td>List quarantined requests</td>
-</tr>
-<tr>
-<td><code>POST</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine/&lt;id&gt;/retry</code></td>
-<td>Put one back on the queue</td>
-</tr>
-<tr>
-<td><code>DELETE</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine/&lt;id&gt;</code></td>
-<td>Discard one</td>
-</tr>
-</tbody>
-</table>
-<p><strong>Security Warning</strong>: The endpoints are reachable from every script
-running on the proxy origin, and discarding a request destroys business
-data. Do not enable this while the page still loads scripts from a third
-party such as a CDN. Requests carrying an <code>Origin</code> other than the proxy's
-own are refused, and the server binds to loopback only, but neither
-protects against a script already running on the page.</p>
-<p><strong>Default</strong>: <code>false</code> (production safe)</p>
+  <p>このパスを参照していた HTML のパス</p>
+<p><code>warmupCache(followReferences: true)</code> で連鎖して取得した場合に、
+参照元のパスが入ります。直接指定したパスの場合は <code>null</code> です。</p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final bool enableAdminApi;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final String? referencedFrom;</code></pre>
 </section>
 
 
@@ -129,12 +94,12 @@ protects against a script already running on the page.</p>
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">enableAdminApi property</li>
+    <li><a href="../../offline_web_proxy/WarmupEntry-class.html">WarmupEntry</a></li>
+    <li class="self-crumb">referencedFrom property</li>
 </ol>
 
 
-  <h5>ProxyConfig class</h5>
+  <h5>WarmupEntry class</h5>
   <div id="dartdoc-sidebar-left-content"></div>
 </div><!--/.sidebar-offcanvas-->
 

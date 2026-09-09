@@ -104,6 +104,7 @@
     &#47;&#47; 設定を読み込み
     _config = config ?? await _loadDefaultConfig();
     _validateHealthCheckPath();
+    _validateStatusPath();
     _compileConfiguredPatterns();
     _resetRecoveryState();
 
