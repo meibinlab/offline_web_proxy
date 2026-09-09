@@ -2168,6 +2168,7 @@ void main() {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         queuedAt: DateTime.now(),
+        acceptedAt: DateTime.now(),
         retryCount: 0,
         nextRetryAt: DateTime.now().add(Duration(seconds: 1)),
       );

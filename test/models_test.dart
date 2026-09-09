@@ -259,6 +259,7 @@ void main() {
         method: 'GET',
         headers: {}, // 空のヘッダー
         queuedAt: now,
+        acceptedAt: now,
         retryCount: 5,
         nextRetryAt: now.add(Duration(minutes: 10)),
       );

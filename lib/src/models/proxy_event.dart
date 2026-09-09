@@ -57,6 +57,9 @@ enum ProxyEventType {
   /// キュー送信完了
   queueDrained,
 
+  /// キュー再送を 1 件試行した結果
+  queueResendAttempted,
+
   /// リクエストドロップ
   requestDropped,
 

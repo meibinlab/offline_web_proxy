@@ -191,6 +191,18 @@ const config = ProxyConfig(
   enableIdempotencyKey: true,
   idempotencyHeaderName: 'Idempotency-Key',
   idempotencyRetention: Duration(hours: 24),
+  queueExcludePaths: [
+    QueueExcludeRule(
+      path: '/api/registers/auth.json',
+      response: ProxyResponseConfig(
+        statusCode: 503,
+        contentType: 'application/json; charset=utf-8',
+        body: '{"message":"オフラインのためレジ認証できません"}',
+      ),
+    ),
+  ],
+  enableAcceptedAtHeader: true,
+  acceptedAtHeaderName: 'X-Offline-Accepted-At',
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -227,6 +239,12 @@ Notes:
   - Even on a match, a response carrying `Set-Cookie` or `Vary`, or a request carrying `Authorization`, is not stored. A skipped response raises `ProxyEventType.cacheSkipped` with the reason, so a path that never becomes available offline can be diagnosed.
   - For a matching path the upstream `max-age` and `Expires` are ignored and `cacheTtl` decides the expiry, because `no-store` is usually paired with `max-age=0`, which would make the entry stale the moment it is stored.
   - **The response cache is not encrypted.** The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.
+- `queueExcludePaths` keeps update requests out of the offline queue when sending them later would be meaningless — a register sign-in or a sign-out, where the immediate `202 Accepted` also reads as success. Each rule carries its own response, so every screen can show the wording it already knows. Empty by default.
+  - The rules apply while offline, when the upstream is unreachable, and when the upstream answered 5xx. A 5xx response is still returned as-is, because the upstream did answer; only the queueing is skipped.
+  - The answer carries `X-Offline-Queued: 0` and `X-Offline-Excluded: 1`.
+- `enableAcceptedAtHeader` and `acceptedAtHeaderName` tell the upstream when the proxy first accepted a request. The same UTC ISO 8601 value is sent on the first forward and on every resend, so the upstream needs one rule — use this header when the payload carries no business timestamp — to stop offline sales from being recorded at reconnection time. Enabled by default.
+  - The value survives a quarantine retry. `queuedAt` cannot be reused because a retry updates it.
+  - **The value comes from the device clock.** A device whose clock is wrong while offline reports a wrong time.
 - `cacheTtl` and `cacheStale` **replace** the default maps rather than merging with them. Always keep a `default` entry so that unlisted content types still resolve.
 - `text/html` defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. **Long offline operation requires tuning both `cacheTtl` and `cacheStale`.** `cacheStale` has no JavaScript entry, so scripts fall back to `default` (3 days).
 
@@ -397,6 +415,25 @@ print('failures=${diagnostics.consecutiveUpstreamFailures} '
 - `isOnline` is the link-layer decision and `onlineDecisionSource` says what it is based on: the value read at startup, or a later change event.
 - `isUpstreamReachable` is whether requests can actually be forwarded, reflecting both the link layer and the circuit breaker.
 - `consecutiveUpstreamFailures` and `lastUpstreamSuccessAt` show how long the upstream has been out of reach.
+
+### Reading resend outcomes
+
+A queued request is resent in the background, so its response never reaches the page that made it. Subscribe to the event, or read the recent outcomes, when the app has to reconcile what the upstream recorded.
+
+```dart
+proxy.events
+    .where((event) => event.type == ProxyEventType.queueResendAttempted)
+    .listen((event) {
+  debugPrint('resend: ${event.data['statusCode']} ${event.url}');
+});
+
+// Inspect the last 20 outcomes later (never includes the body)
+for (final result in proxy.recentResendResults) {
+  debugPrint('${result.method} ${result.url} -> ${result.statusCode}');
+}
+```
+
+The outcomes are held in memory for monitoring only and are lost when the app process ends.
 
 ## Cookie APIs
 

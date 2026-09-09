@@ -87,6 +87,8 @@ import 'src/models/proxy_response_config.dart';
 import 'src/models/proxy_stats.dart';
 import 'src/models/proxy_webview_navigation_recommendation.dart';
 import 'src/models/quarantined_request.dart';
+import 'src/models/queue_exclude_rule.dart';
+import 'src/models/queue_resend_result.dart';
 import 'src/models/queued_request.dart';
 import 'src/models/response_header_snapshot.dart';
 import 'src/models/upstream_circuit_state.dart';
@@ -110,6 +112,8 @@ export 'src/models/proxy_response_config.dart';
 export 'src/models/proxy_stats.dart';
 export 'src/models/proxy_webview_navigation_recommendation.dart';
 export 'src/models/quarantined_request.dart';
+export 'src/models/queue_exclude_rule.dart';
+export 'src/models/queue_resend_result.dart';
 export 'src/models/queued_request.dart';
 export 'src/models/upstream_circuit_state.dart';
 export 'src/models/warmup_result.dart';
@@ -158,6 +162,13 @@ const String _defaultIdempotencyHeaderName = 'Idempotency-Key';
 
 /// 設定が読み込めない場合に使う既定のべき等性キーの保持期間。
 const Duration _defaultIdempotencyRetention = Duration(hours: 24);
+
+/// 設定が読み込めない場合に使う既定の受付時刻ヘッダ名。
+const String _defaultAcceptedAtHeaderName = 'X-Offline-Accepted-At';
+
+/// 保持するキュー再送結果の件数。
+/// 監視用の直近確認が目的のため、上限を設けてメモリ使用量を抑える。
+const int _recentResendResultCapacity = 20;
 
 /// 設定が読み込めない場合に使う既定のキュー投入応答。
 const ProxyResponseConfig _defaultQueuedResponse = ProxyResponseConfig(
@@ -375,6 +386,15 @@ class OfflineWebProxy {
   /// リクエストのたびに正規表現を組み立てないよう保持する。
   List<PathPattern> _forceCachePatterns = const [];
 
+  /// 起動時に構築した、キューへ入れない更新系リクエストの規則一覧。
+  List<({PathPattern pattern, QueueExcludeRule rule})> _queueExcludeRules =
+      const [];
+
+  /// 直近のキュー再送結果。古いものから捨てる。
+  /// 監視用のため永続化はせず、アプリのプロセスが終了すると失われる。
+  final Queue<QueueResendResult> _recentResendResults =
+      Queue<QueueResendResult>();
+
   /// asset key ごとに算出した静的リソースの `ETag`。
   /// 同梱アセットはプロセス実行中に変化しないため、要求のたびに
   /// 全バイトをハッシュし直さないよう保持する。
@@ -571,6 +591,7 @@ class OfflineWebProxy {
       _staticResourceAssetMap.clear();
       _staticResourceEntityTags.clear();
       _forceCachePatterns = const [];
+      _queueExcludeRules = const [];
     } catch (e) {
       failure = e;
     } finally {
@@ -899,6 +920,155 @@ class OfflineWebProxy {
   void _compileConfiguredPatterns() {
     _forceCachePatterns =
         PathPattern.compileAll(_config?.forceCachePaths ?? const []);
+    _queueExcludeRules = (_config?.queueExcludePaths ?? const [])
+        .map((rule) => (pattern: PathPattern(rule.path), rule: rule))
+        .toList(growable: false);
+  }
+
+  /// 直近のキュー再送結果を取得します。
+  ///
+  /// 再送は画面の裏側で行われるため、結果が要求元へ返りません。上流が実際に
+  /// 記録した内容と突き合わせたい場合に参照してください。本文は含みません。
+  ///
+  /// 監視用にメモリ上へ保持するだけで、永続化しません。件数は最大 20 件で、
+  /// アプリのプロセスが終了すると失われます。
+  ///
+  /// Returns: 新しいものが末尾になる再送結果の一覧。
+  List<QueueResendResult> get recentResendResults =>
+      List.unmodifiable(_recentResendResults);
+
+  /// 更新系リクエストをキューへ入れない規則を探します。
+  ///
+  /// [method] リクエストのHTTPメソッド。
+  /// [path] リクエストのパス。
+  ///
+  /// Returns: 一致した規則。該当が無い場合は `null`。
+  QueueExcludeRule? _findQueueExcludeRule(String method, String path) {
+    if (_queueExcludeRules.isEmpty) {
+      return null;
+    }
+
+    // 照合対象はパスのみのため、クエリとフラグメントを落とす
+    final pathOnly = path.split('?').first.split('#').first;
+    final normalizedMethod = method.toUpperCase();
+
+    for (final entry in _queueExcludeRules) {
+      final methods = entry.rule.methods;
+      // 空指定は「キュー対象の更新系すべて」を意味する
+      if (methods.isNotEmpty &&
+          !methods.any((value) => value.toUpperCase() == normalizedMethod)) {
+        continue;
+      }
+      if (entry.pattern.matches(pathOnly)) {
+        return entry.rule;
+      }
+    }
+
+    return null;
+  }
+
+  /// キューへ入れずに返す応答を組み立てます。
+  ///
+  /// 成功と誤認されないよう、キュー投入と区別できるヘッダを付けます。
+  ///
+  /// [rule] 一致した規則。
+  ///
+  /// Returns: 規則に従った応答。
+  shelf.Response _buildQueueExcludedResponse(QueueExcludeRule rule) {
+    return _buildConfiguredResponse(
+      rule.response,
+      extraHeaders: {
+        'X-Offline-Queued': '0',
+        'X-Offline-Excluded': '1',
+        'Connection': 'close',
+      },
+    );
+  }
+
+  /// 受付時刻ヘッダへ載せる値を決めます。
+  ///
+  /// オフラインで行った操作の発生時刻を上流へ伝えるため、最初の転送と
+  /// 以降の再送で同じ値を送ります。タイムゾーンの解釈が割れないよう UTC で
+  /// 表現します。
+  ///
+  /// キューへも保存するため、ヘッダ付与が無効でも値自体は決めます。
+  ///
+  /// Returns: UTC の ISO 8601 文字列。
+  String _resolveAcceptedAt() {
+    return DateTime.now().toUtc().toIso8601String();
+  }
+
+  /// キューデータから受付時刻を取り出します。
+  ///
+  /// 受付時刻を持たない旧バージョンのデータは、キューへ保存した時刻で補います。
+  ///
+  /// [data] キューデータ。
+  ///
+  /// Returns: UTC の ISO 8601 文字列。決められない場合は `null`。
+  String? _resolveQueuedAcceptedAt(Map data) {
+    final acceptedAt = data['acceptedAt'] as String?;
+    if (acceptedAt != null && acceptedAt.isNotEmpty) {
+      return acceptedAt;
+    }
+
+    final queuedAt = DateTime.tryParse(data['queuedAt'] as String? ?? '');
+    return queuedAt?.toUtc().toIso8601String();
+  }
+
+  /// 受付時刻ヘッダを上流リクエストへ付与します。
+  ///
+  /// 値は proxy 自身の観測結果のため、クライアントが同名のヘッダを送っていた
+  /// 場合も proxy の値で上書きします。
+  ///
+  /// [ioRequest] 送信する上流リクエスト。
+  /// [acceptedAt] 受付時刻。`null` の場合は付与しません。
+  void _applyAcceptedAtHeader(HttpClientRequest ioRequest, String? acceptedAt) {
+    if (acceptedAt == null || !(_config?.enableAcceptedAtHeader ?? true)) {
+      return;
+    }
+
+    ioRequest.headers.set(
+      _config?.acceptedAtHeaderName ?? _defaultAcceptedAtHeaderName,
+      acceptedAt,
+    );
+  }
+
+  /// キュー再送の結果を記録し、イベントとして通知します。
+  ///
+  /// [data] 再送したキューデータ。
+  /// [statusCode] 上流から返されたステータスコード。到達できない場合は `0`。
+  /// [success] 上流が受け付けたかどうか。
+  /// [dropReason] キューから取り除いた理由。
+  /// [willRetry] キューへ残して再試行するかどうか。
+  void _recordResendResult(
+    Map data, {
+    required int statusCode,
+    required bool success,
+    String? dropReason,
+    required bool willRetry,
+  }) {
+    final result = QueueResendResult(
+      url: data['url'] as String? ?? '',
+      method: data['method'] as String? ?? '',
+      statusCode: statusCode,
+      success: success,
+      idempotencyKey: data['idempotencyKey'] as String?,
+      dropReason: dropReason,
+      willRetry: willRetry,
+      // JSON へ出したときにタイムゾーンの解釈が割れないよう UTC で表す
+      attemptedAt: DateTime.now().toUtc(),
+    );
+
+    _recentResendResults.addLast(result);
+    while (_recentResendResults.length > _recentResendResultCapacity) {
+      _recentResendResults.removeFirst();
+    }
+
+    _emitEvent(
+      ProxyEventType.queueResendAttempted,
+      result.url,
+      result.toMap(),
+    );
   }
 
   /// 復旧対象として扱える URL かどうかを返します。
@@ -1936,7 +2106,8 @@ class OfflineWebProxy {
         ..remove('statusCode')
         ..['retryCount'] = 0
         ..['nextRetryAt'] = now.toIso8601String()
-        // 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る
+        // 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る。
+        // 業務上の発生時刻は acceptedAt が保持するため、ここでは触れない。
         ..['queuedAt'] = now.toIso8601String();
 
       final key = _generateUniqueStorageKey(queueBox);
@@ -3024,12 +3195,23 @@ window.__offline_web_proxy_web_storage_bridge = {
             ? null
             : _resolveIdempotencyKey(request);
 
+    // 初回転送と再送で同じ値を送り、オフラインで行った操作の発生時刻を伝える
+    final String? acceptedAt =
+        _isReadRequestMethod(request.method) ? null : _resolveAcceptedAt();
+
+    // キューへ入れない規則は転送前に一度だけ判定し、各分岐で使い回す
+    final QueueExcludeRule? queueExcludeRule =
+        _isReadRequestMethod(request.method)
+            ? null
+            : _findQueueExcludeRule(request.method, request.url.path);
+
     // 上流サーバに転送
     try {
       final result = await _forwardToUpstream(
         request,
         requestBodyBytes: requestBodyBytes,
         idempotencyKey: idempotency?.value,
+        acceptedAt: acceptedAt,
       );
 
       // 上流が応答した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
@@ -3088,13 +3270,17 @@ window.__offline_web_proxy_web_storage_bridge = {
         }
       }
 
-      // read系以外のリクエストが失敗した場合はキューに保存
+      // read系以外のリクエストが失敗した場合はキューに保存。
+      // 除外規則に一致する場合は保存だけを行わず、上流の応答をそのまま返す。
       String? queueId;
-      if (!_isReadRequestMethod(request.method) && result.statusCode >= 500) {
+      if (!_isReadRequestMethod(request.method) &&
+          result.statusCode >= 500 &&
+          queueExcludeRule == null) {
         queueId = await _queueRequest(
           request,
           bodyBytes: requestBodyBytes,
           idempotency: idempotency,
+          acceptedAt: acceptedAt,
         );
       }
 
@@ -3133,10 +3319,16 @@ window.__offline_web_proxy_web_storage_bridge = {
 
         return _buildUpstreamUnreachableResponse(request);
       } else if (!_isReadRequestMethod(request.method)) {
+        if (queueExcludeRule != null) {
+          // 後から送っても意味が無い更新系は、成功に見せずその場で返す
+          return _buildQueueExcludedResponse(queueExcludeRule);
+        }
+
         final queueId = await _queueRequest(
           request,
           bodyBytes: requestBodyBytes,
           idempotency: idempotency,
+          acceptedAt: acceptedAt,
         );
         return _buildQueuedResponse(queueId);
       }
@@ -3475,6 +3667,13 @@ window.__offline_web_proxy_web_storage_bridge = {
       // オフラインフォールバックを返却
       return _buildOfflineCacheMissResponse(request);
     } else {
+      final excludeRule =
+          _findQueueExcludeRule(request.method, request.url.path);
+      if (excludeRule != null) {
+        // 後から送っても意味が無い更新系は、成功に見せずその場で返す
+        return _buildQueueExcludedResponse(excludeRule);
+      }
+
       // read系以外のリクエストをキューに保存
       final queueId = await _queueRequest(request);
       _emitEvent(ProxyEventType.requestQueued, request.url.toString(), {
@@ -3637,6 +3836,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     shelf.Request request, {
     Uint8List? requestBodyBytes,
     String? idempotencyKey,
+    String? acceptedAt,
   }) async {
     if (_config?.origin.isEmpty ?? true) {
       throw Exception('No upstream origin configured');
@@ -3677,6 +3877,9 @@ window.__offline_web_proxy_web_storage_bridge = {
           idempotencyKey,
         );
       }
+
+      // 初回転送と再送で同じ値を送り、受け付けた時点を上流へ伝える
+      _applyAcceptedAtHeader(ioRequest, acceptedAt);
 
       // read系以外のリクエストの場合はボディをコピー
       if (!_isReadRequestMethod(request.method)) {
@@ -4526,12 +4729,14 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// [bodyBytes] 既に読み取り済みのリクエストボディ。
   /// [idempotency] 転送時に決定済みのべき等性キーと、その出所。
   ///   省略した場合はこの時点で決定します。
+  /// [acceptedAt] 転送時に決定済みの受付時刻。省略した場合はこの時点で決定します。
   ///
   /// Returns: 保存に使用したキュー ID。保存領域が使えない場合は `null`。
   Future<String?> _queueRequest(
     shelf.Request request, {
     List<int>? bodyBytes,
     ({String value, bool suppliedByClient})? idempotency,
+    String? acceptedAt,
   }) async {
     final List<int> body;
     if (request.method == 'GET') {
@@ -4550,6 +4755,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       'headers': request.headers,
       'body': body,
       'queuedAt': DateTime.now().toIso8601String(),
+      // 隔離からの再送でも変わらない、最初に受け付けた時点
+      'acceptedAt': acceptedAt ?? _resolveAcceptedAt(),
       'retryCount': 0,
       'nextRetryAt': DateTime.now().toIso8601String(),
     };
@@ -4878,7 +5085,16 @@ window.__offline_web_proxy_web_storage_bridge = {
 
       if (result.success) {
         await box.delete(key);
-        _emitEvent(ProxyEventType.queueDrained, itemUrl, {});
+        _recordResendResult(
+          data,
+          statusCode: result.statusCode,
+          success: true,
+          willRetry: false,
+        );
+        _emitEvent(ProxyEventType.queueDrained, itemUrl, {
+          'statusCode': result.statusCode,
+          'idempotencyKey': data['idempotencyKey'],
+        });
       } else if (result.shouldDrop) {
         final reason = result.dropReason ?? 'dropped';
         final errorMessage = result.errorMessage ?? 'HTTP ${result.statusCode}';
@@ -4896,10 +5112,24 @@ window.__offline_web_proxy_web_storage_bridge = {
             // 退避できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
             _updateRetrySchedule(data);
             await box.put(key, data);
+            _recordResendResult(
+              data,
+              statusCode: result.statusCode,
+              success: false,
+              dropReason: reason,
+              willRetry: true,
+            );
             return;
           }
 
           await box.delete(key);
+          _recordResendResult(
+            data,
+            statusCode: result.statusCode,
+            success: false,
+            dropReason: reason,
+            willRetry: false,
+          );
           _emitEvent(ProxyEventType.requestQuarantined, itemUrl, {
             'quarantineId': quarantineId,
             'statusCode': result.statusCode,
@@ -4914,6 +5144,13 @@ window.__offline_web_proxy_web_storage_bridge = {
             errorMessage: errorMessage,
           );
           await box.delete(key);
+          _recordResendResult(
+            data,
+            statusCode: result.statusCode,
+            success: false,
+            dropReason: reason,
+            willRetry: false,
+          );
           _emitEvent(ProxyEventType.requestDropped, itemUrl, {
             'statusCode': result.statusCode,
             'dropReason': result.dropReason,
@@ -4922,6 +5159,12 @@ window.__offline_web_proxy_web_storage_bridge = {
       } else {
         _updateRetrySchedule(data);
         await box.put(key, data);
+        _recordResendResult(
+          data,
+          statusCode: result.statusCode,
+          success: false,
+          willRetry: true,
+        );
       }
     } catch (e) {
       if (!box.isOpen) {
@@ -4930,6 +5173,13 @@ window.__offline_web_proxy_web_storage_bridge = {
 
       _updateRetrySchedule(data);
       await box.put(key, data);
+      // 上流へ到達できなかった場合もステータス 0 として結果を残す
+      _recordResendResult(
+        data,
+        statusCode: 0,
+        success: false,
+        willRetry: true,
+      );
     }
   }
 
@@ -5016,6 +5266,9 @@ window.__offline_web_proxy_web_storage_bridge = {
           idempotencyKey,
         );
       }
+
+      // 初回転送と同じ値を送り、受け付けた時点を上流へ伝える
+      _applyAcceptedAtHeader(request, _resolveQueuedAcceptedAt(data));
 
       if (body.isNotEmpty && method != 'GET') {
         request.add(body);
@@ -5305,6 +5558,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       headers: Map<String, String>.from(data['headers'] as Map? ?? {}),
       queuedAt: DateTime.parse(
           data['queuedAt'] as String? ?? DateTime.now().toIso8601String()),
+      acceptedAt: DateTime.tryParse(_resolveQueuedAcceptedAt(data) ?? '') ??
+          DateTime.now(),
       retryCount: data['retryCount'] as int? ?? 0,
       nextRetryAt: DateTime.parse(
           data['nextRetryAt'] as String? ?? DateTime.now().toIso8601String()),
@@ -5925,6 +6180,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       quarantinedAt:
           DateTime.tryParse(data['quarantinedAt'] as String? ?? '') ?? now,
       queuedAt: DateTime.tryParse(data['queuedAt'] as String? ?? '') ?? now,
+      acceptedAt:
+          DateTime.tryParse(_resolveQueuedAcceptedAt(data) ?? '') ?? now,
       reason: data['reason'] as String? ?? 'dropped',
       statusCode: data['statusCode'] as int? ?? 0,
       errorMessage: data['errorMessage'] as String? ?? '',

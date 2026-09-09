@@ -295,12 +295,61 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 - **二重記録の回避**: 隔離した場合はドロップ履歴へ記録しません
 - **記録の順序**: 隔離もドロップ履歴も、キューから取り除く前に記録します。記録できなかった場合はキューへ残すため、取り除いたのに記録が無い状態にはなりません
 
+### キューへ入れない更新系（queueExcludePaths）
+
+レジ認証やログアウトのように「後から送っても意味が無い更新系」は、キューへ保存すると二重の問題が起きます。復帰後に送っても業務上の意味が無く、その場では `202 Accepted` が返るため Web アプリが成功と誤認します。
+
+`ProxyConfig.queueExcludePaths` に一致した更新系はキューへ保存せず、規則ごとに設定した応答をその場で返します。
+
+- **既定**: 空。指定が無い限り従来どおり全ての更新系をキューへ保存します
+- **記法**: 【1】の「設定のパスパターン記法」に従います
+- **メソッド**: `methods` が空の場合はキュー対象の更新系すべてに適用します
+- **応答**: 規則ごとに `ProxyResponseConfig` を持ちます。既定は `503` と `{"queued":false,"offline":true}` です。画面ごとに異なる文言を返せるため、Web 側の改修なしにオフライン起因であることを伝えられます
+- **付帯ヘッダ**: `X-Offline-Queued: 0` と `X-Offline-Excluded: 1` を付与します。本文に依らずヘッダで判別できます
+
+適用する経路は、proxy がキューへ保存し得る 3 つすべてです。
+
+| 経路 | 動作 |
+| ---- | ---- |
+| オフライン時 | 規則の応答を返す |
+| 上流が 5xx を返した場合 | **上流の応答をそのまま返し**、キューへの保存だけを行わない |
+| 上流へ到達できなかった場合 | 規則の応答を返す |
+
+5xx で応答を差し替えないのは、上流が実際に応答しており、その内容を Web アプリへ伝えるべきだからです。
+
+### 受け付けた時刻の通知（acceptedAt）
+
+オフラインで積んだ更新系は、復帰後に上流へ届きます。上流が受信時刻で業務日時を採番すると、深夜に回線が切れて翌朝復帰した場合に前日の売上が当日として記録され、日別集計がずれます。
+
+proxy は最初に受け付けた時点を保持し、初回転送と以降の再送で同じ値を送ります。
+
+- **ヘッダ名**: `ProxyConfig.acceptedAtHeaderName`（既定 `X-Offline-Accepted-At`）
+- **有効・無効**: `ProxyConfig.enableAcceptedAtHeader`（既定 `true`）
+- **値**: UTC の ISO 8601 文字列（例 `2026-09-09T08:03:41.474467Z`）。タイムゾーンの解釈が割れないよう UTC で表現します
+- **対象**: 更新系のみ。read 系には付与しません
+- **上書き**: 値は proxy 自身の観測結果のため、クライアントが同名のヘッダを送っていた場合も proxy の値で上書きします
+- **不変性**: キューデータの `acceptedAt` として保持し、隔離からの再送でも変わりません。`queuedAt` は再送のたびに更新されるため流用できません
+- **旧データ**: `acceptedAt` を持たないキューデータは、`queuedAt` を UTC へ変換して補います
+
+**注意**: 値は端末の時計に依存します。オフライン中に時計がずれた端末は、ずれた時刻を報告します。
+
+### 再送結果の通知
+
+再送は画面の裏側で行われるため、結果が要求元へ返りません。上流が実際に記録した内容と突き合わせたい場合に備え、1 件ごとの結果を通知します。
+
+- **イベント**: `ProxyEventType.queueResendAttempted` を、成功・隔離・破棄・再試行のすべてで発行します
+- **内容**: URL、メソッド、ステータスコード、成否、べき等性キー、取り除いた理由、再試行の有無、試行日時
+- **本文**: 含みません。会計データが監視経路へ流れないようにします
+- **上流へ到達できなかった場合**: ステータスコードは `0` になります
+- **既存イベント**: `ProxyEventType.queueDrained` にも `statusCode` と `idempotencyKey` を追加しました
+- **直近の結果**: `recentResendResults` で最大 20 件を参照できます。監視用にメモリ上へ保持するだけで永続化しないため、アプリのプロセスが終了すると失われます
+
 ### 履歴管理
 
 キュー管理のためのメソッドを提供します。詳細は【20】API リファレンスを参照してください。
 
 - **`getQuarantinedRequests()`**: 隔離されたリクエストの一覧取得。本文は返しません
-- **`retryQuarantinedRequest(id)`**: 原因を解消したあとにキューへ戻して再送。再試行回数は初期化し、保存日時は受け付けた時点に更新するため、待機中のリクエストより後に送信します
+- **`retryQuarantinedRequest(id)`**: 原因を解消したあとにキューへ戻して再送。再試行回数は初期化し、保存日時は受け付けた時点に更新するため、待機中のリクエストより後に送信します。業務上の発生時刻を表す `acceptedAt` は更新しません
 - **`discardQuarantinedRequest(id)`**: 内容を確認したうえで破棄
 - **`clearQuarantinedRequests()`**: 隔離されたリクエストを全て破棄
 - **`getDroppedRequests()`**: ドロップされたリクエストの履歴取得。デバッグやトラブルシューティングに活用
@@ -1473,6 +1522,20 @@ final queued = await proxy.getQueuedRequests();
 print('Queued requests: ${queued.length}');
 ```
 
+#### `List<QueueResendResult> get recentResendResults`
+
+直近のキュー再送結果を取得します。再送は画面の裏側で行われるため結果が要求元へ返りません。上流が実際に記録した内容と突き合わせたい場合に参照します。
+
+- **戻り値**: 新しいものが末尾になる再送結果の一覧（最大 20 件）
+- **例外**: なし
+- **注意**: 本文は含みません。監視用にメモリ上へ保持するだけで永続化しないため、アプリのプロセスが終了すると失われます
+
+```dart
+for (final result in proxy.recentResendResults) {
+  print('${result.method} ${result.url} -> ${result.statusCode}');
+}
+```
+
 #### `Future<List<DroppedRequest>> getDroppedRequests({int? limit})`
 
 ドロップされたリクエストの履歴を取得します。
@@ -1669,7 +1732,8 @@ class QueuedRequest {
   final String url; // リクエストURL
   final String method; // HTTPメソッド（POST, PUT, DELETE等）
   final Map<String, String> headers; // リクエストヘッダ（機密情報はマスク済み）
-  final DateTime queuedAt; // キューイング日時
+  final DateTime queuedAt; // キューイング日時（隔離からの再送で更新される）
+  final DateTime acceptedAt; // 最初に受け付けた日時（隔離と再送を経ても不変）
   final int retryCount; // 現在の再試行回数
   final DateTime nextRetryAt; // 次回再試行予定日時
 }
@@ -1701,7 +1765,8 @@ class QuarantinedRequest {
   final String url; // 隔離されたリクエストのURL
   final String method; // HTTPメソッド
   final DateTime quarantinedAt; // 隔離された日時
-  final DateTime queuedAt; // 最初にキューへ保存された日時
+  final DateTime queuedAt; // 隔離される前にキューへ保存された日時
+  final DateTime acceptedAt; // 最初に受け付けた日時（隔離と再送を経ても不変）
   final String reason; // 隔離理由（"4xx_error" 等）
   final int statusCode; // 上流から返されたHTTPステータスコード
   final String errorMessage; // 詳細なエラーメッセージ
@@ -1709,6 +1774,35 @@ class QuarantinedRequest {
 ```
 
 本文は保持していますが、この一覧では返しません。再送する場合は `retryQuarantinedRequest(id)` を使用します。
+
+#### `QueueExcludeRule`
+
+キューへ入れない更新系リクエストの規則を表すクラス。
+
+```dart
+class QueueExcludeRule {
+  final String path; // 対象のパスパターン
+  final List<String> methods; // 対象メソッド（空=キュー対象の更新系すべて）
+  final ProxyResponseConfig response; // 返す応答（既定: 503 / JSON）
+}
+```
+
+#### `QueueResendResult`
+
+キュー再送を 1 件試行した結果を表すクラス。本文は保持しません。
+
+```dart
+class QueueResendResult {
+  final String url; // 再送先のURL
+  final String method; // HTTPメソッド
+  final int statusCode; // 上流のステータスコード（到達できない場合は 0）
+  final bool success; // 上流が受け付けたかどうか
+  final String? idempotencyKey; // 付与したべき等性キー
+  final String? dropReason; // キューから取り除いた理由
+  final bool willRetry; // キューへ残して再試行するかどうか
+  final DateTime attemptedAt; // 試行日時（UTC）
+}
+```
 
 #### `ProxyStats`
 
@@ -1784,6 +1878,7 @@ class ProxyConfig {
   final int cacheMaxSize; // キャッシュ最大容量（バイト）
   final Map<String, int> cacheTtl; // Content-Type別TTL設定（秒）
   final Map<String, int> cacheStale; // Content-Type別Stale期間設定（秒）
+  final List<String> forceCachePaths; // no-store を無視して保存するパス（既定: 空）
   final int upstreamFailureThreshold; // 上流断とみなす連続失敗回数（既定: 3、0=無効）
   final String upstreamProbePath; // 復帰確認のパス（既定: "/"）
   final String upstreamProbeMethod; // 復帰確認のHTTPメソッド（既定: "HEAD"）
@@ -1795,6 +1890,9 @@ class ProxyConfig {
   final bool enableIdempotencyKey; // べき等性キーの付与（既定: true）
   final String idempotencyHeaderName; // べき等性キーのヘッダ名（既定: "Idempotency-Key"）
   final Duration idempotencyRetention; // 送信済みキーの保持期間（既定: 24 時間）
+  final List<QueueExcludeRule> queueExcludePaths; // キューへ入れない更新系（既定: 空）
+  final bool enableAcceptedAtHeader; // 受付時刻の通知（既定: true）
+  final String acceptedAtHeaderName; // 受付時刻のヘッダ名（既定: "X-Offline-Accepted-At"）
   final DropPolicy dropPolicy; // 再送を打ち切った要求の扱い（既定: quarantine）
   final ProxyResponseConfig queuedResponse; // キュー投入時の応答（既定: 202 / JSON）
   final ProxyResponseConfig offlineMissResponse; // 代替できない場合の応答（既定: 504 / JSON）
@@ -1859,8 +1957,10 @@ enum ProxyEventType {
   cacheHit, // キャッシュヒット
   cacheMiss, // キャッシュミス
   cacheStaleUsed, // Staleキャッシュ使用
+  cacheSkipped, // 保存対象に一致したが安全のため保存を見送った
   requestQueued, // リクエストキューイング
   queueDrained, // キュー送信完了
+  queueResendAttempted, // キュー再送を 1 件試行した結果
   requestDropped, // リクエストドロップ
   requestQuarantined, // リクエストを隔離領域へ退避
   networkOnline, // ネットワーク復旧
@@ -1873,6 +1973,22 @@ enum ProxyEventType {
   serverRecovered // 再バインドにより復旧した
 }
 ```
+
+`cacheSkipped` の `data` には、保存を見送った理由が入ります。
+
+- `reason`: `set-cookie`、`vary`、`authorization` のいずれか
+
+`queueResendAttempted` の `data` には、再送 1 件の結果が入ります。本文は含みません。
+
+- `url`、`method`: 再送したリクエスト
+- `statusCode`: 上流から返されたステータスコード。到達できなかった場合は `0`
+- `success`: 上流が受け付けたかどうか
+- `idempotencyKey`: 付与したべき等性キー（無い場合は `null`）
+- `dropReason`: キューから取り除いた理由（成功時や再試行時は `null`）
+- `willRetry`: キューへ残して再試行するかどうか
+- `attemptedAt`: 試行日時（UTC の ISO 8601）
+
+`queueDrained` の `data` には、`statusCode` と `idempotencyKey` が入ります。
 
 `requestQuarantined` の `data` には、次のメタ情報が入ります。
 

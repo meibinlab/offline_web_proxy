@@ -295,12 +295,60 @@ Network errors and 5xx errors are treated as temporary failures: they are kept i
 - **No double bookkeeping**: A quarantined request is not also written to the dropped history
 - **Recording order**: Both the quarantine store and the dropped history are written before the request is removed from the queue. If the write fails the request stays queued, so it is never removed without a record
 
+### Update Requests That Are Never Queued (queueExcludePaths)
+
+An update that only makes sense at the moment it is made — a register sign-in, a sign-out — causes two problems when it is queued. Sending it after the connection returns has no business meaning, and the immediate `202 Accepted` makes the web app believe it succeeded.
+
+An update matching `ProxyConfig.queueExcludePaths` is not stored. The proxy answers with the response configured on the rule instead.
+
+- **Default**: Empty. Without an entry every update request is queued, as before
+- **Notation**: See "Path Pattern Notation Used by Configuration" in section [1]
+- **Methods**: An empty `methods` list covers every update method the proxy would otherwise queue
+- **Response**: Each rule carries its own `ProxyResponseConfig`, defaulting to `503` with `{"queued":false,"offline":true}`. Per-rule wording lets each screen show the right message without a front-end change
+- **Marker headers**: `X-Offline-Queued: 0` and `X-Offline-Excluded: 1` are attached, so the decision can be made on a header rather than the body
+
+The rules apply to all three paths where the proxy would otherwise queue.
+
+| Path | Behaviour |
+| ---- | ---- |
+| While offline | Answer with the rule response |
+| The upstream answered 5xx | **Return the upstream response as-is** and skip only the queueing |
+| The upstream could not be reached | Answer with the rule response |
+
+The 5xx response is not replaced because the upstream did answer, and the web app should see what it said.
+
+### Reporting When the Request Was Accepted (acceptedAt)
+
+An update stored while offline reaches the upstream only after the connection returns. A server that stamps its own clock then records the wrong business time: a connection lost at midnight and restored the next morning turns the previous day's sales into today's, and every daily total built on them is wrong.
+
+The proxy keeps the moment it first accepted the request and sends the same value on the first forward and on every resend.
+
+- **Header name**: `ProxyConfig.acceptedAtHeaderName` (default `X-Offline-Accepted-At`)
+- **Enabled**: `ProxyConfig.enableAcceptedAtHeader` (default `true`)
+- **Value**: An ISO 8601 timestamp in UTC (for example `2026-09-09T08:03:41.474467Z`), so the timezone cannot be misread
+- **Scope**: Update requests only; read requests never carry it
+- **Stability**: Stored as `acceptedAt` on the queue entry and preserved across a quarantine retry. `queuedAt` cannot be reused because a retry updates it
+- **Older data**: A queue entry saved without `acceptedAt` falls back to its `queuedAt`, converted to UTC
+
+**Note**: The value comes from the device clock. A device whose clock is wrong while offline reports a wrong time.
+
+### Reporting the Outcome of a Resend
+
+A resend happens in the background, so its response never reaches the page that made the request. Each attempt is reported for apps that must reconcile what the upstream actually recorded.
+
+- **Event**: `ProxyEventType.queueResendAttempted` is raised for every outcome — success, quarantine, drop and retry
+- **Content**: URL, method, status code, success, idempotency key, drop reason, whether it will retry, and the attempt time
+- **Body**: Never included, so business data does not leak into a monitoring path
+- **Unreachable upstream**: The status code is `0`
+- **Existing event**: `ProxyEventType.queueDrained` now also carries `statusCode` and `idempotencyKey`
+- **Recent outcomes**: `recentResendResults` exposes up to 20 entries. They are held in memory for monitoring and are not persisted
+
 ### History Management
 
 Provides methods for queue management. See [20] API Reference for details.
 
 - **`getQuarantinedRequests()`**: List quarantined requests. Bodies are not returned
-- **`retryQuarantinedRequest(id)`**: Put the request back in the queue after the cause is fixed. The retry count is reset and the stored timestamp is set to the moment it was accepted, so it is sent after requests already waiting
+- **`retryQuarantinedRequest(id)`**: Put the request back in the queue after the cause is fixed. The retry count is reset and the stored timestamp is set to the moment it was accepted, so it is sent after requests already waiting. `acceptedAt`, which carries the business time, is left untouched
 - **`discardQuarantinedRequest(id)`**: Discard a request after reviewing it
 - **`clearQuarantinedRequests()`**: Discard every quarantined request
 - **`getDroppedRequests()`**: Get history of dropped requests. Useful for debugging and troubleshooting
@@ -1473,6 +1521,20 @@ final queued = await proxy.getQueuedRequests();
 print('Queued requests: ${queued.length}');
 ```
 
+#### `List<QueueResendResult> get recentResendResults`
+
+Gets the recent resend outcomes. A queued request is resent in the background, so its response never reaches the page that made it; read these when the app has to reconcile what the upstream recorded.
+
+- **Return Value**: Outcomes with the newest last (up to 20)
+- **Exceptions**: None
+- **Note**: The body is never included. They are held in memory for monitoring only and are lost when the app process ends
+
+```dart
+for (final result in proxy.recentResendResults) {
+  print('${result.method} ${result.url} -> ${result.statusCode}');
+}
+```
+
 #### `Future<List<DroppedRequest>> getDroppedRequests({int? limit})`
 
 Gets history of dropped requests.
@@ -1669,7 +1731,8 @@ class QueuedRequest {
   final String url; // Request URL
   final String method; // HTTP method (POST, PUT, DELETE, etc.)
   final Map<String, String> headers; // Request headers (sensitive info already masked)
-  final DateTime queuedAt; // Queuing date/time
+  final DateTime queuedAt; // Queuing date/time (updated by a quarantine retry)
+  final DateTime acceptedAt; // First accepted (never changes across a retry)
   final int retryCount; // Current retry count
   final DateTime nextRetryAt; // Next retry scheduled date/time
 }
@@ -1701,7 +1764,8 @@ class QuarantinedRequest {
   final String url; // URL of the quarantined request
   final String method; // HTTP method
   final DateTime quarantinedAt; // Date/time quarantined
-  final DateTime queuedAt; // Date/time first stored in the queue
+  final DateTime queuedAt; // Date/time stored in the queue before quarantine
+  final DateTime acceptedAt; // First accepted (never changes across a retry)
   final String reason; // Quarantine reason ("4xx_error", etc.)
   final int statusCode; // HTTP status code returned by the upstream
   final String errorMessage; // Detailed error message
@@ -1709,6 +1773,35 @@ class QuarantinedRequest {
 ```
 
 The body is retained but not returned in this list. Use `retryQuarantinedRequest(id)` to resend it.
+
+#### `QueueExcludeRule`
+
+Class representing a rule for update requests that are never queued.
+
+```dart
+class QueueExcludeRule {
+  final String path; // Path pattern the rule applies to
+  final List<String> methods; // Methods covered (empty = every update method)
+  final ProxyResponseConfig response; // Response returned instead (default: 503 / JSON)
+}
+```
+
+#### `QueueResendResult`
+
+Class representing the outcome of one resend attempt. The body is never retained.
+
+```dart
+class QueueResendResult {
+  final String url; // URL the request was sent to
+  final String method; // HTTP method
+  final int statusCode; // Upstream status code (0 when unreachable)
+  final bool success; // Whether the upstream accepted the request
+  final String? idempotencyKey; // Key that was attached
+  final String? dropReason; // Why it left the queue
+  final bool willRetry; // Whether it stays queued for another attempt
+  final DateTime attemptedAt; // When the attempt finished (UTC)
+}
+```
 
 #### `ProxyStats`
 
@@ -1784,6 +1877,7 @@ class ProxyConfig {
   final int cacheMaxSize; // Maximum cache capacity (bytes)
   final Map<String, int> cacheTtl; // TTL setting by Content-Type (seconds)
   final Map<String, int> cacheStale; // Stale period setting by Content-Type (seconds)
+  final List<String> forceCachePaths; // Paths stored despite no-store (default: empty)
   final int upstreamFailureThreshold; // Consecutive failures treated as unreachable (default: 3, 0=disabled)
   final String upstreamProbePath; // Path used by the reachability probe (default: "/")
   final String upstreamProbeMethod; // HTTP method used by the probe (default: "HEAD")
@@ -1795,6 +1889,9 @@ class ProxyConfig {
   final bool enableIdempotencyKey; // Attach an idempotency key (default: true)
   final String idempotencyHeaderName; // Idempotency key header name (default: "Idempotency-Key")
   final Duration idempotencyRetention; // Retention of completed keys (default: 24 hours)
+  final List<QueueExcludeRule> queueExcludePaths; // Updates never queued (default: empty)
+  final bool enableAcceptedAtHeader; // Report the acceptance time (default: true)
+  final String acceptedAtHeaderName; // Acceptance time header (default: "X-Offline-Accepted-At")
   final DropPolicy dropPolicy; // How a request that stopped retrying is handled (default: quarantine)
   final ProxyResponseConfig queuedResponse; // Response for a queued request (default: 202 / JSON)
   final ProxyResponseConfig offlineMissResponse; // Response when nothing can be served (default: 504 / JSON)
@@ -1859,8 +1956,10 @@ enum ProxyEventType {
   cacheHit, // Cache hit
   cacheMiss, // Cache miss
   cacheStaleUsed, // Stale cache used
+  cacheSkipped, // Matched a stored path but was skipped for safety
   requestQueued, // Request queued
   queueDrained, // Queue send completed
+  queueResendAttempted, // Outcome of one resend attempt
   requestDropped, // Request dropped
   requestQuarantined, // Request moved to the quarantine store
   networkOnline, // Network restored
@@ -1873,6 +1972,22 @@ enum ProxyEventType {
   serverRecovered // Recovered by rebinding
 }
 ```
+
+The `data` of `cacheSkipped` carries why the response was not stored.
+
+- `reason`: One of `set-cookie`, `vary` or `authorization`
+
+The `data` of `queueResendAttempted` carries the outcome of one resend. The body is never included.
+
+- `url`, `method`: The request that was resent
+- `statusCode`: The upstream status code, or `0` when it could not be reached
+- `success`: Whether the upstream accepted the request
+- `idempotencyKey`: The key that was attached, or `null`
+- `dropReason`: Why it left the queue, or `null` on success or retry
+- `willRetry`: Whether it stays queued for another attempt
+- `attemptedAt`: When the attempt finished (ISO 8601 in UTC)
+
+The `data` of `queueDrained` carries `statusCode` and `idempotencyKey`.
 
 The `data` of `requestQuarantined` carries the following metadata.
 
