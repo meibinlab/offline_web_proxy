@@ -488,10 +488,12 @@ Even on a match, a response is skipped when keeping it would leak or corrupt per
 | Skip condition | Reason |
 | --- | --- |
 | The response carries `Set-Cookie` | The session would persist on the device and be replayed later |
-| The response carries `Vary` | The cache key is the normalized URL alone and cannot honour request-header variance |
+| The response carries `Vary` (unless it names `Accept-Encoding` alone) | The cache key is the normalized URL alone and cannot honour request-header variance |
 | The request carried `Authorization` | The response belongs to one user |
 
 A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-cookie` / `vary` / `authorization`), so a path that never becomes available offline can be diagnosed. A response without `no-store` is decided by the ordinary storage policy, so neither the check nor the event applies to it.
+
+**Why `Vary: Accept-Encoding` is not a skip condition**: the proxy pins `Accept-Encoding: identity` on every upstream request it makes — forwarding, queue resend and warmup alike — so only one variant can ever come back and skipping on `Accept-Encoding` protects nothing. Tomcat, nginx and Apache, meanwhile, all add that `Vary` by default once compression is enabled, so treating it as a skip condition removes the screen's HTML, JS and CSS from storage in one go. The value is split on `,` and compared without surrounding whitespace or case; a `Vary` naming `*` or any other header is still skipped.
 
 **Freshness**: A server that sends `no-store` usually sends something like `no-store, max-age=0, must-revalidate`. Honouring those directives would make the entry stale the moment it is stored, leaving only the stale window for offline use. Since the decision to store was already overridden by configuration, the expiry follows configuration too: for a matching path, `s-maxage`, `max-age` and `Expires` are ignored and `cacheTtl` decides the TTL.
 
@@ -500,13 +502,14 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
 #### Warmup
 
 - **Cookies**: The cookie jar is sent, exactly as on the forwarding path. Without it, a resource that requires authentication cannot be warmed up
+- **Accept-Encoding**: `identity` is sent, exactly as on the forwarding path, so that the stored response cannot differ between the two routes
 - **Following references**: `warmupCache(followReferences: true)` also fetches the same-origin resources referenced by the warmed HTML
   - `<script src>`, `<link href>` and `<img src>` are covered
   - A `<link>` counts only when its `rel` names a resource (`stylesheet`, `preload`, `prefetch`, `icon`, `apple-touch-icon`, `manifest` and the like). `canonical` and `alternate` point at another page and are skipped
   - Only one level is followed; what those resources reference in turn is not
   - Another origin, `data:`, `javascript:`, `mailto:` and `blob:` are skipped
   - A shared resource is requested only once
-  - Extraction is a best-effort regular expression scan. **A URL assembled by JavaScript at runtime is out of reach**
+  - Extraction is a best-effort regular expression scan. **A URL assembled by JavaScript at runtime is out of reach**, and nothing is extracted from a body an upstream compressed despite the `identity` request (the entry itself is still stored intact)
   - `WarmupEntry.referencedFrom` names the HTML that referenced each entry
 - **Default**: `followReferences` is `false`, keeping the previous behaviour of fetching only the listed paths
 

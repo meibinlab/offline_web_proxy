@@ -489,10 +489,12 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 | 除外条件 | 理由 |
 | --- | --- |
 | 応答に `Set-Cookie` がある | セッションが端末に残り、復元時にそのまま返るため |
-| 応答に `Vary` がある | キャッシュキーは正規化 URL のみで、リクエストヘッダの差を区別できないため |
+| 応答に `Vary` がある（`Accept-Encoding` だけの場合を除く） | キャッシュキーは正規化 URL のみで、リクエストヘッダの差を区別できないため |
 | リクエストに `Authorization` がある | 応答が特定の利用者に紐づくため |
 
 除外した場合は `ProxyEventType.cacheSkipped` を理由（`set-cookie` / `vary` / `authorization`）付きで発行します。指定したパスがオフラインで使えない原因を追跡できるようにするためです。`no-store` が付いていない応答は従来の保存判定で足りるため、この判定も通知も行いません。
+
+**`Vary: Accept-Encoding` を除外しない理由**: proxy は転送、キュー再送、ウォームアップのいずれでも上流へ `Accept-Encoding: identity` を固定で送るため、受け取る応答は常に 1 種類です。`Accept-Encoding` だけを理由に保存を見送っても守れるものがありません。一方 Tomcat、nginx、Apache はいずれも圧縮を有効にすると `Vary: Accept-Encoding` を既定で付けるため、除外条件に含めると画面の HTML、JS、CSS がまとめて保存対象から外れます。判定は `,` で分解し、前後の空白と大文字小文字を無視して行います。`*` や他のヘッダ名を 1 つでも含む場合は従来どおり除外します。
 
 **有効期限の扱い**: `no-store` を返すサーバは `no-store, max-age=0, must-revalidate` のように、保存させない意図の指示を併記することが一般的です。これをそのまま採用すると保存直後に stale となり、オフラインで使える期間が stale 期間だけになります。保存可否を設定側で上書きした以上、有効期限も設定側に従うのが一貫するため、一致したパスでは `s-maxage`、`max-age`、`Expires` を使わず `cacheTtl` の値を適用します。
 
@@ -501,13 +503,14 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 #### ウォームアップ
 
 - **Cookie の付与**: 転送経路と同じく Cookie Jar の内容を送ります。認証が必要な資源をウォームアップで取得するために必要です
+- **Accept-Encoding**: 転送経路と同じく `identity` を送ります。経路によって保存する応答が割れないようにするためです
 - **参照資源の連鎖取得**: `warmupCache(followReferences: true)` を指定すると、取得した HTML が参照する同一 origin の資源も続けて取得します
   - 対象は `<script src>`、`<link href>`、`<img src>` です
   - `<link>` は資源を指す `rel`（`stylesheet`、`preload`、`prefetch`、`icon`、`apple-touch-icon`、`manifest` 等）だけを対象とします。`canonical` や `alternate` は別ページを指すため取得しません
   - 辿るのは 1 段だけです。取得した資源が更に参照する URL は追いません
   - 別 origin、`data:`、`javascript:`、`mailto:`、`blob:` は対象外です
   - 同じ資源は一度だけ取得します
-  - 抽出は正規表現による最善努力です。**実行時に JavaScript が組み立てる URL には届きません**
+  - 抽出は正規表現による最善努力です。**実行時に JavaScript が組み立てる URL には届きません**。上流が `identity` を無視して圧縮した本文からも抽出できません（保存自体は正しく行われます）
   - 結果は `WarmupEntry.referencedFrom` で参照元を辿れます
 - **既定**: `followReferences` は `false` で、従来どおり指定したパスだけを取得します
 
