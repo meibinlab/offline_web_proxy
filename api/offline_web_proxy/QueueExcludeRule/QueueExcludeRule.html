@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the QueuedRequest constructor from Class QueuedRequest from the offline_web_proxy library, for the Dart programming language.">
-  <title>QueuedRequest constructor - QueuedRequest - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the QueueExcludeRule constructor from Class QueueExcludeRule from the offline_web_proxy library, for the Dart programming language.">
+  <title>QueueExcludeRule constructor - QueueExcludeRule - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/QueuedRequest-class.html">QueuedRequest</a></li>
-    <li class="self-crumb">QueuedRequest const constructor</li>
+    <li><a href="../../offline_web_proxy/QueueExcludeRule-class.html">QueueExcludeRule</a></li>
+    <li class="self-crumb">QueueExcludeRule const constructor</li>
   </ol>
-  <div class="self-name">QueuedRequest</div>
+  <div class="self-name">QueueExcludeRule</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,38 +54,40 @@
   <div
       id="dartdoc-main-content"
       class="main-content"
-      data-above-sidebar="offline_web_proxy&#47;QueuedRequest-class-sidebar.html"
+      data-above-sidebar="offline_web_proxy&#47;QueueExcludeRule-class-sidebar.html"
       data-below-sidebar="">
       <div>
-<h1><span class="kind-constructor">QueuedRequest</span> constructor 
+<h1><span class="kind-constructor">QueueExcludeRule</span> constructor 
 </h1></div>
 
     <section class="multi-line-signature">
       const
-      <span class="name ">QueuedRequest</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="-param-url"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span>, </span></li>
-<li><span class="parameter" id="-param-method"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">method</span>, </span></li>
-<li><span class="parameter" id="-param-headers"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span> <span class="parameter-name">headers</span>, </span></li>
-<li><span class="parameter" id="-param-queuedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">queuedAt</span>, </span></li>
-<li><span class="parameter" id="-param-acceptedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">acceptedAt</span>, </span></li>
-<li><span class="parameter" id="-param-retryCount"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">retryCount</span>, </span></li>
-<li><span class="parameter" id="-param-nextRetryAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">nextRetryAt</span>, </span></li>
+      <span class="name ">QueueExcludeRule</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="-param-path"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">path</span>, </span></li>
+<li><span class="parameter" id="-param-methods"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span> <span class="parameter-name">methods</span> = <span class="default-value">const []</span>, </span></li>
+<li><span class="parameter" id="-param-response"><span class="type-annotation"><a href="../../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">response</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 503, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;queued&quot;:false,&quot;offline&quot;:true}&#39;)</span>, </span></li>
 </ol>})
     </section>
 
     
+<section class="desc markdown">
+  <p>Creates a queue exclusion rule.</p>
+<p><a href="../../offline_web_proxy/QueueExcludeRule/path.html">path</a> is the path pattern the rule applies to.
+<a href="../../offline_web_proxy/QueueExcludeRule/methods.html">methods</a> are the HTTP methods it covers; empty means every update method.
+<a href="../../offline_web_proxy/QueueExcludeRule/response.html">response</a> is what the proxy answers instead of queueing.</p>
+</section>
 
 
     
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">const QueuedRequest({
-  required this.url,
-  required this.method,
-  required this.headers,
-  required this.queuedAt,
-  required this.acceptedAt,
-  required this.retryCount,
-  required this.nextRetryAt,
+  <pre class="language-dart"><code class="language-dart">const QueueExcludeRule({
+  required this.path,
+  this.methods = const [],
+  this.response = const ProxyResponseConfig(
+    statusCode: 503,
+    contentType: &#39;application&#47;json; charset=utf-8&#39;,
+    body: &#39;{&quot;queued&quot;:false,&quot;offline&quot;:true}&#39;,
+  ),
 });</code></pre>
 </section>
 
@@ -103,12 +105,12 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/QueuedRequest-class.html">QueuedRequest</a></li>
-    <li class="self-crumb">QueuedRequest const constructor</li>
+    <li><a href="../../offline_web_proxy/QueueExcludeRule-class.html">QueueExcludeRule</a></li>
+    <li class="self-crumb">QueueExcludeRule const constructor</li>
 </ol>
 
 
-    <h5>QueuedRequest class</h5>
+    <h5>QueueExcludeRule class</h5>
     <div id="dartdoc-sidebar-left-content"></div>
   </div><!--/.sidebar-offcanvas-left-->
 

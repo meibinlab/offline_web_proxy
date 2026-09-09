@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the QuarantinedRequest class from the offline_web_proxy library, for the Dart programming language.">
-  <title>QuarantinedRequest class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the QueueResendResult class from the offline_web_proxy library, for the Dart programming language.">
+  <title>QueueResendResult class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,9 +30,9 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../index.html">offline_web_proxy</a></li>
     <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li class="self-crumb">QuarantinedRequest class</li>
+    <li class="self-crumb">QueueResendResult class</li>
   </ol>
-  <div class="self-name">QuarantinedRequest</div>
+  <div class="self-name">QueueResendResult</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,17 +54,22 @@
     id="dartdoc-main-content"
     class="main-content"
     data-above-sidebar="offline_web_proxy&#47;offline_web_proxy-library-sidebar.html"
-    data-below-sidebar="offline_web_proxy&#47;QuarantinedRequest-class-sidebar.html">
+    data-below-sidebar="offline_web_proxy&#47;QueueResendResult-class-sidebar.html">
     <div>
-<h1><span class="kind-class">QuarantinedRequest</span> class 
+<h1><span class="kind-class">QueueResendResult</span> class 
  
 </h1></div>
 
     
 <section class="desc markdown">
-  <p>上流に拒否され、隔離領域へ退避した更新系リクエストを表すクラス</p>
-<p>隔離されたリクエストは本文を保持したまま残るため、原因を解消してから
-再送するか、内容を確認したうえで破棄するかを利用側で判断できます。</p>
+  <p>Outcome of one attempt to resend a queued update request.</p>
+<p>A queued request is resent in the background, so its response never reaches
+the page that created it. An app that has to reconcile what the upstream
+actually recorded — a point of sale comparing a printed receipt against the
+stored sale, for example — needs to see those outcomes.</p>
+<p>The request body is never included. These results are meant for monitoring
+and are surfaced through <code>ProxyEventType.queueResendAttempted</code> and
+<code>OfflineWebProxy.recentResendResults</code>.</p>
 </section>
 
 
@@ -74,11 +79,11 @@
     <h2>Constructors</h2>
 
     <dl class="constructor-summary-list">
-        <dt id="QuarantinedRequest" class="callable">
-          <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/QuarantinedRequest.html">QuarantinedRequest</a></span><span class="signature">({<span class="parameter" id="-param-id"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">id</span>, </span><span class="parameter" id="-param-url"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span>, </span><span class="parameter" id="-param-method"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">method</span>, </span><span class="parameter" id="-param-quarantinedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">quarantinedAt</span>, </span><span class="parameter" id="-param-queuedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">queuedAt</span>, </span><span class="parameter" id="-param-acceptedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">acceptedAt</span>, </span><span class="parameter" id="-param-reason"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">reason</span>, </span><span class="parameter" id="-param-statusCode"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">statusCode</span>, </span><span class="parameter" id="-param-errorMessage"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">errorMessage</span></span>})</span>
+        <dt id="QueueResendResult" class="callable">
+          <span class="name"><a href="../offline_web_proxy/QueueResendResult/QueueResendResult.html">QueueResendResult</a></span><span class="signature">({<span class="parameter" id="-param-url"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span>, </span><span class="parameter" id="-param-method"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">method</span>, </span><span class="parameter" id="-param-statusCode"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">statusCode</span>, </span><span class="parameter" id="-param-success"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">success</span>, </span><span class="parameter" id="-param-idempotencyKey"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">idempotencyKey</span>, </span><span class="parameter" id="-param-dropReason"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">dropReason</span>, </span><span class="parameter" id="-param-willRetry"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">willRetry</span>, </span><span class="parameter" id="-param-attemptedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">attemptedAt</span></span>})</span>
         </dt>
         <dd>
-          
+          Creates a resend result.
             <div class="constructor-modifier features">const</div>
         </dd>
     </dl>
@@ -89,26 +94,26 @@
       id="instance-properties">
     <h2>Properties</h2>
     <dl class="properties">
-        <dt id="acceptedAt" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/acceptedAt.html">acceptedAt</a></span>
+        <dt id="attemptedAt" class="property">
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/attemptedAt.html">attemptedAt</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span>
   
 
 </dt>
 <dd>
-  proxy が最初にこのリクエストを受け付けた日時
+  When the attempt finished, in UTC.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
 
-        <dt id="errorMessage" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/errorMessage.html">errorMessage</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+        <dt id="dropReason" class="property">
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/dropReason.html">dropReason</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span>
   
 
 </dt>
 <dd>
-  詳細なエラーメッセージ
+  Why the request left the queue without succeeding.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -125,62 +130,26 @@
 
 </dd>
 
-        <dt id="id" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/id.html">id</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+        <dt id="idempotencyKey" class="property">
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/idempotencyKey.html">idempotencyKey</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span>
   
 
 </dt>
 <dd>
-  隔離領域内での識別子
+  Idempotency key sent with the request, when one was attached.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
 
         <dt id="method" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/method.html">method</a></span>
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/method.html">method</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
   
 
 </dt>
 <dd>
-  HTTPメソッド
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="quarantinedAt" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/quarantinedAt.html">quarantinedAt</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span>
-  
-
-</dt>
-<dd>
-  隔離された日時
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="queuedAt" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/queuedAt.html">queuedAt</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span>
-  
-
-</dt>
-<dd>
-  隔離される前にキューへ保存された日時
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="reason" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/reason.html">reason</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
-  
-
-</dt>
-<dd>
-  隔離理由（"4xx_error" 等）
+  HTTP method of the request.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -198,25 +167,49 @@
 </dd>
 
         <dt id="statusCode" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/statusCode.html">statusCode</a></span>
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/statusCode.html">statusCode</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
   
 
 </dt>
 <dd>
-  上流から返されたHTTPステータスコード
+  Status code returned by the upstream.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="success" class="property">
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/success.html">success</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
+  
+
+</dt>
+<dd>
+  Whether the upstream accepted the request.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
 
         <dt id="url" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/url.html">url</a></span>
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/url.html">url</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
   
 
 </dt>
 <dd>
-  隔離されたリクエストのURL
+  URL the request was sent to.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="willRetry" class="property">
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/willRetry.html">willRetry</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
+  
+
+</dt>
+<dd>
+  Whether the request stays in the queue for another attempt.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -242,8 +235,21 @@
 
 </dd>
 
+        <dt id="toMap" class="callable">
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/toMap.html">toMap</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter">dynamic</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  Converts the result into a JSON-compatible map.
+  
+
+</dd>
+
         <dt id="toString" class="callable">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/toString.html">toString</a></span><span class="signature">(<wbr>)
+  <span class="name"><a href="../offline_web_proxy/QueueResendResult/toString.html">toString</a></span><span class="signature">(<wbr>)
     <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
   </span>
   
@@ -296,7 +302,7 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../index.html">offline_web_proxy</a></li>
     <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li class="self-crumb">QuarantinedRequest class</li>
+    <li class="self-crumb">QueueResendResult class</li>
 </ol>
 
 

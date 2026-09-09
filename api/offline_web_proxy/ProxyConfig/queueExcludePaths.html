@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the queuedAt property from the QueuedRequest class, for the Dart programming language.">
-  <title>queuedAt property - QueuedRequest class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the queueExcludePaths property from the ProxyConfig class, for the Dart programming language.">
+  <title>queueExcludePaths property - ProxyConfig class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/QueuedRequest-class.html">QueuedRequest</a></li>
-    <li class="self-crumb">queuedAt property</li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">queueExcludePaths property</li>
   </ol>
-  <div class="self-name">queuedAt</div>
+  <div class="self-name">queueExcludePaths</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,30 +54,41 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;QueuedRequest-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">queuedAt</span> property 
+<h1><span class="kind-property">queueExcludePaths</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
-        <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a>
-        <span class="name ">queuedAt</span>
+        <a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/QueueExcludeRule-class.html">QueueExcludeRule</a></span>&gt;</span>
+        <span class="name ">queueExcludePaths</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>キューイング日時</p>
-<p>隔離領域から再送した場合は、再送を受け付けた時点に更新されます。
-最初に受け付けた時点は <a href="../../offline_web_proxy/QueuedRequest/acceptedAt.html">acceptedAt</a> を参照してください。</p>
+  <p>Update requests that must not be stored in the offline queue.</p>
+<p>An update that only makes sense at the moment it is made — a register
+sign-in, a sign-out, a session refresh — cannot be replayed later, and
+answering <a href="../../offline_web_proxy/ProxyConfig/queuedResponse.html">queuedResponse</a> for one makes the web app believe it
+succeeded. A matching request is answered with the rule's own response
+instead, carrying <code>X-Offline-Queued: 0</code> and <code>X-Offline-Excluded: 1</code> so
+the decision can be made on a header.</p>
+<p>Rules apply wherever the proxy would otherwise queue an update: while
+offline, when the upstream answered 5xx, and when the upstream could not
+be reached. A 5xx response is still returned as-is, because the upstream
+did answer; only the queueing is skipped.</p>
+<p>Each rule carries its own response, so a screen can receive the wording
+it already knows how to display.</p>
+<p><strong>Default</strong>: <code>[]</code> (every update request is queued)</p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final DateTime queuedAt;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final List&lt;QueueExcludeRule&gt; queueExcludePaths;</code></pre>
 </section>
 
 
@@ -94,12 +105,12 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/QueuedRequest-class.html">QueuedRequest</a></li>
-    <li class="self-crumb">queuedAt property</li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">queueExcludePaths property</li>
 </ol>
 
 
-  <h5>QueuedRequest class</h5>
+  <h5>ProxyConfig class</h5>
   <div id="dartdoc-sidebar-left-content"></div>
 </div><!--/.sidebar-offcanvas-->
 

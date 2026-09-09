@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the queuedAt property from the QueuedRequest class, for the Dart programming language.">
-  <title>queuedAt property - QueuedRequest class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the acceptedAt property from the QueuedRequest class, for the Dart programming language.">
+  <title>acceptedAt property - QueuedRequest class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -31,9 +31,9 @@
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
     <li><a href="../../offline_web_proxy/QueuedRequest-class.html">QueuedRequest</a></li>
-    <li class="self-crumb">queuedAt property</li>
+    <li class="self-crumb">acceptedAt property</li>
   </ol>
-  <div class="self-name">queuedAt</div>
+  <div class="self-name">acceptedAt</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -57,27 +57,27 @@
     data-above-sidebar="offline_web_proxy&#47;QueuedRequest-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">queuedAt</span> property 
+<h1><span class="kind-property">acceptedAt</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
         <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a>
-        <span class="name ">queuedAt</span>
+        <span class="name ">acceptedAt</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>キューイング日時</p>
-<p>隔離領域から再送した場合は、再送を受け付けた時点に更新されます。
-最初に受け付けた時点は <a href="../../offline_web_proxy/QueuedRequest/acceptedAt.html">acceptedAt</a> を参照してください。</p>
+  <p>proxy が最初にこのリクエストを受け付けた日時</p>
+<p>隔離と再送を経ても変わりません。オフラインで行った操作の発生時刻として
+上流へ伝える値です。</p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final DateTime queuedAt;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final DateTime acceptedAt;</code></pre>
 </section>
 
 
@@ -95,7 +95,7 @@
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/QueuedRequest-class.html">QueuedRequest</a></li>
-    <li class="self-crumb">queuedAt property</li>
+    <li class="self-crumb">acceptedAt property</li>
 </ol>
 
 

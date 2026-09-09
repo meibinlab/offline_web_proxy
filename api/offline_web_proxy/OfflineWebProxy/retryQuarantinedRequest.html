@@ -111,7 +111,8 @@
       ..remove(&#39;statusCode&#39;)
       ..[&#39;retryCount&#39;] = 0
       ..[&#39;nextRetryAt&#39;] = now.toIso8601String()
-      &#47;&#47; 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る
+      &#47;&#47; 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る。
+      &#47;&#47; 業務上の発生時刻は acceptedAt が保持するため、ここでは触れない。
       ..[&#39;queuedAt&#39;] = now.toIso8601String();
 
     final key = _generateUniqueStorageKey(queueBox);

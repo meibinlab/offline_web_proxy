@@ -91,6 +91,9 @@
 <li><span class="parameter" id="-param-enableIdempotencyKey"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableIdempotencyKey</span> = <span class="default-value">true</span>, </span></li>
 <li><span class="parameter" id="-param-idempotencyHeaderName"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">idempotencyHeaderName</span> = <span class="default-value">&#39;Idempotency-Key&#39;</span>, </span></li>
 <li><span class="parameter" id="-param-idempotencyRetention"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">idempotencyRetention</span> = <span class="default-value">const Duration(hours: 24)</span>, </span></li>
+<li><span class="parameter" id="-param-queueExcludePaths"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/QueueExcludeRule-class.html">QueueExcludeRule</a></span>&gt;</span></span> <span class="parameter-name">queueExcludePaths</span> = <span class="default-value">const []</span>, </span></li>
+<li><span class="parameter" id="-param-enableAcceptedAtHeader"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableAcceptedAtHeader</span> = <span class="default-value">true</span>, </span></li>
+<li><span class="parameter" id="-param-acceptedAtHeaderName"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">acceptedAtHeaderName</span> = <span class="default-value">&#39;X-Offline-Accepted-At&#39;</span>, </span></li>
 <li><span class="parameter" id="-param-dropPolicy"><span class="type-annotation"><a href="../../offline_web_proxy/DropPolicy.html">DropPolicy</a></span> <span class="parameter-name">dropPolicy</span> = <span class="default-value">DropPolicy.quarantine</span>, </span></li>
 <li><span class="parameter" id="-param-queuedResponse"><span class="type-annotation"><a href="../../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">queuedResponse</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 202, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;queued&quot;:true}&#39;)</span>, </span></li>
 <li><span class="parameter" id="-param-offlineMissResponse"><span class="type-annotation"><a href="../../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">offlineMissResponse</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 504, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;offline&quot;:true}&#39;)</span>, </span></li>
@@ -145,6 +148,9 @@
   this.enableIdempotencyKey = true,
   this.idempotencyHeaderName = &#39;Idempotency-Key&#39;,
   this.idempotencyRetention = const Duration(hours: 24),
+  this.queueExcludePaths = const [],
+  this.enableAcceptedAtHeader = true,
+  this.acceptedAtHeaderName = &#39;X-Offline-Accepted-At&#39;,
   this.dropPolicy = DropPolicy.quarantine,
   this.queuedResponse = const ProxyResponseConfig(
     statusCode: 202,

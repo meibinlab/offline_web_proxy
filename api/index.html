@@ -225,6 +225,18 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
   enableIdempotencyKey: true,
   idempotencyHeaderName: 'Idempotency-Key',
   idempotencyRetention: Duration(hours: 24),
+  queueExcludePaths: [
+    QueueExcludeRule(
+      path: '/api/registers/auth.json',
+      response: ProxyResponseConfig(
+        statusCode: 503,
+        contentType: 'application/json; charset=utf-8',
+        body: '{"message":"オフラインのためレジ認証できません"}',
+      ),
+    ),
+  ],
+  enableAcceptedAtHeader: true,
+  acceptedAtHeaderName: 'X-Offline-Accepted-At',
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -261,6 +273,18 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li>Even on a match, a response carrying <code>Set-Cookie</code> or <code>Vary</code>, or a request carrying <code>Authorization</code>, is not stored. A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason, so a path that never becomes available offline can be diagnosed.</li>
 <li>For a matching path the upstream <code>max-age</code> and <code>Expires</code> are ignored and <code>cacheTtl</code> decides the expiry, because <code>no-store</code> is usually paired with <code>max-age=0</code>, which would make the entry stale the moment it is stored.</li>
 <li><strong>The response cache is not encrypted.</strong> The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.</li>
+</ul>
+</li>
+<li><code>queueExcludePaths</code> keeps update requests out of the offline queue when sending them later would be meaningless — a register sign-in or a sign-out, where the immediate <code>202 Accepted</code> also reads as success. Each rule carries its own response, so every screen can show the wording it already knows. Empty by default.
+<ul>
+<li>The rules apply while offline, when the upstream is unreachable, and when the upstream answered 5xx. A 5xx response is still returned as-is, because the upstream did answer; only the queueing is skipped.</li>
+<li>The answer carries <code>X-Offline-Queued: 0</code> and <code>X-Offline-Excluded: 1</code>.</li>
+</ul>
+</li>
+<li><code>enableAcceptedAtHeader</code> and <code>acceptedAtHeaderName</code> tell the upstream when the proxy first accepted a request. The same UTC ISO 8601 value is sent on the first forward and on every resend, so the upstream needs one rule — use this header when the payload carries no business timestamp — to stop offline sales from being recorded at reconnection time. Enabled by default.
+<ul>
+<li>The value survives a quarantine retry. <code>queuedAt</code> cannot be reused because a retry updates it.</li>
+<li><strong>The value comes from the device clock.</strong> A device whose clock is wrong while offline reports a wrong time.</li>
 </ul>
 </li>
 <li><code>cacheTtl</code> and <code>cacheStale</code> <strong>replace</strong> the default maps rather than merging with them. Always keep a <code>default</code> entry so that unlisted content types still resolve.</li>
@@ -408,6 +432,20 @@ print('failures=${diagnostics.consecutiveUpstreamFailures} '
 <li><code>isUpstreamReachable</code> is whether requests can actually be forwarded, reflecting both the link layer and the circuit breaker.</li>
 <li><code>consecutiveUpstreamFailures</code> and <code>lastUpstreamSuccessAt</code> show how long the upstream has been out of reach.</li>
 </ul>
+<h3 id="reading-resend-outcomes">Reading resend outcomes</h3>
+<p>A queued request is resent in the background, so its response never reaches the page that made it. Subscribe to the event, or read the recent outcomes, when the app has to reconcile what the upstream recorded.</p>
+<pre class="language-dart"><code class="language-dart">proxy.events
+    .where((event) =&gt; event.type == ProxyEventType.queueResendAttempted)
+    .listen((event) {
+  debugPrint('resend: ${event.data['statusCode']} ${event.url}');
+});
+
+// Inspect the last 20 outcomes later (never includes the body)
+for (final result in proxy.recentResendResults) {
+  debugPrint('${result.method} ${result.url} -&gt; ${result.statusCode}');
+}
+</code></pre>
+<p>The outcomes are held in memory for monitoring only and are lost when the app process ends.</p>
 <h2 id="cookie-apis">Cookie APIs</h2>
 <p>Cookies are persisted in encrypted storage and can be restored before the proxy starts.</p>
 <pre class="language-dart"><code class="language-dart">await proxy.restoreCookies([

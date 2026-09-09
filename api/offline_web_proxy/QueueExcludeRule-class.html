@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the QuarantinedRequest class from the offline_web_proxy library, for the Dart programming language.">
-  <title>QuarantinedRequest class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the QueueExcludeRule class from the offline_web_proxy library, for the Dart programming language.">
+  <title>QueueExcludeRule class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,9 +30,9 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../index.html">offline_web_proxy</a></li>
     <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li class="self-crumb">QuarantinedRequest class</li>
+    <li class="self-crumb">QueueExcludeRule class</li>
   </ol>
-  <div class="self-name">QuarantinedRequest</div>
+  <div class="self-name">QueueExcludeRule</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,17 +54,35 @@
     id="dartdoc-main-content"
     class="main-content"
     data-above-sidebar="offline_web_proxy&#47;offline_web_proxy-library-sidebar.html"
-    data-below-sidebar="offline_web_proxy&#47;QuarantinedRequest-class-sidebar.html">
+    data-below-sidebar="offline_web_proxy&#47;QueueExcludeRule-class-sidebar.html">
     <div>
-<h1><span class="kind-class">QuarantinedRequest</span> class 
+<h1><span class="kind-class">QueueExcludeRule</span> class 
  
 </h1></div>
 
     
 <section class="desc markdown">
-  <p>上流に拒否され、隔離領域へ退避した更新系リクエストを表すクラス</p>
-<p>隔離されたリクエストは本文を保持したまま残るため、原因を解消してから
-再送するか、内容を確認したうえで破棄するかを利用側で判断できます。</p>
+  <p>An update request that must not be stored in the offline queue.</p>
+<p>Some update requests lose their meaning once the moment has passed. A
+register sign-in, a sign-out or a session refresh cannot be replayed
+minutes later, and answering <code>202 Accepted</code> for one makes the web app
+believe it succeeded. A rule keeps such a request out of the queue and
+answers it immediately instead.</p>
+<h2 id="example-usage">Example Usage</h2>
+<pre class="language-dart"><code class="language-dart">const config = ProxyConfig(
+  origin: 'https://api.example.com',
+  queueExcludePaths: [
+    QueueExcludeRule(
+      path: '/api/registers/auth.json',
+      response: ProxyResponseConfig(
+        statusCode: 503,
+        contentType: 'application/json; charset=utf-8',
+        body: '{"message":"オフラインのためレジ認証できません"}',
+      ),
+    ),
+  ],
+);
+</code></pre>
 </section>
 
 
@@ -74,11 +92,11 @@
     <h2>Constructors</h2>
 
     <dl class="constructor-summary-list">
-        <dt id="QuarantinedRequest" class="callable">
-          <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/QuarantinedRequest.html">QuarantinedRequest</a></span><span class="signature">({<span class="parameter" id="-param-id"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">id</span>, </span><span class="parameter" id="-param-url"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span>, </span><span class="parameter" id="-param-method"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">method</span>, </span><span class="parameter" id="-param-quarantinedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">quarantinedAt</span>, </span><span class="parameter" id="-param-queuedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">queuedAt</span>, </span><span class="parameter" id="-param-acceptedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">acceptedAt</span>, </span><span class="parameter" id="-param-reason"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">reason</span>, </span><span class="parameter" id="-param-statusCode"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">statusCode</span>, </span><span class="parameter" id="-param-errorMessage"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">errorMessage</span></span>})</span>
+        <dt id="QueueExcludeRule" class="callable">
+          <span class="name"><a href="../offline_web_proxy/QueueExcludeRule/QueueExcludeRule.html">QueueExcludeRule</a></span><span class="signature">({<span class="parameter" id="-param-path"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">path</span>, </span><span class="parameter" id="-param-methods"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span> <span class="parameter-name">methods</span> = <span class="default-value">const []</span>, </span><span class="parameter" id="-param-response"><span class="type-annotation"><a href="../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">response</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 503, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;queued&quot;:false,&quot;offline&quot;:true}&#39;)</span></span>})</span>
         </dt>
         <dd>
-          
+          Creates a queue exclusion rule.
             <div class="constructor-modifier features">const</div>
         </dd>
     </dl>
@@ -89,30 +107,6 @@
       id="instance-properties">
     <h2>Properties</h2>
     <dl class="properties">
-        <dt id="acceptedAt" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/acceptedAt.html">acceptedAt</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span>
-  
-
-</dt>
-<dd>
-  proxy が最初にこのリクエストを受け付けた日時
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="errorMessage" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/errorMessage.html">errorMessage</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
-  
-
-</dt>
-<dd>
-  詳細なエラーメッセージ
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
         <dt id="hashCode" class="property inherited">
   <span class="name"><a href="https://api.flutter.dev/flutter/dart-core/Object/hashCode.html">hashCode</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
@@ -125,62 +119,38 @@
 
 </dd>
 
-        <dt id="id" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/id.html">id</a></span>
+        <dt id="methods" class="property">
+  <span class="name"><a href="../offline_web_proxy/QueueExcludeRule/methods.html">methods</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span>
+  
+
+</dt>
+<dd>
+  HTTP methods the rule applies to.
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="path" class="property">
+  <span class="name"><a href="../offline_web_proxy/QueueExcludeRule/path.html">path</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
   
 
 </dt>
 <dd>
-  隔離領域内での識別子
+  Path pattern the rule applies to.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
 
-        <dt id="method" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/method.html">method</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+        <dt id="response" class="property">
+  <span class="name"><a href="../offline_web_proxy/QueueExcludeRule/response.html">response</a></span>
+  <span class="signature">&#8594; <a href="../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span>
   
 
 </dt>
 <dd>
-  HTTPメソッド
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="quarantinedAt" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/quarantinedAt.html">quarantinedAt</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span>
-  
-
-</dt>
-<dd>
-  隔離された日時
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="queuedAt" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/queuedAt.html">queuedAt</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span>
-  
-
-</dt>
-<dd>
-  隔離される前にキューへ保存された日時
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="reason" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/reason.html">reason</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
-  
-
-</dt>
-<dd>
-  隔離理由（"4xx_error" 等）
+  Response returned instead of queueing the request.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -194,30 +164,6 @@
 <dd class="inherited">
   A representation of the runtime type of the object.
   <div class="features"><span class="feature">no setter</span><span class="feature">inherited</span></div>
-
-</dd>
-
-        <dt id="statusCode" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/statusCode.html">statusCode</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
-  
-
-</dt>
-<dd>
-  上流から返されたHTTPステータスコード
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="url" class="property">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/url.html">url</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
-  
-
-</dt>
-<dd>
-  隔離されたリクエストのURL
-  <div class="features"><span class="feature">final</span></div>
 
 </dd>
 
@@ -243,7 +189,7 @@
 </dd>
 
         <dt id="toString" class="callable">
-  <span class="name"><a href="../offline_web_proxy/QuarantinedRequest/toString.html">toString</a></span><span class="signature">(<wbr>)
+  <span class="name"><a href="../offline_web_proxy/QueueExcludeRule/toString.html">toString</a></span><span class="signature">(<wbr>)
     <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
   </span>
   
@@ -296,7 +242,7 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../index.html">offline_web_proxy</a></li>
     <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li class="self-crumb">QuarantinedRequest class</li>
+    <li class="self-crumb">QueueExcludeRule class</li>
 </ol>
 
 
