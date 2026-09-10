@@ -1,3 +1,35 @@
+## 0.14.0
+
+### 機能追加
+
+- **別 origin の資源を proxy 経由で取得する `mirroredOrigins` を追加**: CDN から UI ライブラリを読み込む画面では、HTML 内の絶対 URL が 127.0.0.1 を経由しないため、キャッシュもフォールバックもウォームアップも効きません。HTML と API を保存できても、描画を担うライブラリが読めなければ画面は動きませんでした。列挙した origin を proxy が中継し、通常のキャッシュとオフライン代替の対象にします。既定は空で、指定が無い限り別 origin には一切関与しません
+  - proxy が返す `text/html` の `<script src>`、`<link href>`、`<img src>` のうち、一致する絶対 URL を `/__offline_web_proxy/ext/<scheme>/<host>[:port]/<元のパス>` へ書き換えます。元の origin をパスの一部として保つため、その資源が持つ相対 URL も同じ origin 配下へ解決されます
+  - 書き換えの判定はウォームアップの参照抽出と同じ正規表現を使います。書き換えた資源は必ず `warmupCache(followReferences: true)` の対象になります
+  - 書き換えは保存時ではなく応答時に行います。キャッシュには上流が返したバイト列をそのまま保持するため、オフラインでキャッシュから返す HTML にも同じ変換がかかり、設定から origin を外せば元の URL に戻ります。本文は `latin1` で読み書きし、文字コードによらずバイト列を保ちます
+  - 中継するのは `GET` と `HEAD` だけです。ほかのメソッドは `405` を返してキューにも載せず、許可していない origin を指すパスは `404` を返して設定済み origin へ素通ししません
+  - **中継先へは `Authorization`、`Origin`、`Referer` とクライアントの `Cookie` を送りません。** Cookie Jar のうち中継先のドメインに一致するものだけを送り、中継先が返す `Set-Cookie` も自身のドメインで保存します
+  - 中継先が返す 3xx の `Location` も中継用のパスへ書き換えます。`resolveNavigationTarget()` は一致する URL を `inWebView` と判定します
+  - 対象は proxy が返す 200 の `text/html` 応答です。上流から取得した応答とそのキャッシュのほか、`offlineFallbackHtml` で差し替えたオフライン応答も含みます。`assets/static/` から配信する同梱 HTML は対象外です
+  - 中継用のパスは要求元が自由に組み立てられるため、`user@host` のように認証情報を含む形と、proxy 自身を指す形は受け付けません
+
+### 変更
+
+- **`ProxyNavigationReason` に `mirroredOriginUrl` を追加**: ミラー対象 origin の URL を解決した場合の理由です。**この enum に対して網羅的な `switch` を書いている場合はコンパイルエラーになります**
+- **`/__offline_web_proxy/ext/` を proxy の予約名前空間にした**: `mirroredOrigins` が空でも上流へは転送せず `404` を返します。稼働確認、状態通知、管理エンドポイントと同じ扱いです
+
+### 修正
+
+- **`ProxyConfig.forceCachePaths` のコメントを実装に合わせた**: 0.13.0 で `Vary: Accept-Encoding` だけの応答を除外対象から外した変更が、公開 API のコメントに反映されていませんでした
+
+### ドキュメント
+
+- **仕様書へ別 origin の中継を追記**: 【1】へ中継用のパス、書き換えの対象と時点、中継の扱い、設定値の検証、制限を追加し、【14】へ `Authorization`、`Cookie`、`Origin`／`Referer`、`Location` の中継時の扱いを追加
+- **README を更新**: 主な機能、設定例、`mirroredOrigins` の説明、現在の制約を日本語版と英語版の双方で同期
+
+### テスト
+
+- **`test/mirrored_origin_test.dart` を追加**: 既定では別 origin に触れないこと、書き換えと中継、キャッシュとオフライン復元、許可外 origin の `404`、更新系の `405`、資源タグと `canonical` の区別、相対 URL と HTML 以外の非対象、ウォームアップの連鎖取得と許可外 origin の失敗記録、資格情報を渡さないこと、絶対と相対の redirect 書き換え、遷移解決、設定値の検証を検証。あわせて版指定の `@` とパーセントエンコードを含むパスの往復、プロトコル相対 URL、認証情報を含む形と proxy 自身を指す形の拒否、Shift_JIS 本文のバイト列保持、`Content-Encoding` を持つ応答の非対象、差し替えたオフライン応答の書き換え、接頭辞付き属性と `srcset` の違い、同梱 HTML の非対象を検証（計 28 件）
+
 ## 0.13.0
 
 ### 改善
