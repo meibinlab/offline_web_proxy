@@ -8,3 +8,4 @@ adb_crash.log
 adb_crash_tail.log
 emulator_capture.png
 temp_dep.yml
+tool/offline_recovery_harness/

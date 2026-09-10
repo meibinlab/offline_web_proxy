@@ -16,6 +16,12 @@ typedef ProxyCurrentUrlProvider = String? Function();
 /// WebView の再読込は本クラスでは行いません。[onRecovered] が受け取る
 /// `reloadUri` を使って、アプリ側が読み込みを実行します。
 ///
+/// proxy が返すオフライン代替ページは、状態通知を読んで自分で再読込します
+/// （`ProxyConfig.enableOfflinePageAutoReload`）。504 ページが再読込するのは、
+/// 自動再読込の結果として表示された場合（`ProxyConfig.enableAutoReloadContinuation`）
+/// と、`ProxyConfig.enableGatewayTimeoutAutoReload` を有効にした場合です。
+/// 本クラスが担うのは、proxy のソケット自体が応答しなくなった場合の復旧です。
+///
 /// ## 使用例
 ///
 /// ```dart

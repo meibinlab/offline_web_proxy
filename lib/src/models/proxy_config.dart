@@ -498,19 +498,127 @@ class ProxyConfig {
   /// **Default**: `504` / `application/json; charset=utf-8` / `{"offline":true}`
   final ProxyResponseConfig offlineMissResponse;
 
+  /// Marker replaced with the auto-reload script inside [offlineFallbackHtml]
+  /// and [gatewayTimeoutHtml].
+  ///
+  /// Write it where a `<script>` element may appear, such as inside `<body>`.
+  /// When the page would receive the script (see [enableOfflinePageAutoReload]
+  /// and [gatewayTimeoutHtml]), only the first occurrence is replaced with it,
+  /// because two copies on one page would reset each other's reload count.
+  /// Every other occurrence is replaced with an empty string. Placed inside
+  /// `<title>`, `<textarea>`, an attribute value or another `<script>`, it
+  /// does nothing or breaks the page.
+  static const String recoveryScriptPlaceholder =
+      '<!--offline-web-proxy:recovery-->';
+
   /// HTML body returned instead of the built-in offline fallback page.
   ///
-  /// Supply the wording that suits your app. `null` keeps the built-in page.
+  /// Supply the wording that suits your app. `null` keeps the built-in page,
+  /// which carries a retry button and, while [enableOfflinePageAutoReload] is
+  /// on and [statusPath] is not empty, a script that reloads the page once the
+  /// upstream is reachable again. The page is answered with `200`,
+  /// `Content-Type: text/html; charset=utf-8` and `Cache-Control: no-store`.
+  ///
+  /// A replaced page receives the script only where it contains
+  /// [recoveryScriptPlaceholder], so add your own retry button as well. A
+  /// `Content-Security-Policy` meta element that forbids inline scripts stops
+  /// the script silently.
   ///
   /// **Default**: `null`
   final String? offlineFallbackHtml;
 
   /// HTML body returned instead of the built-in upstream timeout page.
   ///
-  /// Supply the wording that suits your app. `null` keeps the built-in page.
+  /// Supply the wording that suits your app. `null` keeps the built-in page,
+  /// which carries a retry button. The page is answered with `504`,
+  /// `Content-Type: text/html; charset=utf-8`, `Cache-Control: no-store` and
+  /// `X-Offline-Source: none`.
+  ///
+  /// The page receives the auto-reload script when [statusPath] is not empty
+  /// and any of [enableOfflinePageAutoReload], [enableAutoReloadContinuation]
+  /// or [enableGatewayTimeoutAutoReload] is on. A replaced page receives it
+  /// only where it contains [recoveryScriptPlaceholder], so add your own retry
+  /// button as well. A `Content-Security-Policy` meta element that forbids
+  /// inline scripts stops the script silently.
   ///
   /// **Default**: `null`
   final String? gatewayTimeoutHtml;
+
+  /// Whether the offline fallback page reloads itself once the upstream is
+  /// reachable again.
+  ///
+  /// The fallback page is answered with `200`, so a WebView reports no error
+  /// and the page used to stay on screen after connectivity returned. When
+  /// enabled, the page reads [statusPath] every [autoReloadPollInterval].
+  /// After reading `isUpstreamReachable: true` twice in a row, it waits until
+  /// `queueLength` is zero, or at most [autoReloadQueueWaitTimeout], and
+  /// reloads. Automatic reloads that keep landing on a proxy page stop after
+  /// three in a row, leaving the retry button on the page. For up to
+  /// [requestTimeout] plus 30 seconds after `beforeunload`, a reload is put
+  /// off so it does not cancel a navigation started from the page. A
+  /// navigation that never replaces the page (a `204` response, a download, a
+  /// navigation stopped by the app, an external scheme) delays the reload for
+  /// that long as well, and a navigation that takes longer can still be
+  /// cancelled. Whether WKWebView on iOS fires `beforeunload` has not been
+  /// verified.
+  ///
+  /// "Reachable" is the proxy's own decision, not proof that the upstream
+  /// answered: right after the link layer returns, the first reload can still
+  /// end in a `504`. See [enableAutoReloadContinuation].
+  ///
+  /// The script needs JavaScript in the WebView. Without `sessionStorage` the
+  /// consecutive-reload limit is not enforced and continuation does not run.
+  ///
+  /// **Default**: `true`
+  final bool enableOfflinePageAutoReload;
+
+  /// Whether a gateway timeout page reached by an automatic reload keeps
+  /// trying to recover.
+  ///
+  /// The first reload after connectivity returns may end in a `504` while the
+  /// network is still settling. The page then waits ten seconds, and reloads
+  /// again once the proxy reports the upstream as reachable, up to the
+  /// consecutive-reload limit. Every such `504` triggers the WebView's HTTP
+  /// error callback (`NavigationDelegate.onHttpError` in webview_flutter,
+  /// `onReceivedHttpError` in flutter_inappwebview); disable this setting if
+  /// that conflicts with an error screen in your app.
+  ///
+  /// **Default**: `true`
+  final bool enableAutoReloadContinuation;
+
+  /// Whether the gateway timeout page reloads itself after the proxy detects
+  /// that the upstream went unreachable and came back.
+  ///
+  /// The page is usually shown while the proxy still considers the upstream
+  /// reachable, so it reloads only after observing a change from unreachable
+  /// to reachable, such as the circuit breaker opening and closing or the link
+  /// layer dropping and returning. Disabled by default because a `504` already
+  /// triggers the WebView's HTTP error callback, and every reload that ends in
+  /// another `504` triggers it again.
+  ///
+  /// **Default**: `false`
+  final bool enableGatewayTimeoutAutoReload;
+
+  /// Interval at which the offline pages read [statusPath].
+  ///
+  /// Must be between 100 milliseconds and 24 hours; `start()` rejects other
+  /// values with a `ProxyStartException`. Each read times out after the same
+  /// interval, but never sooner than one second. While reading the status
+  /// keeps failing, the interval doubles up to 30 seconds, or up to this
+  /// interval when it is longer.
+  ///
+  /// **Default**: `Duration(seconds: 3)`
+  final Duration autoReloadPollInterval;
+
+  /// Longest time the offline pages wait for queued requests before reloading.
+  ///
+  /// Reloading before the queue has been resent can show a screen without the
+  /// updates made offline, which invites entering them twice. [Duration.zero]
+  /// reloads without waiting; negative values are rejected by `start()` with a
+  /// `ProxyStartException`.
+  ///
+  /// **Default**: `Duration(seconds: 10)`
+  final Duration autoReloadQueueWaitTimeout;
 
   const ProxyConfig({
     required this.origin,
@@ -553,6 +661,11 @@ class ProxyConfig {
     this.maxRestartAttemptsPerMinute = 5,
     this.offlineFallbackHtml,
     this.gatewayTimeoutHtml,
+    this.enableOfflinePageAutoReload = true,
+    this.enableAutoReloadContinuation = true,
+    this.enableGatewayTimeoutAutoReload = false,
+    this.autoReloadPollInterval = const Duration(seconds: 3),
+    this.autoReloadQueueWaitTimeout = const Duration(seconds: 10),
     this.enableIdempotencyKey = true,
     this.idempotencyHeaderName = 'Idempotency-Key',
     this.idempotencyRetention = const Duration(hours: 24),

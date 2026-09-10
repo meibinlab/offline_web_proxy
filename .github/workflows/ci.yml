@@ -84,6 +84,40 @@ jobs:
         flutter pub global activate coverage
         flutter pub global run coverage:format_coverage --lcov --in=coverage --out=coverage/lcov.info --packages=.dart_tool/package_config.json --report-on=lib
 
+  # 監視スクリプトの回帰テスト（ヘッドレス Chrome で、再読込の有無と再読込までに読んだ状態通知の件数を確かめる）
+  recovery_script_test:
+    name: Recovery Script Test
+    runs-on: ubuntu-latest
+    needs: analyze
+    timeout-minutes: 15
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v5
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        cache: true
+
+    - name: Install dependencies
+      run: flutter pub get
+
+    - name: Generate recovery pages
+      run: dart run tool/offline_recovery_harness/generate_pages.dart build/offline_recovery_harness
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+
+    - name: Show browser version
+      run: google-chrome --version
+
+    - name: Run recovery script scenarios
+      run: node tool/offline_recovery_harness/run.mjs build/offline_recovery_harness
+
   # パッケージ検証
   package_validation:
     name: Package Validation
@@ -174,7 +208,7 @@ jobs:
   release:
     name: Publish to pub.dev + GitHub Release
     runs-on: ubuntu-latest
-    needs: [analyze, test, package_validation, security_audit]
+    needs: [analyze, test, recovery_script_test, package_validation, security_audit]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
