@@ -105,6 +105,7 @@
     _config = config ?? await _loadDefaultConfig();
     _validateHealthCheckPath();
     _validateStatusPath();
+    _validateAutoReloadSettings();
     _validateMirroredOrigins();
     _compileConfiguredPatterns();
     _resetRecoveryState();
@@ -132,7 +133,7 @@
     final router = _createRouter();
     final handler = const shelf.Pipeline()
         .addMiddleware(_errorHandlingMiddleware)
-        .addMiddleware(shelf.logRequests())
+        .addMiddleware(_requestLoggingMiddleware())
         .addMiddleware(_corsMiddleware)
         .addMiddleware(_statisticsMiddleware)
         .addHandler(router.call);

@@ -67,6 +67,11 @@
 アプリが <code>resumed</code> へ遷移した契機で稼働確認を行い、必要なときだけ再バインドします。</p>
 <p>WebView の再読込は本クラスでは行いません。<a href="../offline_web_proxy/ProxyLifecycleGuard/onRecovered.html">onRecovered</a> が受け取る
 <code>reloadUri</code> を使って、アプリ側が読み込みを実行します。</p>
+<p>proxy が返すオフライン代替ページは、状態通知を読んで自分で再読込します
+（<code>ProxyConfig.enableOfflinePageAutoReload</code>）。504 ページが再読込するのは、
+自動再読込の結果として表示された場合（<code>ProxyConfig.enableAutoReloadContinuation</code>）
+と、<code>ProxyConfig.enableGatewayTimeoutAutoReload</code> を有効にした場合です。
+本クラスが担うのは、proxy のソケット自体が応答しなくなった場合の復旧です。</p>
 <h2 id="">使用例</h2>
 <pre class="language-dart"><code class="language-dart">final guard = ProxyLifecycleGuard(
   proxy: proxy,

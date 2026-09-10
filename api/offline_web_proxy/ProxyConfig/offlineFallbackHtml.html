@@ -70,7 +70,15 @@
       
 <section class="desc markdown">
   <p>HTML body returned instead of the built-in offline fallback page.</p>
-<p>Supply the wording that suits your app. <code>null</code> keeps the built-in page.</p>
+<p>Supply the wording that suits your app. <code>null</code> keeps the built-in page,
+which carries a retry button and, while <a href="../../offline_web_proxy/ProxyConfig/enableOfflinePageAutoReload.html">enableOfflinePageAutoReload</a> is
+on and <a href="../../offline_web_proxy/ProxyConfig/statusPath.html">statusPath</a> is not empty, a script that reloads the page once the
+upstream is reachable again. The page is answered with <code>200</code>,
+<code>Content-Type: text/html; charset=utf-8</code> and <code>Cache-Control: no-store</code>.</p>
+<p>A replaced page receives the script only where it contains
+<a href="../../offline_web_proxy/ProxyConfig/recoveryScriptPlaceholder-constant.html">recoveryScriptPlaceholder</a>, so add your own retry button as well. A
+<code>Content-Security-Policy</code> meta element that forbids inline scripts stops
+the script silently.</p>
 <p><strong>Default</strong>: <code>null</code></p>
 </section>
 
