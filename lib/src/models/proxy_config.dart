@@ -130,7 +130,10 @@ class ProxyConfig {
   ///
   /// * the response carries `Set-Cookie`, which would persist a session on the
   ///   device and replay it later
-  /// * the response carries `Vary`, which the URL-only cache key cannot honour
+  /// * the response carries `Vary`, which the URL-only cache key cannot
+  ///   honour, unless it names `Accept-Encoding` alone: the proxy pins
+  ///   `Accept-Encoding: identity` on every upstream request, so such a
+  ///   response cannot vary
   /// * the request carried `Authorization`, so the response belongs to one user
   ///
   /// A skipped response raises `ProxyEventType.cacheSkipped` with the reason,
@@ -153,6 +156,41 @@ class ProxyConfig {
   /// **Example**: `['/app/**', '/js/*.js']`
   /// **Default**: `[]` (no path is force-cached)
   final List<String> forceCachePaths;
+
+  /// Additional origins whose resources are fetched and cached through the
+  /// proxy.
+  ///
+  /// The proxy serves a single upstream [origin], so an absolute URL pointing
+  /// at a CDN is fetched by the WebView directly and never reaches the proxy:
+  /// it is neither cached nor available offline. A screen whose rendering
+  /// depends on a CDN-hosted library therefore stays broken offline even when
+  /// its own HTML and API responses are cached.
+  ///
+  /// Listing an origin here makes the proxy rewrite matching absolute URLs in
+  /// the HTML it serves to a local path and relay those requests to that
+  /// origin, which puts the resource on the ordinary cache, offline fallback
+  /// and warmup paths.
+  ///
+  /// * Matching is exact on scheme, host and port. `'https://cdn.example.com'`
+  ///   covers neither `http://cdn.example.com` nor another host
+  /// * Only `GET` and `HEAD` are relayed. Any other method answers `405`,
+  ///   because a listed origin is meant to serve static resources
+  /// * Rewriting covers `<script src>`, `<link href>` and `<img src>` in
+  ///   `text/html` responses, which is exactly what
+  ///   `warmupCache(followReferences: true)` collects. A URL that JavaScript
+  ///   assembles at runtime is out of reach
+  /// * The client's `Cookie`, `Authorization`, `Origin` and `Referer` headers
+  ///   are not relayed to a listed origin, so credentials held for the upstream
+  ///   origin never reach a third party. Cookies a listed origin sets are kept
+  ///   in the jar under its own domain
+  ///
+  /// **Content-Security-Policy**: a rewritten URL becomes same-origin with the
+  /// proxy, so a page that restricts `script-src` or `style-src` has to allow
+  /// `'self'`.
+  ///
+  /// **Example**: `['https://cdn.jsdelivr.net']`
+  /// **Default**: `[]` (no other origin is relayed)
+  final List<String> mirroredOrigins;
 
   /// Number of consecutive unreachable upstream attempts that opens the
   /// upstream circuit breaker.
@@ -495,6 +533,7 @@ class ProxyConfig {
       'default': 259200,
     },
     this.forceCachePaths = const [],
+    this.mirroredOrigins = const [],
     this.upstreamFailureThreshold = 3,
     this.upstreamProbePath = '/',
     this.upstreamProbeMethod = 'HEAD',

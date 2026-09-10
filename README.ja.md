@@ -13,6 +13,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 
 - Flutter WebView 向けローカルプロキシサーバ
 - `assets/static/` に同梱した静的リソースの配信（CDN 依存の資材をアプリへ取り込める）
+- CDN など別 origin の資源の proxy 経由での取得とキャッシュ（`mirroredOrigins`）
 - オフライン時と上流到達不能時（接続失敗・リクエストタイムアウト）に限定したフォールバックキャッシュ
 - POST、PUT、DELETE のオフラインキューイング
 - AES-256 による Cookie 永続化と復元 API
@@ -175,6 +176,7 @@ const config = ProxyConfig(
     'default': 259200,
   },
   forceCachePaths: ['/app/**'],
+  mirroredOrigins: ['https://cdn.example.com'],
   connectTimeout: Duration(seconds: 5),
   requestTimeout: Duration(seconds: 20),
   upstreamFailureThreshold: 3,
@@ -229,7 +231,7 @@ const config = ProxyConfig(
 - `preferredPort` を指定すると、まずそのポートを試し、使えない場合は自動割り当てへフォールバックします。直前に成功したポートも次回起動時に再利用されるため、WebView の origin をより安定させやすくなります。
 - `startupPaths` は `warmupCache()` で、オフライン時または上流到達不能時の代替応答を事前準備したいパスに使います。
   - ウォームアップは転送経路と同じく Cookie Jar の内容を送ります。認証後に呼び出せば、認証が必要な API も取得できます。
-  - `warmupCache(followReferences: true)` を指定すると、取得した HTML が参照する同一 origin の資源（`<script src>`、`<link href>`、`<img src>`）も続けて取得します。1 段だけ辿り、実行時に JavaScript が組み立てる URL には届きません。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。
+  - `warmupCache(followReferences: true)` を指定すると、取得した HTML が参照する資源（`<script src>`、`<link href>`、`<img src>`）も続けて取得します。対象は同一 origin と `mirroredOrigins` に列挙した origin です。1 段だけ辿り、実行時に JavaScript が組み立てる URL には届きません。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。
 - `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。Web アプリのルートと衝突する場合に変更します。
 - `statusPath` は proxy の状態を JSON で返すパスです。`healthCheckPath` と同じ扱いで、上流へ転送されず統計にも計上されません。空文字列を指定すると無効になります。
 - `enableAdminApi` を `true` にすると、隔離キューの一覧・再送・破棄を HTTP から操作できます。既定は無効です。
@@ -245,6 +247,14 @@ const config = ProxyConfig(
   - `Vary` が `Accept-Encoding` だけを指す場合に保存するのは、proxy が上流へ `Accept-Encoding: identity` を固定で送るため応答が割れないからです。Tomcat、nginx、Apache は圧縮を有効にするとこの `Vary` を既定で付けるため、除外すると画面の HTML、JS、CSS がまとめて対象外になります。`*` や他のヘッダ名を含む場合は除外します。
   - 一致したパスでは上流の `max-age` や `Expires` を使わず、`cacheTtl` の値を有効期限に使います。`no-store` は `max-age=0` と併記されることが多く、そのまま採用すると保存直後に stale になるためです。
   - **応答キャッシュは暗号化していません。** 指定したパスの応答本文は端末内に平文で残るため、画面が含む情報を踏まえて指定してください。
+- `mirroredOrigins` は、proxy 経由で取得する別 origin の一覧です。CDN から UI ライブラリを読み込む画面では、HTML 内の絶対 URL が 127.0.0.1 を経由せず、キャッシュもフォールバックもウォームアップも効きません。列挙した origin は proxy が中継し、通常のキャッシュとオフライン代替の対象になります。既定は空です。
+  - proxy が返す `text/html` の `<script src>`、`<link href>`、`<img src>` のうち、一致する絶対 URL を `/__offline_web_proxy/ext/<scheme>/<host>[:port]/<元のパス>` へ書き換えます。`<link>` は `stylesheet` など資源を指す `rel` だけが対象です。
+  - 書き換えの判定はウォームアップの参照抽出と同じです。**書き換えた資源は必ず `warmupCache(followReferences: true)` の対象になります**。
+  - 書き換えは保存時ではなく応答時に行うため、オフラインでキャッシュから返す HTML にも同じ変換がかかります。設定から origin を外せば元の URL に戻ります。
+  - 中継するのは `GET` と `HEAD` だけです。ほかのメソッドは `405` を返し、キューにも載せません。許可していない origin を指すパスは `404` を返し、設定済み origin へ素通ししません。
+  - 一致判定はスキーム、ホスト、ポートの完全一致です。パスやクエリを含む値を指定すると起動時に `ProxyStartException` になります。
+  - **中継先へは `Authorization`、`Origin`、`Referer` とクライアントの `Cookie` を送りません。** Cookie Jar のうち中継先のドメインに一致するものだけを送ります。
+  - 実行時に JavaScript が組み立てる URL には届きません。`Content-Security-Policy` を返す画面では、書き換え後の URL が proxy と same-origin になるため `'self'` の許可が必要です。`assets/static/` から配信する同梱 HTML は書き換えの対象外です。
 - `queueExcludePaths` は、後から送っても意味が無い更新系をキューへ入れないための規則です。レジ認証やログアウトのように、復帰後に送っても業務上の意味が無く、`202 Accepted` が成功と誤認される要求に使います。規則ごとに応答を設定できるため、画面ごとの文言を Web 側の改修なしに返せます。既定は空です。
   - オフライン時、上流へ到達できなかった場合、上流が 5xx を返した場合のすべてに適用します。ただし 5xx は上流が実際に応答しているため、応答をそのまま返してキューへの保存だけを行いません。
   - 応答には `X-Offline-Queued: 0` と `X-Offline-Excluded: 1` を付与します。
@@ -619,7 +629,7 @@ proxy.events.listen((event) {
 
 ## 現在の制約
 
-- 1 つの `OfflineWebProxy` インスタンスが扱える上流 origin は 1 つです。
+- 1 つの `OfflineWebProxy` インスタンスが業務要求を転送する上流 origin は 1 つです。資源だけを配信する別 origin は `mirroredOrigins` で中継できますが、`GET` と `HEAD` に限られます。
 - サポートされる設定経路は `ProxyConfig` です。外部 YAML の自動読込は未実装です。
 - `assets/static/` から配信できるのは `GET` と `HEAD` だけです。同名パスへの更新系は静的扱いにせず上流へ転送します。Range 要求には対応していません。
 - `AssetManifest.json` または実行環境上の同等 manifest を読み込めない場合は、静的リソースを一覧化せず、通常の upstream 解決へフォールバックします。

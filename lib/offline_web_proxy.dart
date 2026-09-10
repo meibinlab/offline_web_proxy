@@ -157,6 +157,10 @@ const String _defaultStatusPath = '/__offline_web_proxy/status';
 /// 管理エンドポイントのパス接頭辞。
 /// proxy が予約している名前空間の下に固定し、業務ルートと衝突させない。
 const String _adminPathPrefix = '/__offline_web_proxy/admin';
+
+/// 別 origin の資源を中継するパスの接頭辞。
+/// proxy が予約している名前空間の下に固定し、業務ルートと衝突させない。
+const String _mirroredOriginPathPrefix = '/__offline_web_proxy/ext';
 const String _defaultLoopbackHost = '127.0.0.1';
 
 /// 復旧の連続失敗時に挟む待機秒数。末尾の値は以降も維持されます。
@@ -427,6 +431,10 @@ class OfflineWebProxy {
   List<({PathPattern pattern, QueueExcludeRule rule})> _queueExcludeRules =
       const [];
 
+  /// 起動時に構築した、proxy 経由で中継する別 origin の一覧。
+  /// scheme と host は小文字化し、既定ポートは省いた形で保持する。
+  List<Uri> _mirroredOrigins = const [];
+
   /// 直近のキュー再送結果。古いものから捨てる。
   /// 監視用のため永続化はせず、アプリのプロセスが終了すると失われる。
   final Queue<QueueResendResult> _recentResendResults =
@@ -522,6 +530,7 @@ class OfflineWebProxy {
       _config = config ?? await _loadDefaultConfig();
       _validateHealthCheckPath();
       _validateStatusPath();
+      _validateMirroredOrigins();
       _compileConfiguredPatterns();
       _resetRecoveryState();
 
@@ -630,6 +639,7 @@ class OfflineWebProxy {
       _staticResourceEntityTags.clear();
       _forceCachePatterns = const [];
       _queueExcludeRules = const [];
+      _mirroredOrigins = const [];
     } catch (e) {
       failure = e;
     } finally {
@@ -1169,6 +1179,25 @@ class OfflineWebProxy {
     }
   }
 
+  /// ミラー対象 origin の設定値を検証します。
+  ///
+  /// 誤った値のままでも書き換えと中継が静かに行われないだけで動作は続くため、
+  /// 設定の誤りに気付けるよう起動時に弾きます。
+  ///
+  /// Throws:
+  ///   * [ProxyStartException] origin として解釈できない値がある場合。
+  void _validateMirroredOrigins() {
+    for (final origin in _config?.mirroredOrigins ?? const <String>[]) {
+      if (_tryNormalizeMirroredOrigin(origin) == null) {
+        throw ProxyStartException(
+          'mirroredOrigins must be an http(s) origin without a path, '
+          'such as "https://cdn.example.com": $origin',
+          null,
+        );
+      }
+    }
+  }
+
   /// 設定に含まれるパスパターンを起動時に組み立てます。
   ///
   /// リクエストのたびに正規表現を生成しないよう、`start()` で一度だけ
@@ -1178,6 +1207,10 @@ class OfflineWebProxy {
         PathPattern.compileAll(_config?.forceCachePaths ?? const []);
     _queueExcludeRules = (_config?.queueExcludePaths ?? const [])
         .map((rule) => (pattern: PathPattern(rule.path), rule: rule))
+        .toList(growable: false);
+    _mirroredOrigins = (_config?.mirroredOrigins ?? const <String>[])
+        .map(_tryNormalizeMirroredOrigin)
+        .whereType<Uri>()
         .toList(growable: false);
   }
 
@@ -2000,7 +2033,7 @@ class OfflineWebProxy {
         );
 
         if (followReferences) {
-          references = _extractSameOriginReferences(
+          references = _extractWarmupReferences(
             response: response,
             baseUri: upstreamUri,
           );
@@ -2053,16 +2086,17 @@ class OfflineWebProxy {
     return trimmedPath.startsWith('/') ? trimmedPath : '/$trimmedPath';
   }
 
-  /// ウォームアップした HTML から同一 origin の参照資源を抽出します。
+  /// ウォームアップした HTML から取得対象の参照資源を抽出します。
   ///
   /// `<script src>`、`<link href>`、`<img src>` を対象とします。実行時に
   /// JavaScript が組み立てる URL には届かないため、最善努力の抽出です。
+  /// ミラー対象 origin の資源は中継用のパスとして返します。
   ///
   /// [response] 取得した応答。
   /// [baseUri] 相対 URL の解決に使う上流 URI。
   ///
   /// Returns: 取得すべきパスの一覧。HTML でない場合は空。
-  List<String> _extractSameOriginReferences({
+  List<String> _extractWarmupReferences({
     required http.Response response,
     required Uri baseUri,
   }) {
@@ -2097,7 +2131,7 @@ class OfflineWebProxy {
           continue;
         }
 
-        final resolved = _resolveSameOriginReference(rawUrl.trim(), baseUri);
+        final resolved = _resolveWarmupReference(rawUrl.trim(), baseUri);
         if (resolved != null) {
           references.add(resolved);
         }
@@ -2130,18 +2164,15 @@ class OfflineWebProxy {
 
   /// 参照 URL をウォームアップ用のパスへ変換します。
   ///
-  /// 別 origin や `data:` などの取得対象にならない URL は除外します。
+  /// 設定済み origin とミラー対象 origin の資源を対象とし、それ以外の別
+  /// origin や `data:` などの取得対象にならない URL は除外します。
   ///
   /// [rawUrl] HTML に書かれていた URL。
   /// [baseUri] 相対 URL の解決に使う上流 URI。
   ///
-  /// Returns: 同一 origin の場合はクエリを含むパス。対象外の場合は `null`。
-  String? _resolveSameOriginReference(String rawUrl, Uri baseUri) {
-    if (rawUrl.startsWith('#') ||
-        rawUrl.startsWith('data:') ||
-        rawUrl.startsWith('javascript:') ||
-        rawUrl.startsWith('mailto:') ||
-        rawUrl.startsWith('blob:')) {
+  /// Returns: 取得に使うクエリを含むパス。対象外の場合は `null`。
+  String? _resolveWarmupReference(String rawUrl, Uri baseUri) {
+    if (_isNonFetchableReferenceUrl(rawUrl)) {
       return null;
     }
 
@@ -2150,6 +2181,12 @@ class OfflineWebProxy {
       resolved = baseUri.resolve(rawUrl);
     } catch (_) {
       return null;
+    }
+
+    // ミラー対象は中継用のパスで取得する。書き換えた資源と同じ判定を使い、
+    // 画面が読み込む URL とウォームアップの対象を一致させる。
+    if (!_isSameOriginAsConfiguredOrigin(resolved)) {
+      return _buildMirroredProxyPath(resolved);
     }
 
     if (resolved.scheme != baseUri.scheme ||
@@ -2369,7 +2406,16 @@ class OfflineWebProxy {
     if (uri.hasPort) {
       return uri.port;
     }
-    return switch (uri.scheme.toLowerCase()) {
+    return _defaultPortForScheme(uri.scheme);
+  }
+
+  /// スキームの既定ポート番号を返します。
+  ///
+  /// [scheme] 判定するスキーム。
+  ///
+  /// Returns: 既定ポート。HTTP(S) 以外は `-1`。
+  int _defaultPortForScheme(String scheme) {
+    return switch (scheme.toLowerCase()) {
       'https' => 443,
       'http' => 80,
       _ => -1,
@@ -3419,10 +3465,16 @@ class OfflineWebProxy {
       return await _handleWebStorageBridgeRequest(request);
     }
 
-    // 起動時に構築した静的リソース一覧を先に確認する。
-    // GET と HEAD 以外は同名パスでも上流の処理が必要なため対象にしない。
-    if (_isStaticResourceServableMethod(request.method) &&
+    if (_isMirroredOriginPath(path)) {
+      // 中継できない要求を設定済み origin へ回さない
+      final rejection = _findMirroredOriginRejection(request, path);
+      if (rejection != null) {
+        return rejection;
+      }
+    } else if (_isStaticResourceServableMethod(request.method) &&
         await _isStaticResource(path)) {
+      // 起動時に構築した静的リソース一覧を先に確認する。
+      // GET と HEAD 以外は同名パスでも上流の処理が必要なため対象にしない。
       final staticResponse = await _serveStaticResource(request, path);
       if (staticResponse != null) {
         return staticResponse;
@@ -3431,11 +3483,60 @@ class OfflineWebProxy {
     }
 
     // 接続状態と上流到達性に基づいて処理
-    if (_isUpstreamReachable) {
-      return await _handleOnlineRequest(request);
-    } else {
-      return await _handleOfflineRequest(request);
+    final response = _isUpstreamReachable
+        ? await _handleOnlineRequest(request)
+        : await _handleOfflineRequest(request);
+
+    // オンラインとオフラインのどちらの経路でも同じ書き換えを通す
+    return await _decorateResponseForMirroredOrigins(
+      request: request,
+      response: response,
+    );
+  }
+
+  /// ミラー中継の要求を受け付けられない理由を判定します。
+  ///
+  /// [request] 受信した要求。
+  /// [path] 先頭を `/` に正規化したリクエストパス。
+  ///
+  /// Returns: 受け付けられない場合に返す応答。受け付ける場合は `null`。
+  shelf.Response? _findMirroredOriginRejection(
+    shelf.Request request,
+    String path,
+  ) {
+    if (!_isStaticResourceServableMethod(request.method)) {
+      // 別 origin は資源の配信だけを想定しており、更新系はキューにも載せない
+      _emitEvent(ProxyEventType.errorOccurred, request.url.toString(), {
+        'phase': 'mirroredOrigin',
+        'error': 'method is not allowed',
+        'method': request.method,
+      });
+      return shelf.Response(
+        HttpStatus.methodNotAllowed,
+        headers: {
+          'Allow': 'GET, HEAD',
+          'Cache-Control': 'no-store',
+        },
+      );
     }
+
+    final upstreamUri = _tryResolveMirroredUpstreamUri(
+      path: path,
+      query: request.url.query,
+    );
+    if (upstreamUri == null) {
+      // 許可していない origin への中継は、設定の誤りとして追跡できるようにする
+      _emitEvent(ProxyEventType.errorOccurred, request.url.toString(), {
+        'phase': 'mirroredOrigin',
+        'error': 'origin is not allowed',
+      });
+      return shelf.Response(
+        HttpStatus.notFound,
+        headers: {'Cache-Control': 'no-store'},
+      );
+    }
+
+    return null;
   }
 
   /// WebStorage 継承用のブリッジリクエストを処理します。
@@ -3448,7 +3549,7 @@ class OfflineWebProxy {
 
     if (request.method.toUpperCase() == 'POST') {
       try {
-        final body = await _readRequestBodyBytes(request);
+        final body = await _readMessageBytes(request.read());
         final decoded = jsonDecode(utf8.decode(body));
         if (decoded is Map) {
           await _persistWebStorageSnapshot(
@@ -3634,6 +3735,196 @@ class OfflineWebProxy {
         .any((value) => value == entityTag || value == '*');
   }
 
+  /// 応答 HTML 内のミラー対象 origin の URL を proxy 経路へ書き換えます。
+  ///
+  /// 保存時ではなく応答時に書き換えます。キャッシュには上流が返したバイト列を
+  /// そのまま残せるため、オンラインとオフラインのどちらの経路でも同じ変換を
+  /// 通せます。設定から origin を外せば、保存済みの応答も元の URL に戻ります。
+  ///
+  /// 本文は `latin1` で読み書きします。URL と対象タグは ASCII の範囲に収まる
+  /// ため、文字コードが何であってもバイト列をそのまま保てます。
+  ///
+  /// [request] 受信した要求。
+  /// [response] 返却しようとしている応答。
+  ///
+  /// Returns: 書き換え後の応答。対象外の場合は [response] をそのまま返します。
+  Future<shelf.Response> _decorateResponseForMirroredOrigins({
+    required shelf.Request request,
+    required shelf.Response response,
+  }) async {
+    if (_mirroredOrigins.isEmpty) {
+      return response;
+    }
+
+    // 本文を持たない応答には書き換える対象が無い
+    if (response.statusCode != HttpStatus.ok ||
+        request.method.toUpperCase() == 'HEAD') {
+      return response;
+    }
+
+    final contentType = response.headers['content-type'] ?? '';
+    if (!contentType.toLowerCase().contains('text/html')) {
+      return response;
+    }
+
+    // 上流が identity を無視して圧縮した本文は解釈できない
+    final contentEncoding =
+        (response.headers['content-encoding'] ?? '').trim().toLowerCase();
+    if (contentEncoding.isNotEmpty && contentEncoding != 'identity') {
+      return response;
+    }
+
+    final baseUri = _tryBuildUpstreamUriFromPathAndQuery(
+      path: request.url.path,
+      query: request.url.query,
+    );
+    if (baseUri == null) {
+      return response;
+    }
+
+    final Uint8List bodyBytes;
+    try {
+      bodyBytes = await _readMessageBytes(response.read());
+    } catch (_) {
+      // 本文を読めない応答は書き換えずに諦める
+      return response;
+    }
+
+    final originalBody = latin1.decode(bodyBytes, allowInvalid: true);
+    final rewrittenBody = _rewriteMirroredOriginReferences(
+      originalBody,
+      baseUri,
+    );
+
+    // 本文は既に読み終えているため、変換が無くても組み立て直す
+    var responseBytes = bodyBytes;
+    if (!identical(rewrittenBody, originalBody)) {
+      try {
+        responseBytes = Uint8List.fromList(latin1.encode(rewrittenBody));
+      } catch (_) {
+        responseBytes = bodyBytes;
+      }
+    }
+
+    return response.change(
+      body: responseBytes,
+      headers: {
+        ...response.headers,
+        'Content-Length': responseBytes.length.toString(),
+      },
+    );
+  }
+
+  /// HTML 内のミラー対象 origin の参照 URL を proxy 経路へ書き換えます。
+  ///
+  /// 対象タグはウォームアップの参照抽出と同じです。書き換えた資源が
+  /// `warmupCache(followReferences: true)` の対象から漏れないようにするため、
+  /// 判定は共通の正規表現に寄せています。
+  ///
+  /// [html] 応答本文。
+  /// [baseUri] 相対 URL の解決に使う upstream URI。
+  ///
+  /// Returns: 書き換え後の HTML。対象が無い場合は [html] をそのまま返します。
+  String _rewriteMirroredOriginReferences(String html, Uri baseUri) {
+    final buffer = StringBuffer();
+    var copiedUpTo = 0;
+
+    for (final tagMatch in _referenceTagPattern.allMatches(html)) {
+      final tagName = (tagMatch.group(1) ?? '').toLowerCase();
+      final attributes = tagMatch.group(2) ?? '';
+
+      // canonical や alternate は資源ではなく別ページを指すため書き換えない
+      if (tagName == 'link' && !_isResourceLinkTag(attributes)) {
+        continue;
+      }
+
+      final rewrittenAttributes =
+          _rewriteMirroredOriginAttributes(attributes, baseUri);
+      if (rewrittenAttributes == attributes) {
+        continue;
+      }
+
+      // 属性部は必ずタグ末尾の `>` の直前で終わるため、位置を逆算できる
+      final attributesEnd = tagMatch.end - 1;
+      final attributesStart = attributesEnd - attributes.length;
+      buffer.write(html.substring(copiedUpTo, attributesStart));
+      buffer.write(rewrittenAttributes);
+      copiedUpTo = attributesEnd;
+    }
+
+    if (copiedUpTo == 0) {
+      return html;
+    }
+
+    buffer.write(html.substring(copiedUpTo));
+    return buffer.toString();
+  }
+
+  /// タグの属性部にある参照 URL を proxy 経路へ書き換えます。
+  ///
+  /// [attributes] タグの属性部。
+  /// [baseUri] 相対 URL の解決に使う upstream URI。
+  ///
+  /// Returns: 書き換え後の属性部。
+  String _rewriteMirroredOriginAttributes(String attributes, Uri baseUri) {
+    return attributes.replaceAllMapped(_referenceUrlPattern, (match) {
+      final matchedText = match[0]!;
+      final rawUrl = match.group(1) ?? match.group(2) ?? match.group(3);
+      if (rawUrl == null) {
+        return matchedText;
+      }
+
+      final trimmedUrl = rawUrl.trim();
+      if (trimmedUrl.isEmpty) {
+        return matchedText;
+      }
+
+      final proxyPath = _tryBuildMirroredProxyPathForReference(
+        trimmedUrl,
+        baseUri,
+      );
+      if (proxyPath == null) {
+        return matchedText;
+      }
+
+      // 引用符や空白の書き方を保つため、値の部分だけを差し替える
+      final valueStart = matchedText.lastIndexOf(trimmedUrl);
+      if (valueStart < 0) {
+        return matchedText;
+      }
+
+      return matchedText.substring(0, valueStart) +
+          proxyPath +
+          matchedText.substring(valueStart + trimmedUrl.length);
+    });
+  }
+
+  /// 参照 URL がミラー対象 origin を指す場合に proxy 経路のパスを返します。
+  ///
+  /// [rawUrl] HTML に書かれていた URL。
+  /// [baseUri] 相対 URL の解決に使う upstream URI。
+  ///
+  /// Returns: proxy が受け付けるパス。対象外の場合は `null`。
+  String? _tryBuildMirroredProxyPathForReference(String rawUrl, Uri baseUri) {
+    if (_isNonFetchableReferenceUrl(rawUrl)) {
+      return null;
+    }
+
+    final Uri resolvedUri;
+    try {
+      resolvedUri = baseUri.resolve(rawUrl);
+    } catch (_) {
+      return null;
+    }
+
+    // 設定済み origin は通常の proxy パスで届くため書き換えない
+    if (_isSameOriginAsConfiguredOrigin(resolvedUri)) {
+      return null;
+    }
+
+    return _buildMirroredProxyPath(resolvedUri);
+  }
+
   /// HTMLレスポンスに WebStorage 継承用スクリプトを注入します。
   Future<shelf.Response> _decorateResponseForWebStorageInheritance({
     required shelf.Request request,
@@ -3707,7 +3998,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     // 上流転送とキュー保存で共有する。
     final Uint8List? requestBodyBytes = _isReadRequestMethod(request.method)
         ? null
-        : await _readRequestBodyBytes(request);
+        : await _readMessageBytes(request.read());
 
     // 転送とキュー再送で同じキーを使い、timeout 後の再送を上流が重複と判別できるようにする
     final ({String value, bool suppliedByClient})? idempotency =
@@ -3872,9 +4163,18 @@ window.__offline_web_proxy_web_storage_bridge = {
     return remaining.isNegative ? Duration.zero : remaining;
   }
 
-  Future<Uint8List> _readRequestBodyBytes(shelf.Request request) async {
+  /// 要求または応答の本文をバイト列として読み出します。
+  ///
+  /// 本文のストリームは一度しか読めないため、読み直しが必要な処理では
+  /// 呼び出し側でバイト列を保持します。shelf は要求と応答の基底クラスを
+  /// 公開していないため、ストリームを受け取ります。
+  ///
+  /// [body] 読み出す本文のストリーム。
+  ///
+  /// Returns: 本文のバイト列。
+  Future<Uint8List> _readMessageBytes(Stream<List<int>> body) async {
     final builder = BytesBuilder(copy: false);
-    await for (final chunk in request.read()) {
+    await for (final chunk in body) {
       builder.add(chunk);
     }
     return builder.takeBytes();
@@ -4388,7 +4688,14 @@ window.__offline_web_proxy_web_storage_bridge = {
           .openUrl(request.method, uri)
           .timeout(_remainingUntil(deadline));
       ioRequest.followRedirects = false;
-      await _copyRequestHeaders(request, ioRequest, upstreamUri: uri);
+      await _copyRequestHeaders(
+        request,
+        ioRequest,
+        upstreamUri: uri,
+        // 設定済み origin 以外へ渡すヘッダを絞る。経路ではなく行き先で
+        // 判定し、どの入口から来た要求でも同じ扱いにする。
+        isMirroredOrigin: !_isSameOriginAsConfiguredOrigin(uri),
+      );
 
       // 応答を受け取れずキューへ回った場合でも同じキーで再送できるようにする
       if (idempotencyKey != null && (_config?.enableIdempotencyKey ?? true)) {
@@ -4403,7 +4710,8 @@ window.__offline_web_proxy_web_storage_bridge = {
 
       // read系以外のリクエストの場合はボディをコピー
       if (!_isReadRequestMethod(request.method)) {
-        final bytes = requestBodyBytes ?? await _readRequestBodyBytes(request);
+        final bytes =
+            requestBodyBytes ?? await _readMessageBytes(request.read());
         if (bytes.isNotEmpty) {
           ioRequest.add(bytes);
         }
@@ -4436,10 +4744,16 @@ window.__offline_web_proxy_web_storage_bridge = {
   }
 
   /// リクエストヘッダを上流リクエストにコピーします。
+  ///
+  /// [request] 受信した要求。
+  /// [ioRequest] 転送先の上流リクエスト。
+  /// [upstreamUri] 転送先の upstream URI。
+  /// [isMirroredOrigin] 設定済み origin 以外へ中継する場合は `true`。
   Future<void> _copyRequestHeaders(
     shelf.Request request,
     HttpClientRequest ioRequest, {
     required Uri upstreamUri,
+    bool isMirroredOrigin = false,
   }) async {
     final connectionSpecificHeaders =
         _extractConnectionSpecificHeaders(request.headers);
@@ -4447,15 +4761,20 @@ window.__offline_web_proxy_web_storage_bridge = {
       if (_shouldForwardUpstreamHeader(
         key,
         connectionSpecificHeaders: connectionSpecificHeaders,
+        dropCredentialHeaders: isMirroredOrigin,
       )) {
         ioRequest.headers.set(key, value);
       }
     });
 
-    final mergedCookieHeader = await _mergeCookieHeaderForUpstream(
-      upstreamUri,
-      request.headers['cookie'],
-    );
+    // 別 origin へは、WebView が proxy origin 向けに送った Cookie を渡さない。
+    // proxy origin の Cookie は設定済み origin のものとして扱うため。
+    final mergedCookieHeader = isMirroredOrigin
+        ? await _buildCookieHeaderForUri(upstreamUri)
+        : await _mergeCookieHeaderForUpstream(
+            upstreamUri,
+            request.headers['cookie'],
+          );
     if (mergedCookieHeader != null && mergedCookieHeader.isNotEmpty) {
       ioRequest.headers.set('cookie', mergedCookieHeader);
     }
@@ -4606,10 +4925,19 @@ window.__offline_web_proxy_web_storage_bridge = {
   }
 
   /// 上流へ転送するヘッダかどうかを返します。
+  ///
+  /// [key] 判定するヘッダ名。
+  /// [connectionSpecificHeaders] `Connection` が指名するヘッダ名の一覧。
+  /// [dropContentLength] `Content-Length` を落とす場合は `true`。
+  /// [dropCredentialHeaders] 資格情報と要求元を伝えるヘッダを落とす場合は
+  ///   `true`。設定済み origin 以外へ中継するときに使います。
+  ///
+  /// Returns: 転送する場合は `true`。
   bool _shouldForwardUpstreamHeader(
     String key, {
     required Set<String> connectionSpecificHeaders,
     bool dropContentLength = false,
+    bool dropCredentialHeaders = false,
   }) {
     final lowerKey = key.toLowerCase();
     if (_isHopByHopHeader(key) ||
@@ -4620,6 +4948,15 @@ window.__offline_web_proxy_web_storage_bridge = {
     if (lowerKey == 'accept-encoding' ||
         lowerKey == 'host' ||
         lowerKey == 'cookie') {
+      return false;
+    }
+
+    // 設定済み origin 向けの資格情報を第三者へ渡さない。`Origin` と `Referer`
+    // は proxy の loopback URL を指すだけで、中継先には意味を持たない。
+    if (dropCredentialHeaders &&
+        (lowerKey == 'authorization' ||
+            lowerKey == 'origin' ||
+            lowerKey == 'referer')) {
       return false;
     }
 
@@ -5287,7 +5624,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     if (request.method == 'GET') {
       body = <int>[];
     } else {
-      body = bodyBytes ?? await _readRequestBodyBytes(request);
+      body = bodyBytes ?? await _readMessageBytes(request.read());
     }
 
     // NOTE: キュー再送は HttpClient で行うため、必ず絶対URLを保存する。
@@ -6241,7 +6578,10 @@ window.__offline_web_proxy_web_storage_bridge = {
           normalizedTargetUri: normalizedTargetUri,
           proxyUri: normalizedTargetUri,
           disposition: ProxyNavigationDisposition.unresolved,
-          reason: ProxyNavigationReason.missingConfiguredOrigin,
+          // ミラー中継のパスは origin の設定有無ではなく許可の有無で決まる
+          reason: _isMirroredOriginPath(normalizedTargetUri.path)
+              ? ProxyNavigationReason.outsideProxyScope
+              : ProxyNavigationReason.missingConfiguredOrigin,
           usedSourceUrl: usedSourceUrl,
           usedLoopbackAlias: usedLoopbackAlias,
         );
@@ -6282,6 +6622,32 @@ window.__offline_web_proxy_web_storage_bridge = {
         proxyUri: proxyUri,
         disposition: ProxyNavigationDisposition.inWebView,
         reason: ProxyNavigationReason.configuredOriginUrl,
+        usedSourceUrl: usedSourceUrl,
+      );
+    }
+
+    if (_isMirroredOrigin(normalizedTargetUri)) {
+      final proxyUri = _buildMirroredProxyUri(normalizedTargetUri);
+      if (proxyUri == null) {
+        return _buildNavigationResolution(
+          inputUrl: targetUrl,
+          sourceUri: resolvedSourceUri,
+          normalizedTargetUri: normalizedTargetUri,
+          upstreamUri: normalizedTargetUri,
+          disposition: ProxyNavigationDisposition.unresolved,
+          reason: ProxyNavigationReason.outsideProxyScope,
+          usedSourceUrl: usedSourceUrl,
+        );
+      }
+
+      return _buildNavigationResolution(
+        inputUrl: targetUrl,
+        sourceUri: resolvedSourceUri,
+        normalizedTargetUri: normalizedTargetUri,
+        upstreamUri: normalizedTargetUri,
+        proxyUri: proxyUri,
+        disposition: ProxyNavigationDisposition.inWebView,
+        reason: ProxyNavigationReason.mirroredOriginUrl,
         usedSourceUrl: usedSourceUrl,
       );
     }
@@ -6553,17 +6919,42 @@ window.__offline_web_proxy_web_storage_bridge = {
       fragment: fragment,
     );
     if (upstreamUri == null) {
-      throw StateError('No upstream origin configured');
+      // 中継のパスは origin の設定ではなく許可の有無で決まるため、
+      // ウォームアップの失敗理由として区別できるようにする。
+      throw StateError(
+        _isMirroredOriginPath(path)
+            ? 'Mirrored origin is not allowed: $path'
+            : 'No upstream origin configured',
+      );
     }
     return upstreamUri;
   }
 
   /// path と query から upstream URI を構築します。
+  ///
+  /// ミラー中継のパスは設定した別 origin へ、それ以外は設定済み origin へ
+  /// 解決します。転送、キャッシュキー、ウォームアップ、遷移解決が同じ
+  /// 対応関係を使えるよう、パスから upstream への変換はここに集約します。
+  ///
+  /// [path] proxy が受け取ったパス。
+  /// [query] クエリ文字列。
+  /// [fragment] フラグメント。
+  ///
+  /// Returns: upstream URI。解決できない場合は `null`。
   Uri? _tryBuildUpstreamUriFromPathAndQuery({
     required String path,
     String query = '',
     String fragment = '',
   }) {
+    if (_isMirroredOriginPath(path)) {
+      // 許可していない origin を設定済み origin へ素通しさせない
+      return _tryResolveMirroredUpstreamUri(
+        path: path,
+        query: query,
+        fragment: fragment,
+      );
+    }
+
     final originUri = _configuredOriginUri;
     if (originUri == null) {
       return null;
@@ -6613,6 +7004,204 @@ window.__offline_web_proxy_web_storage_bridge = {
     return Uri.parse(
       'http://$configuredHost:$proxyPort$proxyPath$querySuffix$fragmentSuffix',
     );
+  }
+
+  /// ミラー対象 origin を比較用に正規化します。
+  ///
+  /// [origin] 設定に書かれた origin。
+  ///
+  /// Returns: scheme と host を小文字化し、パス以降を落とした URI。
+  ///   origin として解釈できない場合は `null`。
+  Uri? _tryNormalizeMirroredOrigin(String origin) {
+    final trimmedOrigin = origin.trim();
+    if (trimmedOrigin.isEmpty) {
+      return null;
+    }
+
+    final parsedOrigin = Uri.tryParse(trimmedOrigin);
+    if (parsedOrigin == null ||
+        !_isHttpScheme(parsedOrigin.scheme.toLowerCase()) ||
+        parsedOrigin.host.isEmpty) {
+      return null;
+    }
+
+    // origin はスキーム、ホスト、ポートだけを指す。パスやクエリを許すと
+    // 一致判定の意味が変わるため、含む値は設定の誤りとして扱う。
+    if ((parsedOrigin.path.isNotEmpty && parsedOrigin.path != '/') ||
+        parsedOrigin.hasQuery ||
+        parsedOrigin.hasFragment ||
+        parsedOrigin.userInfo.isNotEmpty) {
+      return null;
+    }
+
+    return Uri(
+      scheme: parsedOrigin.scheme.toLowerCase(),
+      host: parsedOrigin.host.toLowerCase(),
+      port: parsedOrigin.hasPort ? parsedOrigin.port : null,
+    );
+  }
+
+  /// 指定 URI がミラー対象 origin かどうかを返します。
+  ///
+  /// [targetUri] 判定する URI。
+  ///
+  /// Returns: scheme、host、実効ポートがすべて一致する場合は `true`。
+  bool _isMirroredOrigin(Uri targetUri) {
+    if (_mirroredOrigins.isEmpty) {
+      return false;
+    }
+
+    final scheme = targetUri.scheme.toLowerCase();
+    final host = targetUri.host.toLowerCase();
+    final port = _effectivePort(targetUri);
+
+    return _mirroredOrigins.any((origin) =>
+        origin.scheme == scheme &&
+        origin.host == host &&
+        _effectivePort(origin) == port);
+  }
+
+  /// ミラー中継のパスかどうかを返します。
+  ///
+  /// [path] 判定するパス。
+  ///
+  /// Returns: 中継用の接頭辞で始まる場合は `true`。
+  bool _isMirroredOriginPath(String path) {
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    return normalizedPath == _mirroredOriginPathPrefix ||
+        normalizedPath.startsWith('$_mirroredOriginPathPrefix/');
+  }
+
+  /// ミラー中継のパスから upstream URI を復元します。
+  ///
+  /// [path] proxy が受け取ったパス。
+  /// [query] クエリ文字列。
+  /// [fragment] フラグメント。
+  ///
+  /// Returns: 復元した upstream URI。形式が違う場合や許可していない origin を
+  ///   指す場合は `null`。
+  Uri? _tryResolveMirroredUpstreamUri({
+    required String path,
+    String query = '',
+    String fragment = '',
+  }) {
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    if (!_isMirroredOriginPath(normalizedPath)) {
+      return null;
+    }
+
+    final remainder =
+        normalizedPath.substring(_mirroredOriginPathPrefix.length);
+    if (!remainder.startsWith('/')) {
+      return null;
+    }
+
+    final segments = remainder.substring(1).split('/');
+    if (segments.length < 2 || segments[0].isEmpty || segments[1].isEmpty) {
+      return null;
+    }
+
+    final String scheme;
+    final String authority;
+    try {
+      scheme = Uri.decodeComponent(segments[0]).toLowerCase();
+      authority = Uri.decodeComponent(segments[1]).toLowerCase();
+    } catch (_) {
+      // 壊れたパーセントエンコードは復号できない。遷移解決からも呼ばれるため、
+      // 例外を投げずに対象外として扱う。
+      return null;
+    }
+
+    // 3 要素目以降は元の資源のパス。区切りで分解しただけなので復号しない。
+    final resourcePath =
+        segments.length > 2 ? '/${segments.sublist(2).join('/')}' : '/';
+    final querySuffix = query.isNotEmpty ? '?$query' : '';
+    final fragmentSuffix = fragment.isNotEmpty ? '#$fragment' : '';
+
+    final upstreamUri = Uri.tryParse(
+      '$scheme://$authority$resourcePath$querySuffix$fragmentSuffix',
+    );
+    if (upstreamUri == null || !_isMirroredOrigin(upstreamUri)) {
+      return null;
+    }
+
+    // `user@host` の形は host が一致していても認証情報として中継先へ送られる。
+    // 要求元が任意に指定できるため、origin だけを指す形に限る。
+    if (upstreamUri.userInfo.isNotEmpty) {
+      return null;
+    }
+
+    // proxy 自身を指す中継は自分への転送になり、入れ子にすると際限なく
+    // 段数が増える。設定として意味も無いため受け付けない。
+    if (_isProxyEndpointUri(upstreamUri)) {
+      return null;
+    }
+
+    return upstreamUri;
+  }
+
+  /// upstream URI をミラー中継のパスへ変換します。
+  ///
+  /// 元の origin をパスの一部として保つため、その資源が持つ相対 URL は
+  /// 同じ origin 配下へ解決されます。
+  ///
+  /// [upstreamUri] 変換する upstream URI。
+  ///
+  /// Returns: proxy が受け付けるパス。ミラー対象外の場合は `null`。
+  String? _buildMirroredProxyPath(Uri upstreamUri) {
+    if (!_isMirroredOrigin(upstreamUri)) {
+      return null;
+    }
+
+    final scheme = upstreamUri.scheme.toLowerCase();
+    final host = upstreamUri.host.toLowerCase();
+    final port = _effectivePort(upstreamUri);
+    final authority =
+        port == _defaultPortForScheme(scheme) ? host : '$host:$port';
+    final resourcePath = upstreamUri.path.isEmpty ? '/' : upstreamUri.path;
+    final querySuffix =
+        upstreamUri.query.isNotEmpty ? '?${upstreamUri.query}' : '';
+    final fragmentSuffix =
+        upstreamUri.fragment.isNotEmpty ? '#${upstreamUri.fragment}' : '';
+
+    return '$_mirroredOriginPathPrefix/$scheme/$authority'
+        '$resourcePath$querySuffix$fragmentSuffix';
+  }
+
+  /// upstream URI からミラー中継の proxy URI を構築します。
+  ///
+  /// [upstreamUri] 変換する upstream URI。
+  ///
+  /// Returns: WebView へ渡せる proxy URI。構築できない場合は `null`。
+  Uri? _buildMirroredProxyUri(Uri upstreamUri) {
+    final proxyPath = _buildMirroredProxyPath(upstreamUri);
+    if (proxyPath == null) {
+      return null;
+    }
+
+    final proxyPort = _activeProxyPort;
+    if (proxyPort == null) {
+      return null;
+    }
+
+    final configuredHost = (_config?.host.isNotEmpty ?? false)
+        ? _config!.host
+        : _defaultLoopbackHost;
+
+    return Uri.tryParse('http://$configuredHost:$proxyPort$proxyPath');
+  }
+
+  /// 取得対象にならない参照 URL かどうかを返します。
+  ///
+  /// [rawUrl] HTML に書かれていた URL。
+  ///
+  /// Returns: フラグメントや `data:` など取得できない場合は `true`。
+  bool _isNonFetchableReferenceUrl(String rawUrl) {
+    return rawUrl.startsWith('#') ||
+        rawUrl.startsWith('data:') ||
+        rawUrl.startsWith('javascript:') ||
+        rawUrl.startsWith('mailto:') ||
+        rawUrl.startsWith('blob:');
   }
 
   /// origin の base path を upstream path から取り除き proxy path を返します。
