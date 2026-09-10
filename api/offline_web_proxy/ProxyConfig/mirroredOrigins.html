@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the lastRecoveryCause property from the ProxyDiagnostics class, for the Dart programming language.">
-  <title>lastRecoveryCause property - ProxyDiagnostics class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the mirroredOrigins property from the ProxyConfig class, for the Dart programming language.">
+  <title>mirroredOrigins property - ProxyConfig class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/ProxyDiagnostics-class.html">ProxyDiagnostics</a></li>
-    <li class="self-crumb">lastRecoveryCause property</li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">mirroredOrigins property</li>
   </ol>
-  <div class="self-name">lastRecoveryCause</div>
+  <div class="self-name">mirroredOrigins</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,28 +54,57 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;ProxyDiagnostics-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">lastRecoveryCause</span> property 
+<h1><span class="kind-property">mirroredOrigins</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
-        <a href="../../offline_web_proxy/ProxyRecoveryCause.html">ProxyRecoveryCause</a>?
-        <span class="name ">lastRecoveryCause</span>
+        <a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span>
+        <span class="name ">mirroredOrigins</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>最終復旧処理の判定種別です。未実施の場合は <code>null</code> です。</p>
+  <p>Additional origins whose resources are fetched and cached through the
+proxy.</p>
+<p>The proxy serves a single upstream <a href="../../offline_web_proxy/ProxyConfig/origin.html">origin</a>, so an absolute URL pointing
+at a CDN is fetched by the WebView directly and never reaches the proxy:
+it is neither cached nor available offline. A screen whose rendering
+depends on a CDN-hosted library therefore stays broken offline even when
+its own HTML and API responses are cached.</p>
+<p>Listing an origin here makes the proxy rewrite matching absolute URLs in
+the HTML it serves to a local path and relay those requests to that
+origin, which puts the resource on the ordinary cache, offline fallback
+and warmup paths.</p>
+<ul>
+<li>Matching is exact on scheme, host and port. <code>'https://cdn.example.com'</code>
+covers neither <code>http://cdn.example.com</code> nor another host</li>
+<li>Only <code>GET</code> and <code>HEAD</code> are relayed. Any other method answers <code>405</code>,
+because a listed origin is meant to serve static resources</li>
+<li>Rewriting covers <code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code> and <code>&lt;img src&gt;</code> in
+<code>text/html</code> responses, which is exactly what
+<code>warmupCache(followReferences: true)</code> collects. A URL that JavaScript
+assembles at runtime is out of reach</li>
+<li>The client's <code>Cookie</code>, <code>Authorization</code>, <code>Origin</code> and <code>Referer</code> headers
+are not relayed to a listed origin, so credentials held for the upstream
+origin never reach a third party. Cookies a listed origin sets are kept
+in the jar under its own domain</li>
+</ul>
+<p><strong>Content-Security-Policy</strong>: a rewritten URL becomes same-origin with the
+proxy, so a page that restricts <code>script-src</code> or <code>style-src</code> has to allow
+<code>'self'</code>.</p>
+<p><strong>Example</strong>: <code>['https://cdn.jsdelivr.net']</code>
+<strong>Default</strong>: <code>[]</code> (no other origin is relayed)</p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final ProxyRecoveryCause? lastRecoveryCause;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final List&lt;String&gt; mirroredOrigins;</code></pre>
 </section>
 
 
@@ -92,12 +121,12 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/ProxyDiagnostics-class.html">ProxyDiagnostics</a></li>
-    <li class="self-crumb">lastRecoveryCause property</li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">mirroredOrigins property</li>
 </ol>
 
 
-  <h5>ProxyDiagnostics class</h5>
+  <h5>ProxyConfig class</h5>
   <div id="dartdoc-sidebar-left-content"></div>
 </div><!--/.sidebar-offcanvas-->
 

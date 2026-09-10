@@ -81,7 +81,10 @@ keeping the response would leak or corrupt per-user state:</p>
 <ul>
 <li>the response carries <code>Set-Cookie</code>, which would persist a session on the
 device and replay it later</li>
-<li>the response carries <code>Vary</code>, which the URL-only cache key cannot honour</li>
+<li>the response carries <code>Vary</code>, which the URL-only cache key cannot
+honour, unless it names <code>Accept-Encoding</code> alone: the proxy pins
+<code>Accept-Encoding: identity</code> on every upstream request, so such a
+response cannot vary</li>
 <li>the request carried <code>Authorization</code>, so the response belongs to one user</li>
 </ul>
 <p>A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason,
@@ -138,7 +141,7 @@ comparison.</p>
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.13.0
+      0.14.0
   </span>
 
   

@@ -70,6 +70,7 @@
 <li><span class="parameter" id="-param-cacheTtl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">cacheTtl</span> = <span class="default-value">const {&#39;text&#47;html&#39; : 3600, &#39;text&#47;css&#39; : 86400, &#39;application&#47;javascript&#39; : 86400, &#39;text&#47;javascript&#39; : 86400, &#39;image&#47;*&#39; : 604800, &#39;default&#39; : 86400}</span>, </span></li>
 <li><span class="parameter" id="-param-cacheStale"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span></span> <span class="parameter-name">cacheStale</span> = <span class="default-value">const {&#39;text&#47;html&#39; : 86400, &#39;text&#47;css&#39; : 604800, &#39;image&#47;*&#39; : 2592000, &#39;default&#39; : 259200}</span>, </span></li>
 <li><span class="parameter" id="-param-forceCachePaths"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span> <span class="parameter-name">forceCachePaths</span> = <span class="default-value">const []</span>, </span></li>
+<li><span class="parameter" id="-param-mirroredOrigins"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span> <span class="parameter-name">mirroredOrigins</span> = <span class="default-value">const []</span>, </span></li>
 <li><span class="parameter" id="-param-upstreamFailureThreshold"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">upstreamFailureThreshold</span> = <span class="default-value">3</span>, </span></li>
 <li><span class="parameter" id="-param-upstreamProbePath"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">upstreamProbePath</span> = <span class="default-value">&#39;&#47;&#39;</span>, </span></li>
 <li><span class="parameter" id="-param-upstreamProbeMethod"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">upstreamProbeMethod</span> = <span class="default-value">&#39;HEAD&#39;</span>, </span></li>
@@ -128,6 +129,7 @@
     &#39;default&#39;: 259200,
   },
   this.forceCachePaths = const [],
+  this.mirroredOrigins = const [],
   this.upstreamFailureThreshold = 3,
   this.upstreamProbePath = &#39;&#47;&#39;,
   this.upstreamProbeMethod = &#39;HEAD&#39;,
@@ -198,7 +200,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.13.0
+      0.14.0
   </span>
 
   

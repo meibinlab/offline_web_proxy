@@ -62,6 +62,7 @@
 <ul>
 <li>Local proxy server for Flutter WebView</li>
 <li>Serving of static resources bundled under <code>assets/static/</code>, so CDN-hosted files can be shipped inside the app</li>
+<li>Fetching and caching of another origin's resources, such as a CDN, through the proxy (<code>mirroredOrigins</code>)</li>
 <li>Fallback cache limited to offline and unreachable-upstream recovery</li>
 <li>Offline queue for POST, PUT, and DELETE requests</li>
 <li>AES-256 encrypted cookie persistence with restore support</li>
@@ -209,6 +210,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
     'default': 259200,
   },
   forceCachePaths: ['/app/**'],
+  mirroredOrigins: ['https://cdn.example.com'],
   connectTimeout: Duration(seconds: 5),
   requestTimeout: Duration(seconds: 20),
   upstreamFailureThreshold: 3,
@@ -263,7 +265,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>startupPaths</code> is used by <code>warmupCache()</code> for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.
 <ul>
 <li>Warmup sends the cookie jar exactly as the forwarding path does, so calling it after sign-in also warms up the APIs that require authentication.</li>
-<li><code>warmupCache(followReferences: true)</code> also fetches the same-origin resources referenced by the warmed HTML (<code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code>). Only one level is followed, and a URL assembled by JavaScript at runtime is out of reach. A <code>&lt;link&gt;</code> counts only when its <code>rel</code> names a resource, such as <code>stylesheet</code>.</li>
+<li><code>warmupCache(followReferences: true)</code> also fetches the resources referenced by the warmed HTML (<code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code>), both same-origin ones and those on an origin listed in <code>mirroredOrigins</code>. Only one level is followed, and a URL assembled by JavaScript at runtime is out of reach. A <code>&lt;link&gt;</code> counts only when its <code>rel</code> names a resource, such as <code>stylesheet</code>.</li>
 </ul>
 </li>
 <li><code>healthCheckPath</code> is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.</li>
@@ -282,6 +284,17 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li>A <code>Vary</code> naming <code>Accept-Encoding</code> alone is stored because the proxy pins <code>Accept-Encoding: identity</code> on every upstream request, so the response cannot vary. Tomcat, nginx and Apache all add that <code>Vary</code> by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A <code>Vary</code> naming <code>*</code> or any other header is still skipped.</li>
 <li>For a matching path the upstream <code>max-age</code> and <code>Expires</code> are ignored and <code>cacheTtl</code> decides the expiry, because <code>no-store</code> is usually paired with <code>max-age=0</code>, which would make the entry stale the moment it is stored.</li>
 <li><strong>The response cache is not encrypted.</strong> The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.</li>
+</ul>
+</li>
+<li><code>mirroredOrigins</code> lists other origins fetched through the proxy. On a screen that loads its UI library from a CDN, the absolute URL in the HTML never passes through 127.0.0.1, so caching, fallback and warmup all miss it. A listed origin is relayed by the proxy and joins the ordinary cache and offline fallback. Empty by default.
+<ul>
+<li>In a <code>text/html</code> response the proxy serves, a matching absolute URL in <code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code> or <code>&lt;img src&gt;</code> is rewritten to <code>/__offline_web_proxy/ext/&lt;scheme&gt;/&lt;host&gt;[:port]/&lt;original path&gt;</code>. A <code>&lt;link&gt;</code> counts only when its <code>rel</code> names a resource, such as <code>stylesheet</code>.</li>
+<li>The rewrite reuses the warmup reference scan, so <strong>a rewritten resource is always collected by <code>warmupCache(followReferences: true)</code></strong>.</li>
+<li>Rewriting happens on the way out rather than on the way in, so HTML served from cache while offline goes through the same transformation. Removing an origin from the configuration restores the original URLs.</li>
+<li>Only <code>GET</code> and <code>HEAD</code> are relayed. Any other method answers <code>405</code> and is never queued. A path naming an origin that is not listed answers <code>404</code> and is never passed through to the configured origin.</li>
+<li>Matching is exact on scheme, host and port. A value carrying a path or query raises <code>ProxyStartException</code> at startup.</li>
+<li><strong><code>Authorization</code>, <code>Origin</code>, <code>Referer</code> and the client's <code>Cookie</code> are never sent to a relayed origin.</strong> Only jar entries matching the relayed domain are sent.</li>
+<li>A URL that JavaScript assembles at runtime is out of reach. A rewritten URL becomes same-origin with the proxy, so a page that returns a <code>Content-Security-Policy</code> has to allow <code>'self'</code>. HTML served from <code>assets/static/</code> is not rewritten.</li>
 </ul>
 </li>
 <li><code>queueExcludePaths</code> keeps update requests out of the offline queue when sending them later would be meaningless — a register sign-in or a sign-out, where the immediate <code>202 Accepted</code> also reads as success. Each rule carries its own response, so every screen can show the wording it already knows. Empty by default.
@@ -621,7 +634,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 </code></pre>
 <h2 id="current-limitations">Current Limitations</h2>
 <ul>
-<li>One <code>OfflineWebProxy</code> instance supports one configured upstream origin.</li>
+<li>One <code>OfflineWebProxy</code> instance forwards application requests to one configured upstream origin. Another origin that only serves resources can be relayed through <code>mirroredOrigins</code>, but only for <code>GET</code> and <code>HEAD</code>.</li>
 <li><code>ProxyConfig</code> is the supported configuration path. External YAML configuration loading is not implemented.</li>
 <li>Static resources under <code>assets/static/</code> are served for <code>GET</code> and <code>HEAD</code> only. An update request on the same path is forwarded upstream instead. Range requests are not supported.</li>
 <li>If <code>AssetManifest.json</code> or its runtime equivalent cannot be loaded, the proxy continues with no indexed static resources and falls back to normal upstream resolution.</li>
@@ -698,7 +711,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.13.0
+      0.14.0
   </span>
 
   
