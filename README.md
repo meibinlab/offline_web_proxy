@@ -13,6 +13,7 @@ It runs on 127.0.0.1, forwards requests to one configured upstream origin while 
 
 - Local proxy server for Flutter WebView
 - Serving of static resources bundled under `assets/static/`, so CDN-hosted files can be shipped inside the app
+- Fetching and caching of another origin's resources, such as a CDN, through the proxy (`mirroredOrigins`)
 - Fallback cache limited to offline and unreachable-upstream recovery
 - Offline queue for POST, PUT, and DELETE requests
 - AES-256 encrypted cookie persistence with restore support
@@ -175,6 +176,7 @@ const config = ProxyConfig(
     'default': 259200,
   },
   forceCachePaths: ['/app/**'],
+  mirroredOrigins: ['https://cdn.example.com'],
   connectTimeout: Duration(seconds: 5),
   requestTimeout: Duration(seconds: 20),
   upstreamFailureThreshold: 3,
@@ -229,7 +231,7 @@ Notes:
 - `preferredPort` tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.
 - `startupPaths` is used by `warmupCache()` for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.
   - Warmup sends the cookie jar exactly as the forwarding path does, so calling it after sign-in also warms up the APIs that require authentication.
-  - `warmupCache(followReferences: true)` also fetches the same-origin resources referenced by the warmed HTML (`<script src>`, `<link href>`, `<img src>`). Only one level is followed, and a URL assembled by JavaScript at runtime is out of reach. A `<link>` counts only when its `rel` names a resource, such as `stylesheet`.
+  - `warmupCache(followReferences: true)` also fetches the resources referenced by the warmed HTML (`<script src>`, `<link href>`, `<img src>`), both same-origin ones and those on an origin listed in `mirroredOrigins`. Only one level is followed, and a URL assembled by JavaScript at runtime is out of reach. A `<link>` counts only when its `rel` names a resource, such as `stylesheet`.
 - `healthCheckPath` is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.
 - `statusPath` returns the proxy state as JSON. It gets the same treatment as `healthCheckPath` — never forwarded, never counted — and an empty string disables it.
 - `enableAdminApi` set to `true` exposes listing, resending and discarding of quarantined requests over HTTP. Disabled by default.
@@ -245,6 +247,14 @@ Notes:
   - A `Vary` naming `Accept-Encoding` alone is stored because the proxy pins `Accept-Encoding: identity` on every upstream request, so the response cannot vary. Tomcat, nginx and Apache all add that `Vary` by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A `Vary` naming `*` or any other header is still skipped.
   - For a matching path the upstream `max-age` and `Expires` are ignored and `cacheTtl` decides the expiry, because `no-store` is usually paired with `max-age=0`, which would make the entry stale the moment it is stored.
   - **The response cache is not encrypted.** The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.
+- `mirroredOrigins` lists other origins fetched through the proxy. On a screen that loads its UI library from a CDN, the absolute URL in the HTML never passes through 127.0.0.1, so caching, fallback and warmup all miss it. A listed origin is relayed by the proxy and joins the ordinary cache and offline fallback. Empty by default.
+  - In a `text/html` response the proxy serves, a matching absolute URL in `<script src>`, `<link href>` or `<img src>` is rewritten to `/__offline_web_proxy/ext/<scheme>/<host>[:port]/<original path>`. A `<link>` counts only when its `rel` names a resource, such as `stylesheet`.
+  - The rewrite reuses the warmup reference scan, so **a rewritten resource is always collected by `warmupCache(followReferences: true)`**.
+  - Rewriting happens on the way out rather than on the way in, so HTML served from cache while offline goes through the same transformation. Removing an origin from the configuration restores the original URLs.
+  - Only `GET` and `HEAD` are relayed. Any other method answers `405` and is never queued. A path naming an origin that is not listed answers `404` and is never passed through to the configured origin.
+  - Matching is exact on scheme, host and port. A value carrying a path or query raises `ProxyStartException` at startup.
+  - **`Authorization`, `Origin`, `Referer` and the client's `Cookie` are never sent to a relayed origin.** Only jar entries matching the relayed domain are sent.
+  - A URL that JavaScript assembles at runtime is out of reach. A rewritten URL becomes same-origin with the proxy, so a page that returns a `Content-Security-Policy` has to allow `'self'`. HTML served from `assets/static/` is not rewritten.
 - `queueExcludePaths` keeps update requests out of the offline queue when sending them later would be meaningless — a register sign-in or a sign-out, where the immediate `202 Accepted` also reads as success. Each rule carries its own response, so every screen can show the wording it already knows. Empty by default.
   - The rules apply while offline, when the upstream is unreachable, and when the upstream answered 5xx. A 5xx response is still returned as-is, because the upstream did answer; only the queueing is skipped.
   - The answer carries `X-Offline-Queued: 0` and `X-Offline-Excluded: 1`.
@@ -619,7 +629,7 @@ Reference it from `android/app/src/main/AndroidManifest.xml`:
 
 ## Current Limitations
 
-- One `OfflineWebProxy` instance supports one configured upstream origin.
+- One `OfflineWebProxy` instance forwards application requests to one configured upstream origin. Another origin that only serves resources can be relayed through `mirroredOrigins`, but only for `GET` and `HEAD`.
 - `ProxyConfig` is the supported configuration path. External YAML configuration loading is not implemented.
 - Static resources under `assets/static/` are served for `GET` and `HEAD` only. An update request on the same path is forwarded upstream instead. Range requests are not supported.
 - If `AssetManifest.json` or its runtime equivalent cannot be loaded, the proxy continues with no indexed static resources and falls back to normal upstream resolution.

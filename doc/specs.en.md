@@ -25,7 +25,66 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 
 ### Proxy Target
 
-Relays to the upstream origin server (e.g., https://sample.com). Supports a single origin server.
+Relays to the upstream origin server (e.g., https://sample.com). Application requests go to a single origin server. Another origin that only serves resources, such as a CDN, is relayed only when it is listed in `ProxyConfig.mirroredOrigins`.
+
+### Relaying Another Origin (mirroredOrigins)
+
+Resources of an origin listed in `mirroredOrigins` are fetched through the proxy, which puts them on the ordinary cache, offline fallback and warmup paths. The default is empty, and nothing about another origin is touched unless one is listed.
+
+On a screen that loads its UI library from a CDN, the absolute URL in the HTML never passes through 127.0.0.1: the WebView fetches it directly. Caching the HTML and the API responses is not enough, because the screen does not run without the library that renders it.
+
+#### Relay Path
+
+```
+/__offline_web_proxy/ext/<scheme>/<host>[:port]/<original path>?<query>
+
+e.g. https://cdn.example.com/npm/lib@1.0.0/dist/lib.js
+   → /__offline_web_proxy/ext/https/cdn.example.com/npm/lib@1.0.0/dist/lib.js
+```
+
+Keeping the original origin inside the path means a relative URL held by that resource — `url(../fonts/x.woff)` inside a stylesheet, say — still resolves under the same origin.
+
+#### HTML Rewriting
+
+In a `text/html` response the proxy serves, an absolute URL matching `mirroredOrigins` is rewritten to the relay path.
+
+- The targets are `<script src>`, `<link href>` and `<img src>`. A `<link>` counts only when its `rel` names a resource, such as `stylesheet`. The decision reuses the warmup reference scan, so **a rewritten resource is always collected by `warmupCache(followReferences: true)`**. Matching is on the attribute names `src` and `href`, so a prefixed attribute such as `data-src` is treated the same way
+- Rewriting happens on the way out, not on the way in. The cache keeps the bytes the upstream returned, so the online path and the offline path go through the same transformation, and removing an origin from the configuration restores the original URLs even in stored responses
+- The body is read and written as `latin1`. The target tags and URLs stay within ASCII, so the bytes are preserved whatever the document's character encoding is
+- Only a 200 response without a `Content-Encoding` is rewritten. A body an upstream compressed despite the `identity` request cannot be interpreted
+
+#### Relay Behaviour
+
+| Item | Handling |
+| --- | --- |
+| Method | `GET` and `HEAD` only. Anything else answers `405` and is never queued |
+| Origin not listed | Answers `404`. It is never passed through to the configured origin |
+| Cache | The cache key is the relayed URL. TTL, stale period and storage eligibility follow the same rules as the configured origin |
+| `forceCachePaths` | Matching uses the path the proxy received, so a relay path is listed as `/__offline_web_proxy/ext/**` |
+| Cookie | Only jar entries matching the relayed domain are sent. A `Set-Cookie` from the relayed origin is kept under its own domain |
+| `Authorization`, `Origin`, `Referer` | Never sent to a relayed origin |
+| Redirect | A `Location` naming the configured origin or a mirrored origin is rewritten to a proxy URL |
+| Navigation | `resolveNavigationTarget()` treats a mirrored URL as `inWebView` and reports `ProxyNavigationReason.mirroredOriginUrl` |
+
+#### Configuration Validation
+
+Every entry of `mirroredOrigins` has to be an HTTP(S) origin carrying nothing but scheme, host and port. A value with a path, query, fragment or user info stops startup with `ProxyStartException`. A wrong value would otherwise leave rewriting and relaying silently inactive while everything else kept working.
+
+Matching is exact on scheme, host and effective port. `https://cdn.example.com` covers neither `http://cdn.example.com` nor another host.
+
+The relay path is written by the caller, so these shapes are refused as well.
+
+- A `user@host` authority. Even when the host matches, the value would be sent to the relayed origin as credentials
+- An authority naming the proxy itself, which would relay a request back into the proxy and, once nested, grow without bound
+
+#### Limitations
+
+- A URL that JavaScript assembles at runtime cannot be rewritten
+- A rewritten URL becomes same-origin with the proxy, so a page that returns a `Content-Security-Policy` has to allow `'self'`
+- Subresource integrity is expected to survive because the bytes are not altered, though this has not been measured in a browser
+- Anything outside `<script>`, `<link>` and `<img>` — `srcset`, `<source>`, `url()` inside CSS — is out of scope
+- The scope is any 200 `text/html` response the proxy returns: responses obtained from the upstream and their cached copies, plus the offline response replaced through `offlineFallbackHtml`. `gatewayTimeoutHtml` is answered with 504 and is therefore out of scope, and so is HTML served from `assets/static/`, which is returned earlier as a static resource. A bundled document referencing another origin has to spell out the relay path itself
+- `/__offline_web_proxy/ext/` is a namespace the proxy reserves. It is never forwarded upstream, even when `mirroredOrigins` is empty
 
 ### Path Pattern Notation Used by Configuration
 
@@ -813,12 +872,14 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **passthrough**: Forward as-is
 - **inject**: Inject configured authentication information
 - **off**: Remove header
+- **mirror relay**: Removed when relaying to a `mirroredOrigins` entry, so credentials held for the configured origin never reach a third party
 
 ### Cookie Header
 
 - **jar**: Use cookies managed by Cookie Jar
 - **passthrough**: Forward cookies from client as-is
 - **off**: Remove Cookie header
+- **mirror relay**: When relaying to a `mirroredOrigins` entry, only jar entries matching the relayed domain are sent and the client's own `Cookie` header is discarded
 
 ### Set-Cookie Header
 
@@ -830,6 +891,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **replace**: Rewrite to upstream server's origin
 - **passthrough**: Forward as-is
 - **remove**: Remove header
+- **mirror relay**: Removed when relaying to a `mirroredOrigins` entry, because the value only names the proxy's loopback URL and means nothing to the relayed origin
 
 ### Accept-Encoding Header
 
@@ -842,6 +904,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **rewrite**: Rewrite same-origin `301`, `302`, `303`, `307`, and `308` redirects returned to WebView to proxy URLs
 - **relative resolution**: Resolve relative `Location` values against the upstream request URL
 - **external notify**: Notify external-launch targets such as `tel`, `mailto`, `sms`, `geo`, `google.navigation`, and Google Maps URLs through `ProxyEventType.redirectHandled`, then return 204
+- **mirror rewrite**: Rewrite a `Location` matching `mirroredOrigins` to the relay path
 - **passthrough**: Pass through `Location` unchanged when it cannot be normalized to a proxy URL
 
 ## [15] Timeout/Retry Default Values
@@ -1942,6 +2005,7 @@ class ProxyConfig {
   final Map<String, int> cacheTtl; // TTL setting by Content-Type (seconds)
   final Map<String, int> cacheStale; // Stale period setting by Content-Type (seconds)
   final List<String> forceCachePaths; // Paths stored despite no-store (default: empty)
+  final List<String> mirroredOrigins; // Other origins relayed through the proxy (default: empty)
   final int upstreamFailureThreshold; // Consecutive failures treated as unreachable (default: 3, 0=disabled)
   final String upstreamProbePath; // Path used by the reachability probe (default: "/")
   final String upstreamProbeMethod; // HTTP method used by the probe (default: "HEAD")

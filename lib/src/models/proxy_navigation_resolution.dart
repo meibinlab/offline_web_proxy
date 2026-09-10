@@ -75,6 +75,9 @@ enum ProxyNavigationReason {
   /// 設定済み origin の URL をそのまま採用しました。
   configuredOriginUrl,
 
+  /// ミラー対象として設定した origin の URL です。proxy 経由で解決します。
+  mirroredOriginUrl,
+
   /// proxy の静的リソースと判定しました。
   staticResource,
 
@@ -99,7 +102,8 @@ enum ProxyNavigationReason {
   /// 設定済み origin が無いため upstream URL を構築できません。
   missingConfiguredOrigin,
 
-  /// 設定済み origin 配下だが proxy の対象パス外です。
+  /// proxy が扱える範囲の外を指します。設定済み origin 配下でパスが対象外の
+  /// 場合と、許可していない origin を指すミラー中継のパスが該当します。
   outsideProxyScope,
 
   /// URL が不正です。

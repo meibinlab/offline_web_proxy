@@ -25,7 +25,66 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 ### プロキシ対象
 
-上流オリジンサーバ（例: https://sample.com）への中継を行います。単一のオリジンサーバに対応します。
+上流オリジンサーバ（例: https://sample.com）への中継を行います。業務要求の転送先は 1 つのオリジンサーバです。CDN のように資源だけを配信する別 origin は、`ProxyConfig.mirroredOrigins` に列挙した場合に限り中継します。
+
+### 別 origin の中継（mirroredOrigins）
+
+`mirroredOrigins` に列挙した origin の資源を proxy 経由で取得し、通常のキャッシュ、オフライン代替、ウォームアップの対象にします。既定は空で、指定が無い限り別 origin には一切関与しません。
+
+CDN から UI ライブラリを読み込む画面では、HTML 内の絶対 URL が 127.0.0.1 を経由せず WebView から直接取得されます。HTML と API を保存できても、描画を担うライブラリが読めなければ画面は動きません。
+
+#### 中継用のパス
+
+```
+/__offline_web_proxy/ext/<scheme>/<host>[:port]/<元のパス>?<クエリ>
+
+例）https://cdn.example.com/npm/lib@1.0.0/dist/lib.js
+  → /__offline_web_proxy/ext/https/cdn.example.com/npm/lib@1.0.0/dist/lib.js
+```
+
+元の origin をパスの一部として保つため、その資源が持つ相対 URL（CSS 内の `url(../fonts/x.woff)` など）は同じ origin 配下へ解決されます。
+
+#### HTML の書き換え
+
+proxy が返す `text/html` の応答について、`mirroredOrigins` に一致する絶対 URL を中継用のパスへ書き換えます。
+
+- 対象は `<script src>`、`<link href>`、`<img src>` です。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。ウォームアップの参照抽出と同じ判定を使うため、**書き換えた資源は必ず `warmupCache(followReferences: true)` の対象になります**。照合は属性名 `src` と `href` で行うため、`data-src` のような接頭辞付きの属性も同じ扱いになります
+- 書き換えは保存時ではなく応答時に行います。キャッシュには上流が返したバイト列をそのまま保持するため、オンラインとオフラインのどちらの経路でも同じ変換を通せます。設定から origin を外せば、保存済みの応答も元の URL に戻ります
+- 本文は `latin1` で読み書きします。対象タグと URL は ASCII の範囲に収まるため、文字コードが何であってもバイト列を保てます
+- 対象は 200 応答かつ `Content-Encoding` を持たない場合に限ります。上流が `identity` を無視して圧縮した本文は解釈できません
+
+#### 中継の扱い
+
+| 項目 | 扱い |
+| --- | --- |
+| メソッド | `GET` と `HEAD` のみ。ほかは `405` を返し、キューにも載せません |
+| 許可外の origin | `404` を返します。設定済み origin へ素通しさせません |
+| キャッシュ | キャッシュキーは中継先の URL です。TTL、stale 期間、保存判定は設定済み origin と同じ規則で働きます |
+| `forceCachePaths` | 照合対象は proxy が受け取ったパスです。中継経路を対象にする場合は `/__offline_web_proxy/ext/**` の形で指定します |
+| Cookie | Cookie Jar のうち中継先のドメインに一致するものだけを送ります。中継先が返す `Set-Cookie` も自身のドメインで保存します |
+| `Authorization`、`Origin`、`Referer` | 中継先へは送りません |
+| redirect | `Location` が設定済み origin かミラー対象を指す場合は proxy URL へ書き換えます |
+| 遷移解決 | `resolveNavigationTarget()` はミラー対象の URL を `inWebView` と判定し、`ProxyNavigationReason.mirroredOriginUrl` を返します |
+
+#### 設定値の検証
+
+`mirroredOrigins` の各要素はスキーム、ホスト、ポートだけを持つ HTTP(S) の origin である必要があります。パス、クエリ、フラグメント、ユーザ情報を含む値は `ProxyStartException` で起動を止めます。誤った値のままでも書き換えと中継が静かに行われないだけで動作は続くため、設定の誤りに気付けるようにしています。
+
+一致判定はスキーム、ホスト、実効ポートの完全一致です。`https://cdn.example.com` は `http://cdn.example.com` にも別ホストにも一致しません。
+
+中継用のパスは要求元が自由に組み立てられるため、次の形も受け付けません。
+
+- `user@host` のように認証情報を含む形。host が一致していても、その値が中継先への認証として送られるため
+- proxy 自身を指す形。自分への転送になり、入れ子にすると段数が際限なく増えるため
+
+#### 制限
+
+- 実行時に JavaScript が組み立てる URL は書き換えられません
+- `Content-Security-Policy` を返す画面では、書き換え後の URL が proxy と same-origin になるため `'self'` の許可が必要です
+- サブリソース完全性（`integrity`）はバイト列を改変しないため維持される想定ですが、ブラウザでの実測は行っていません
+- `<script>`、`<link>`、`<img>` 以外（`srcset`、`<source>`、CSS 内の `url()`）は対象外です
+- 対象は proxy が返す 200 の `text/html` 応答です。上流から取得した応答とそのキャッシュに加え、`offlineFallbackHtml` で差し替えたオフライン応答も含みます。`gatewayTimeoutHtml` は 504 のため対象外です。`assets/static/` から配信する同梱 HTML も、静的リソースとして先に返すため対象外です。同梱 HTML から別 origin を参照する場合は中継用のパスを直接書きます
+- `/__offline_web_proxy/ext/` は proxy が予約する名前空間です。`mirroredOrigins` が空でも上流へは転送しません
 
 ### 設定のパスパターン記法
 
@@ -814,12 +873,14 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **passthrough**: そのまま転送
 - **inject**: 設定された認証情報を注入
 - **off**: ヘッダを削除
+- **ミラー中継**: `mirroredOrigins` への中継では削除。設定済み origin 向けの資格情報を第三者へ渡さない
 
 ### Cookie ヘッダ
 
 - **jar**: Cookie Jar で管理された Cookie を使用
 - **passthrough**: クライアントからの Cookie をそのまま転送
 - **off**: Cookie ヘッダを削除
+- **ミラー中継**: `mirroredOrigins` への中継では Cookie Jar のうち中継先ドメインに一致するものだけを送り、クライアントが送った Cookie は使わない
 
 ### Set-Cookie ヘッダ
 
@@ -831,6 +892,7 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **replace**: 上流サーバのオリジンに書き換え
 - **passthrough**: そのまま転送
 - **remove**: ヘッダを削除
+- **ミラー中継**: `mirroredOrigins` への中継では削除。値は proxy の loopback URL を指すだけで中継先には意味を持たない
 
 ### Accept-Encoding ヘッダ
 
@@ -843,6 +905,7 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **rewrite**: WebView へ返す `301`、`302`、`303`、`307`、`308` の same-origin redirect は proxy URL に書き換え
 - **relative 解決**: relative `Location` は上流リクエスト URL を基準に解決
 - **external notify**: `tel`、`mailto`、`sms`、`geo`、`google.navigation`、Google Maps 系 URL など外部起動対象は `ProxyEventType.redirectHandled` で通知し、HTTP 応答は 204 を返す
+- **mirror rewrite**: `mirroredOrigins` に一致する `Location` は中継用のパスへ書き換え
 - **passthrough**: proxy URL に正規化できない `Location` はそのまま透過
 
 ## 【15】タイムアウト／リトライ既定値
@@ -1943,6 +2006,7 @@ class ProxyConfig {
   final Map<String, int> cacheTtl; // Content-Type別TTL設定（秒）
   final Map<String, int> cacheStale; // Content-Type別Stale期間設定（秒）
   final List<String> forceCachePaths; // no-store を無視して保存するパス（既定: 空）
+  final List<String> mirroredOrigins; // proxy 経由で中継する別 origin（既定: 空）
   final int upstreamFailureThreshold; // 上流断とみなす連続失敗回数（既定: 3、0=無効）
   final String upstreamProbePath; // 復帰確認のパス（既定: "/"）
   final String upstreamProbeMethod; // 復帰確認のHTTPメソッド（既定: "HEAD"）
