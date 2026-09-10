@@ -15,6 +15,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 - `assets/static/` に同梱した静的リソースの配信（CDN 依存の資材をアプリへ取り込める）
 - CDN など別 origin の資源の proxy 経由での取得とキャッシュ（`mirroredOrigins`）
 - オフライン時と上流到達不能時（接続失敗・リクエストタイムアウト）に限定したフォールバックキャッシュ
+- 上流へ到達できる状態に戻ると自分で再読込するオフライン代替ページ（再試行ボタン付き）
 - POST、PUT、DELETE のオフラインキューイング
 - AES-256 による Cookie 永続化と復元 API
 - same-origin、外部委譲、新規 window 判定のための WebView 補助 API
@@ -220,6 +221,11 @@ const config = ProxyConfig(
   healthCheckInterval: Duration.zero,
   serverIdleTimeout: Duration(seconds: 120),
   maxRestartAttemptsPerMinute: 5,
+  enableOfflinePageAutoReload: true,
+  enableAutoReloadContinuation: true,
+  enableGatewayTimeoutAutoReload: false,
+  autoReloadPollInterval: Duration(seconds: 3),
+  autoReloadQueueWaitTimeout: Duration(seconds: 10),
 );
 ```
 
@@ -232,11 +238,16 @@ const config = ProxyConfig(
 - `startupPaths` は `warmupCache()` で、オフライン時または上流到達不能時の代替応答を事前準備したいパスに使います。
   - ウォームアップは転送経路と同じく Cookie Jar の内容を送ります。認証後に呼び出せば、認証が必要な API も取得できます。
   - `warmupCache(followReferences: true)` を指定すると、取得した HTML が参照する資源（`<script src>`、`<link href>`、`<img src>`）も続けて取得します。対象は同一 origin と `mirroredOrigins` に列挙した origin です。1 段だけ辿り、実行時に JavaScript が組み立てる URL には届きません。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。
-- `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。Web アプリのルートと衝突する場合に変更します。
-- `statusPath` は proxy の状態を JSON で返すパスです。`healthCheckPath` と同じ扱いで、上流へ転送されず統計にも計上されません。空文字列を指定すると無効になります。
+- `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。`GET` と `HEAD` は要求ログにも出力しません。Web アプリのルートと衝突する場合に変更します。
+- `statusPath` は proxy の状態を JSON で返すパスです。`healthCheckPath` と同じ扱いで、上流へ転送されず、統計にも計上されず、`GET` は要求ログにも出力しません。空文字列を指定すると無効になり、代替ページと `504` ページの自動復帰も止まります。
 - `enableAdminApi` を `true` にすると、隔離キューの一覧・再送・破棄を HTTP から操作できます。既定は無効です。
 - `healthCheckInterval` に 0 より大きい値を指定すると定期的に稼働確認を行います。既定は無効で、復帰時の確認（`ProxyLifecycleGuard`）を主経路とします。
 - `offlineFallbackHtml` と `gatewayTimeoutHtml` を指定すると、オフライン応答とタイムアウト応答の HTML をアプリ側の文言へ差し替えられます。
+  - 既定のページも差し替えた HTML も、`Content-Type: text/html; charset=utf-8` と `Cache-Control: no-store` で返します。既定のページは再試行ボタンを持ちます。
+  - 差し替えた HTML には、`ProxyConfig.recoveryScriptPlaceholder`（`<!--offline-web-proxy:recovery-->`）を書いた位置にだけ自動復帰のスクリプトが入ります。`<script>` 要素を置ける位置（`body` 内など）に書いてください。目印を複数書いた場合は、最初の目印にだけ入れ、残りは取り除きます。再試行ボタンも自分で置いてください。
+  - スクリプトを入れるのは、`statusPath` が空でなく、代替ページでは `enableOfflinePageAutoReload` が、`504` ページでは `enableOfflinePageAutoReload`、`enableAutoReloadContinuation`、`enableGatewayTimeoutAutoReload` のいずれかが有効な場合です。条件を満たさない場合、目印は空文字に置き換わります。
+  - `Content-Security-Policy` の meta でインラインスクリプトを禁止していると、スクリプトは動きません。
+- `enableOfflinePageAutoReload`、`enableAutoReloadContinuation`、`enableGatewayTimeoutAutoReload`、`autoReloadPollInterval`、`autoReloadQueueWaitTimeout` は、proxy が返すページの自動復帰の設定です。`autoReloadPollInterval` は 100 ミリ秒以上 24 時間以下、`autoReloadQueueWaitTimeout` は 0 以上で指定します。「オフライン代替ページの自動復帰」を参照してください。
 - `upstreamFailureThreshold` は、上流へ到達できない状態が連続した場合に転送を止めるまでの回数です。リンク層は接続済みでも上流が落ちている環境で、リクエストが毎回タイムアウトまで待たされるのを防ぎます。0 を指定すると無効になります。
 - `upstreamProbePath`、`upstreamProbeMethod`、`upstreamProbeTimeout`、`upstreamProbeBackoffSeconds` は、転送を止めている間の復帰確認に使います。応答が返れば到達可能と判定するため、ステータスコードは問いません。
 - `queuedResponse` と `offlineMissResponse` は、proxy が自分で生成する応答の内容です。既定はどちらも JSON で、Web アプリ側の `response.json()` が成功します。
@@ -283,10 +294,34 @@ if (res.headers.get('X-Offline-Queued') === '1') {
 const saved = await res.json();
 ```
 
-キャッシュが無い状態のオフライン read には、既定で `504` と `{"offline":true}` を返します。`response.ok` が false になるため、通常のエラー処理で扱えます。ページ遷移（`Sec-Fetch-Mode: navigate`）だけは、人が読める HTML のフォールバックページを返します。
+キャッシュが無い状態のオフライン read には、既定で `504` と `{"offline":true}` を返します。`response.ok` が false になるため、通常のエラー処理で扱えます。ページ遷移（`Sec-Fetch-Mode: navigate`）だけは、人が読める HTML のフォールバックページ（`200`）を返します。
 
-リンク層は接続済みでも上流へ到達できない場合も同じ内容を返します。この応答には `X-Offline-Source: none` が付くため、上流自身が返した `504` と判別できます。
+リンク層は接続済みでも上流へ到達できない場合、ページ遷移以外には同じ内容を返します。ページ遷移には、再試行ボタンを持つ HTML の `504` ページ（`gatewayTimeoutHtml` で差し替え可能）を返します。サーキットブレーカが遮断した後はオフライン時と同じ経路になり、ページ遷移にはフォールバックページを返します。上流へ到達できずに proxy が返す `504` には `X-Offline-Source: none` が付くため、上流自身が返した `504` と判別できます。
 - 現在サポートされる設定入口は `ProxyConfig` です。外部 YAML の自動読込は実装されていません。
+
+### オフライン代替ページの自動復帰
+
+オフライン時にキャッシュの無い画面へ遷移すると、proxy は `200` の代替ページ（フォールバックページ）を返します。WebView にはエラーとして届かないため、何もしなければ接続が戻っても代替ページのままになります。既定の代替ページは、同じ origin の `statusPath` を一定間隔で読み、上流へ到達できる状態に戻ると自分で再読込します。
+
+- `isUpstreamReachable` を 2 回続けて `true` で読んだら、`queueLength` が 0 になるまで（最長 `autoReloadQueueWaitTimeout`）待ってから再読込します。再送前の画面を見た利用者が、同じ操作を入れ直すのを防ぐためです。
+- `isOnline` ではなく `isUpstreamReachable` で判定します。`isOnline` はリンク層だけの判定で、Wi-Fi に接続したまま上流が止まっている間も `true` になるためです。
+- 「到達できる」は proxy の判定が変わったことを表し、上流の応答を確かめた結果ではありません。機内モードを解除した直後の再読込は、経路が整う前で `504` になることがあります。
+- 自動再読込の結果として `504` ページが表示された場合は、10 秒待った後に `isUpstreamReachable: true` を読めば、もう一度再読込します（`enableAutoReloadContinuation`、既定で有効）。proxy のページに着いた自動再読込が 3 回続くと止まり、再試行ボタンだけが残ります。
+- 表示した時点から `504` ページを監視して再読込する機能（`enableGatewayTimeoutAutoReload`）は既定で無効です。有効にしても、proxy が到達不能を検知した（サーキットブレーカの遮断やリンク層の切断）あとで到達できる状態に戻った場合だけ働きます。
+- 状態を取得できない間（proxy の停止やポートの変更）は再読込せず、間隔を最長 30 秒まで延ばして読み続けます。proxy 自体の復旧は `ProxyLifecycleGuard` が担います。
+- `beforeunload` を受け取ってから `requestTimeout` に 30 秒を足した時間は、画面から始まった遷移を打ち消さないよう再読込を見送ります。ページが置き換わらない遷移（`204` の応答、ダウンロード、アプリが止めた遷移、外部スキーム）の後も、この時間だけ再読込が遅れます。これより長くかかる遷移は打ち消すことがあります。iOS の WKWebView で `beforeunload` が発火するかは未確認です。
+- JavaScript が無効な WebView では動きません。iframe で表示した場合は枠ごとに動きます。
+- 自動再読込の連続回数は、Web アプリの origin の `sessionStorage` に `__offline_web_proxy_recovery:` で始まるキーで保存し、10 分以上更新の無いキーは消します。`sessionStorage` を使えない WebView では、連続回数の上限と継続復帰が働きません。
+- 自動再読込の途中でリダイレクトを挟んで別の URL に着いた場合、その 1 回は継続復帰が働きません。着いた先の `504` ページは、`enableGatewayTimeoutAutoReload` が無効なら再試行ボタンだけを残します。
+- `statusPath` を空文字列にすると、スクリプトを入れず、再試行ボタンだけのページになります。
+- 状態通知の `GET` と稼働確認の `GET` / `HEAD` は、要求ログ（`shelf.logRequests`）に出力しません。
+
+HTTP エラーの通知（webview_flutter の `NavigationDelegate.onHttpError`、flutter_inappwebview の `onReceivedHttpError`）でアプリのエラー画面を出している場合、自動再読込が `504` に着くたびに通知が届きます（連続 3 回まで）。proxy が生成した `504` には `X-Offline-Source: none` が付きます。
+
+- 既定の `504` ページ、または再試行ボタンを置いた差し替え HTML を使っている場合は、主フレームの `504` に `X-Offline-Source: none` が付いていれば、アプリのエラー画面を出さずに済みます（WebView で JavaScript が有効な場合）。
+- ヘッダ名は大文字小文字を区別せずに照合してください。
+- それでもエラー画面を出す場合は、閉じる契機に注意してください。`504` ページ自身の読み込み完了で閉じると、表示した直後に消えるおそれがあります。HTTP エラーの通知と読み込み完了の通知の順序は WebView の実装によるため、実機で確かめてから実装してください。
+- 競合する場合は `enableAutoReloadContinuation: false` を指定してください。
 
 ### WebView 用途の待ち時間
 
@@ -357,6 +392,8 @@ WebView へ返す上流レスポンスが `301`、`302`、`303`、`307`、`308` 
 ## 接続復旧 API
 
 端末のサスペンドやプロセス再開の後は、内部状態が稼働中のままでもソケットが応答しなくなることがあります。この状態では WebView が端末標準のエラー画面（`127.0.0.1:...` に接続できないという表示）を出してしまうため、復帰時に稼働確認と再バインドを行います。
+
+オフライン代替ページは、状態通知を読んで自分で再読込します。`504` ページが再読込するのは、自動再読込の結果として表示された場合（`enableAutoReloadContinuation`）と、`enableGatewayTimeoutAutoReload` を有効にした場合です（「オフライン代替ページの自動復帰」）。`ProxyLifecycleGuard` が担うのは、proxy のソケット自体が応答しなくなった場合の復旧です。
 
 ```dart
 // アプリのライフサイクルに連動させる
@@ -484,9 +521,9 @@ if (!status.isOnline) {
 }
 ```
 
-- `GET` のみで、上流へは転送されず、統計にも計上されません。
+- `GET` のみで、上流へは転送されず、統計にも計上されず、要求ログにも出力されません。
 - proxy 自身の origin からの要求だけを受け付けます。別 origin の `Origin` を伴う要求には `403` を返し、`Access-Control-Allow-Origin: *` も付与しません。
-- `statusPath` に空文字列を指定すると無効になります。
+- `statusPath` に空文字列を指定すると無効になります。代替ページと `504` ページの自動復帰も止まります。
 
 ### 隔離キューを画面から操作する
 
@@ -655,6 +692,30 @@ hook では以下を実行します。
 - `dart analyze --fatal-warnings`
 
 Dart ファイルが自動修正または再整形された場合は、内容確認と再 stage のためにコミットを停止します。
+
+### 自動復帰のスクリプトの回帰テスト
+
+オフライン代替ページの自動復帰のスクリプトは、ヘッドレス Chrome で動作を確かめます。Node.js と、Chrome、Chromium、Microsoft Edge のいずれかが必要です（Node.js 24 と Chrome で動作を確認）。CI では `Recovery Script Test` job が同じ手順を実行します。
+
+```bash
+dart run tool/offline_recovery_harness/generate_pages.dart build/offline_recovery_harness
+node tool/offline_recovery_harness/run.mjs build/offline_recovery_harness
+```
+
+- 環境変数 `CHROME_PATH` を指定すると、そのブラウザを使います。指定が無ければ標準のインストール先から探します。
+- `run.mjs` に渡すディレクトリの後ろにシナリオ名を並べると、そのシナリオだけを実行します。シナリオ名は `run.mjs` の `buildScenarios` に並んでいます（例: `node tool/offline_recovery_harness/run.mjs build/offline_recovery_harness queue_wait_timeout`）。
+- すべてのシナリオの実行には、Windows での実測で約 3 分半かかりました。
+
+### example の e2e
+
+`example/integration_test/` の e2e は CI では実行しません。Android の実機またはエミュレータで、ファイルを指定して実行します（この手順はエミュレータで確認）。
+
+```bash
+cd example
+flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.dart -d <デバイス ID>
+```
+
+デバイス ID は `flutter devices` で確認できます。
 
 ## リリース手順
 

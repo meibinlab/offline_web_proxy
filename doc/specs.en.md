@@ -20,7 +20,7 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 
 - **Cache**: Store successful GET responses in file-based storage. Do not use proxy cache to suppress online requests, and limit its use to offline or upstream-unreachable fallback
 - **Queue**: Manage POST/PUT/DELETE requests in FIFO (First In First Out). Send sequentially when network recovers
-- **Offline Response**: Return cache when cache hit, display fallback page when uncached
+- **Offline Response**: Return cache when cache hit, display fallback page when uncached (the page reloads itself once the upstream is reachable again)
 - **Static Resources**: Index files under `assets/static/` that are declared in `pubspec.yaml` and listed in `AssetManifest.json`, and serve them as bundled assets
 
 ### Proxy Target
@@ -422,8 +422,8 @@ Provides methods for queue management. See [20] API Reference for details.
 
 The unsent count and the online state were reachable only from the Dart API, so showing them on the screen meant writing a bridge in the app. `ProxyConfig.statusPath` (default `/__offline_web_proxy/status`) returns the same information as JSON.
 
-- **Method**: `GET` only. Never forwarded upstream, and excluded from statistics and events
-- **Disabling**: An empty value leaves the route unregistered
+- **Method**: `GET` only. Never forwarded upstream, excluded from statistics and events, and omitted from the request log
+- **Disabling**: An empty value leaves the route unregistered, and the fallback and 504 pages no longer receive the auto-reload script (see Auto-reload of the Fallback Page in [10])
 - **Validation**: Same rules as `healthCheckPath`; a value equal to `healthCheckPath` is rejected at startup
 - **Response header**: `Cache-Control: no-store`
 
@@ -531,7 +531,7 @@ The proxy guarantees only that the same operation carries the same key. **Dedupl
 3. **On HTTP 4xx**: Return the upstream 4xx response as-is and do not switch to proxy cache
 4. **On HTTP 5xx**: Return the upstream 5xx response as-is and do not switch to proxy cache
 5. **When expired**: Do not return entries whose stale period has also elapsed
-6. **Upstream unreachable with no eligible cache**: GET/HEAD returns 504 (the body can be replaced with `ProxyConfig.gatewayTimeoutHtml`). Mutating requests are queued as before
+6. **Upstream unreachable with no eligible cache**: GET/HEAD returns 504. A GET page navigation receives the HTML 504 page (replaceable via `ProxyConfig.gatewayTimeoutHtml`), any other GET receives `ProxyConfig.offlineMissResponse`, and HEAD receives a 504 without a body. Mutating requests are queued as before
 
 #### Storing Despite no-store (forceCachePaths)
 
@@ -804,8 +804,18 @@ Add custom headers for debugging to offline responses:
 
 - **Applies to**: Requests with `Sec-Fetch-Mode: navigate`, or with `text/html` in `Accept`
 - **Status**: 200 OK
+- **Headers**: `Content-Type: text/html; charset=utf-8`, `Cache-Control: no-store`
 - **Custom Headers**: `X-Offline: 1`, `X-Offline-Source: fallback`
-- **Content**: Pre-prepared fallback page (replaceable via `ProxyConfig.offlineFallbackHtml`)
+- **Content**: Pre-prepared fallback page (replaceable via `ProxyConfig.offlineFallbackHtml`). The built-in page carries a retry button, plus the auto-reload script when its condition is met (see Auto-reload of the Fallback Page)
+- **Why `no-store`**: Keeps the WebView from showing a stored fallback page again on history navigation
+
+#### Upstream unreachable (page navigation)
+
+- **Applies to**: A page navigation while the link layer is up but the upstream cannot be reached and no cached entry can be served
+- **Status**: 504 Gateway Timeout
+- **Headers**: `Content-Type: text/html; charset=utf-8`, `Cache-Control: no-store`, `X-Offline-Source: none`, `Connection: close`
+- **Content**: Built-in 504 page (replaceable via `ProxyConfig.gatewayTimeoutHtml`). The built-in page carries a retry button, plus the script depending on the auto-reload settings
+- **Why an explicit `Content-Type`**: A body passed as a bare string makes shelf attach `application/octet-stream`, which a WebView may fail to treat as a page
 
 #### When Unsupported (anything but a navigation)
 
@@ -829,6 +839,68 @@ Add custom headers for debugging to offline responses:
 - **Status and body**: The upstream response is returned as-is
 - **Custom Headers**: `X-Offline-Queued: 1` and `X-Offline-Queue-Id` are added only when the request was stored for resend
 - **Why**: Without that marker the web app cannot tell that the proxy will resend, and a person may end up submitting the same request twice
+
+### Auto-reload of the Fallback Page
+
+The offline fallback page is answered with `200`, so the WebView's error callbacks (`onWebResourceError` / `onHttpError` in webview_flutter, `onReceivedError` / `onReceivedHttpError` in flutter_inappwebview) never fire, and proxy events never reach the page on screen. The pages the proxy generates therefore read `statusPath` on their own origin and recover by themselves.
+
+#### When the Script Is Inserted
+
+| Page | Condition |
+| ---- | --------- |
+| Fallback page (200) | `statusPath` is not empty and `enableOfflinePageAutoReload` is on |
+| 504 page | `statusPath` is not empty and any of `enableOfflinePageAutoReload`, `enableAutoReloadContinuation` or `enableGatewayTimeoutAutoReload` is on (even when it does not monitor, the page processes the marker so the consecutive count of automatic reloads resets correctly) |
+
+- A built-in page carries the script only when the condition is met. It carries the retry button regardless
+- A replacement page receives the script only where `ProxyConfig.recoveryScriptPlaceholder` (`<!--offline-web-proxy:recovery-->`) appears. When the marker appears more than once, only the first occurrence receives the script and the rest become empty strings, because two copies on one page would reset each other's reload count. When the condition is not met every marker is replaced with an empty string, and HTML without the marker is returned unchanged
+- The script is inserted as a plain inline script, without `type="module"` or `defer`. Embedded values go through `jsonEncode`, and `<` plus the line separator characters are replaced with JavaScript Unicode escapes
+- The script does nothing in a WebView with JavaScript disabled. Inside an iframe, each frame acts on its own
+
+#### Activation and Monitoring Rules
+
+- The script acts only when `document.readyState` is `loading` at run time, so a copy inserted into another page after loading does nothing. Matching the URL is not used, because dart:io normalizes the request URL
+- When the script runs more than once on the same page, every run after the first does nothing
+- Status reads are chained with `setTimeout` and never overlap. Each read times out after the poll interval (at least one second)
+- A read counts as failed, and never triggers a reload, when the answer is not 2xx, the JSON cannot be parsed, `isUpstreamReachable` is not a boolean, the network fails or the read times out. While reads keep failing, the interval doubles up to 30 seconds (or the poll interval, if longer)
+- After calling `location.reload()` the page stops its timers and never calls it again
+- For `requestTimeout` plus 30 seconds after `beforeunload`, a reload is put off and re-evaluated on the next cycle, so a navigation started from the page is not cancelled. A navigation that never replaces the page (a `204` response, a download, a navigation stopped by the app, an external scheme) delays the reload for that long as well. A navigation that takes longer can still be cancelled. Whether WKWebView on iOS fires `beforeunload` has not been verified
+- A page restored from bfcache (`pageshow` with `persisted`) restarts monitoring without re-evaluating the marker, the navigation type or `readyState`. The fallback page restarts in "awaiting recovery"; the 504 page restarts in "monitoring" only when `enableGatewayTimeoutAutoReload` is on (it never returns to continuation), and the stored consecutive count is kept. The record of `beforeunload` is cleared
+- Recovery from a stopped proxy or a changed port is the job of `ProxyLifecycleGuard`
+
+#### State Transitions
+
+The fallback page starts in "awaiting recovery". The 504 page starts in "continuation" when it was reached by an automatic reload and continuation is on, in "monitoring" otherwise when `enableGatewayTimeoutAutoReload` is on, and does not monitor at all in any other case.
+
+| State | Condition | Next state |
+| ----- | --------- | ---------- |
+| Monitoring | Read `isUpstreamReachable: false` | Awaiting recovery |
+| Awaiting recovery | Read `true` twice in a row (a `false` or a failed read in between restarts the count) | Awaiting queue |
+| Continuation | Read `true` after waiting ten seconds | Awaiting queue |
+| Continuation | Read `false` | Awaiting recovery |
+| Awaiting queue | Read `false`, or a read failed | Awaiting recovery |
+| Awaiting queue | The last read succeeded, and either `queueLength` is zero or `autoReloadQueueWaitTimeout` has passed since entering this state | Reload decision |
+| Reload decision | Less than `requestTimeout` plus 30 seconds has passed since `beforeunload` | Stay in awaiting queue and decide again on the next cycle |
+| Reload decision | The consecutive count of automatic reloads is below the limit (three) | Save the marker and reload |
+| Reload decision | The consecutive count of automatic reloads reached the limit | Stop, leaving only the retry button |
+
+- A failed read in monitoring, awaiting recovery or continuation leaves the state unchanged (awaiting recovery only restarts its count of consecutive `true` reads)
+- The queue wait is measured from entering "awaiting queue" and discarded when the page returns to "awaiting recovery"
+- "Twice in a row" is a waiting time, not a check that the upstream answered. When only the link layer dropped and returned while the circuit breaker stayed closed, no probe runs, so the first reload can end in a 504
+- A 504 page that reads `true` from the moment it is shown does not reload unless it is in continuation
+
+#### Consecutive Count of Automatic Reloads and Marker
+
+- `sessionStorage` holds the marker (the time just before a reload) and the consecutive count of automatic reloads, under a key made of `__offline_web_proxy_recovery:` followed by the path and query
+- When a proxy page loads, it counts as the result of an automatic reload if the navigation type is `reload` and the difference between `performance.timeOrigin` and the marker is between -1 and 10 seconds; the count then increases, otherwise it resets to zero. Without `performance.timeOrigin`, the difference from `Date.now()` must be within `requestTimeout` plus 30 seconds. Without Navigation Timing Level 2, the navigation type is read from `performance.navigation.type`
+- The marker is always removed on load. The retry button never saves a marker, so manual reloads are not counted
+- A successful automatic reload that shows the real screen is not counted (the count resets the next time a proxy page is shown)
+- Keys of other URLs not updated for ten minutes are removed
+- Without `sessionStorage`, nothing is counted and continuation does not run
+- When an automatic reload passes through a redirect and lands on another URL, continuation does not act for that one reload. A 504 page reached that way keeps only its retry button unless `enableGatewayTimeoutAutoReload` is on
+
+#### Request Log
+
+- To keep monitoring from flooding the log, `GET` / `HEAD` requests to `healthCheckPath` and `GET` requests to `statusPath` are omitted from `shelf.logRequests`. The admin API and other methods on the same paths are still logged (see [18])
 
 ### Processing Cache-Control Response Headers
 
@@ -1168,6 +1240,11 @@ Cache operations (put/get/purge) implement exclusive control through serializati
 - **Default Level**: info (level suitable for production operation)
 - **Debug**: Do not output confidential information even when debug is specified
 
+### Request Log
+
+- `shelf.logRequests` writes one line per request
+- To keep the fallback page's monitoring from flooding the log, `GET` / `HEAD` requests to `healthCheckPath` and `GET` requests to `statusPath` are not written (see Auto-reload of the Fallback Page in [10])
+
 ### Masking Targets
 
 - **Authorization**: Authentication information such as Bearer token
@@ -1333,6 +1410,7 @@ Observer that verifies responsiveness and recovers in step with the app lifecycl
   - `onRecovered`: Callback invoked when a rebind happened
   - `onFailed`: Callback invoked when recovery was not possible (optional)
   - `currentUrlProvider`: Function returning the currently displayed URL (optional). Used to compute `reloadUri`
+- **Relation to the fallback page**: The offline fallback page generated by the proxy reloads itself by reading the status endpoint. The 504 page reloads only when it was reached by an automatic reload (`enableAutoReloadContinuation`) or when `enableGatewayTimeoutAutoReload` is on (see Auto-reload of the Fallback Page in [10]). `ProxyLifecycleGuard` covers recovery when the proxy socket itself stops responding
 
 ```dart
 final guard = ProxyLifecycleGuard(
@@ -2035,6 +2113,12 @@ class ProxyConfig {
   final int maxRestartAttemptsPerMinute; // Rebind limit per minute (default: 5)
   final String? offlineFallbackHtml; // Replacement HTML for offline responses (null=built-in page)
   final String? gatewayTimeoutHtml; // Replacement HTML for timeout responses (null=built-in page)
+  final bool enableOfflinePageAutoReload; // Auto-reload of the fallback page (default: true)
+  final bool enableAutoReloadContinuation; // Reload of a 504 page reached by an automatic reload (default: true)
+  final bool enableGatewayTimeoutAutoReload; // Auto-reload of the 504 page from the moment it is shown (default: false)
+  final Duration autoReloadPollInterval; // Interval for reading the status (default: 3 seconds, between 100 milliseconds and 24 hours)
+  final Duration autoReloadQueueWaitTimeout; // Longest wait for queued requests (default: 10 seconds, zero = no wait)
+  static const String recoveryScriptPlaceholder = '<!--offline-web-proxy:recovery-->'; // Marker in replacement HTML
 }
 ```
 

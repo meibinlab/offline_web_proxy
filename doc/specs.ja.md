@@ -20,7 +20,7 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 - **キャッシュ**: GET リクエストの成功レスポンスをファイルベースで保存。オンライン時の送信抑止には使わず、オフライン時または上流到達不能時の代替応答に限定して利用
 - **キュー**: POST/PUT/DELETE リクエストを FIFO（先入先出）で管理。ネットワーク復旧時に順次送信
-- **オフライン応答**: キャッシュヒット時はキャッシュを返却、未キャッシュ時はフォールバックページを表示
+- **オフライン応答**: キャッシュヒット時はキャッシュを返却、未キャッシュ時はフォールバックページを表示（上流へ到達できる状態に戻るとページ自身が再読込）
 - **静的リソース**: `pubspec.yaml` で宣言され `AssetManifest.json` に掲載された `assets/static/` 配下ファイルを一覧化し、同梱アセットとして配信
 
 ### プロキシ対象
@@ -423,8 +423,8 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 未送信件数やオンライン状態は Dart の API でしか取得できないため、表示も判断も画面側で行いたい場合はアプリへ橋渡しの実装が必要でした。`ProxyConfig.statusPath`（既定 `/__offline_web_proxy/status`）は、同じ情報を JSON で返します。
 
-- **メソッド**: `GET` のみ。上流へは転送せず、統計にもイベントにも計上しません
-- **無効化**: 空文字列を指定すると登録しません
+- **メソッド**: `GET` のみ。上流へは転送せず、統計にもイベントにも計上せず、要求ログにも出力しません
+- **無効化**: 空文字列を指定すると登録しません。代替ページと 504 ページへ自動復帰のスクリプトも入れません（【10】の「代替ページの自動復帰」）
 - **検証**: `healthCheckPath` と同じ規則で検証し、`healthCheckPath` と同じ値は起動時に拒否します
 - **応答ヘッダ**: `Cache-Control: no-store` を付与します
 
@@ -532,7 +532,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 3. **HTTP 4xx 時**: upstream が応答した 4xx はそのまま返し、proxy キャッシュへ切り替えない
 4. **HTTP 5xx 時**: upstream が応答した 5xx はそのまま返し、proxy キャッシュへ切り替えない
 5. **expired 時**: stale 期間も超過したキャッシュは返却対象にしない
-6. **上流到達不能かつ代替キャッシュ無し**: GET/HEAD は 504 を返す（本文は `ProxyConfig.gatewayTimeoutHtml` で差し替え可能）。更新系リクエストは従来どおりキューへ保存する
+6. **上流到達不能かつ代替キャッシュ無し**: GET/HEAD は 504 を返す。GET のページ遷移には HTML の 504 ページ（`ProxyConfig.gatewayTimeoutHtml` で差し替え可能）を、それ以外の GET には `ProxyConfig.offlineMissResponse` を返し、HEAD は本文を持たない 504 を返す。更新系リクエストは従来どおりキューへ保存する
 
 #### no-store を無視する保存（forceCachePaths）
 
@@ -805,8 +805,18 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 - **対象**: `Sec-Fetch-Mode: navigate`、または `Accept` に `text/html` を含むリクエスト
 - **ステータス**: 200 OK
+- **ヘッダ**: `Content-Type: text/html; charset=utf-8`、`Cache-Control: no-store`
 - **カスタムヘッダ**: `X-Offline: 1`、`X-Offline-Source: fallback`
-- **内容**: あらかじめ用意されたフォールバックページ（`ProxyConfig.offlineFallbackHtml` で差し替え可能）
+- **内容**: あらかじめ用意されたフォールバックページ（`ProxyConfig.offlineFallbackHtml` で差し替え可能）。既定のページは再試行ボタンを持ち、条件を満たす場合は自動復帰のスクリプトも持つ（「代替ページの自動復帰」）
+- **`no-store` の理由**: 履歴移動で WebView が保存済みの代替ページを再表示しないようにするため
+
+#### 上流到達不能時（ページ遷移）
+
+- **対象**: リンク層は接続済みだが上流へ到達できず、代替できるキャッシュも無いページ遷移
+- **ステータス**: 504 Gateway Timeout
+- **ヘッダ**: `Content-Type: text/html; charset=utf-8`、`Cache-Control: no-store`、`X-Offline-Source: none`、`Connection: close`
+- **内容**: 既定の 504 ページ（`ProxyConfig.gatewayTimeoutHtml` で差し替え可能）。既定のページは再試行ボタンを持ち、自動復帰の設定に応じてスクリプトを持つ
+- **`Content-Type` を明示する理由**: 本文を文字列だけで返すと shelf が `application/octet-stream` を付け、WebView が画面として扱えない場合があるため
 
 #### 未対応時（ページ遷移以外）
 
@@ -830,6 +840,68 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **ステータスと本文**: 上流の応答をそのまま返します
 - **カスタムヘッダ**: 再送用にキューへ保存した場合のみ `X-Offline-Queued: 1` と `X-Offline-Queue-Id` を付与します
 - **理由**: proxy が再送を予定していることを Web アプリ側が判別できないと、利用者側の操作で二重に送信される可能性があります
+
+### 代替ページの自動復帰
+
+オフラインの代替ページ（フォールバックページ）は `200` で返るため、WebView のエラー通知（webview_flutter の `onWebResourceError` / `onHttpError`、flutter_inappwebview の `onReceivedError` / `onReceivedHttpError`）は届きません。proxy のイベントも表示中のページには届かないため、proxy が返すページは同じ origin の `statusPath` を読んで自分で復帰します。
+
+#### スクリプトを入れる条件
+
+| ページ | 条件 |
+| ---- | ---- |
+| 代替ページ（200） | `statusPath` が空でなく、`enableOfflinePageAutoReload` が有効 |
+| 504 ページ | `statusPath` が空でなく、`enableOfflinePageAutoReload`、`enableAutoReloadContinuation`、`enableGatewayTimeoutAutoReload` のいずれかが有効（監視しない場合も、自動再読込の連続回数を正しく戻すために目印を処理する） |
+
+- 既定のページは、条件を満たす場合にだけスクリプトを持つ。再試行ボタンは条件に関係なく持つ
+- 差し替え HTML には、`ProxyConfig.recoveryScriptPlaceholder`（`<!--offline-web-proxy:recovery-->`）の位置にだけ入れる。目印が複数ある場合は最初の目印にだけ入れ、残りは空文字へ置き換える（同じページで複数のスクリプトが動くと、連続回数の記録を互いに打ち消すため）。条件を満たさない場合はすべての目印を空文字へ置き換え、目印が無い HTML はそのまま返す
+- スクリプトは通常のインラインスクリプト（`type="module"` や `defer` を付けない）として入れる。埋め込む値は `jsonEncode` し、`<` と行区切り文字を JavaScript の Unicode エスケープへ置き換える
+- JavaScript が無効な WebView では動かない。iframe で表示した場合は枠ごとに動く
+
+#### 起動と監視の規則
+
+- 実行時に `document.readyState` が `loading` のときだけ動く。HTML 断片として読み込み後に挿入された場合は動かない。dart:io が要求の URL を正規化するため、URL の一致による判定は使わない
+- 同じページでスクリプトが複数回実行された場合、2 回目以降は何もしない
+- `setTimeout` の連鎖で状態を読み、要求を重ねない。取得には監視間隔（最短 1 秒）のタイムアウトを付ける
+- 次の場合は「取得失敗」とし、再読込しない: 非 2xx の応答、JSON の解析失敗、`isUpstreamReachable` が真偽値でない応答、通信失敗、取得のタイムアウト。取得失敗が続く間は間隔を倍にし、最長 30 秒（監視間隔の方が長ければ監視間隔）まで延ばす
+- `location.reload()` を呼んだ後はタイマーを止め、同じページでは二度と呼ばない
+- `beforeunload` を受け取ってから `requestTimeout` に 30 秒を足した時間は再読込を見送り、次の周期で判定し直す（画面から始まった遷移を打ち消さないため）。ページが置き換わらない遷移（`204` の応答、ダウンロード、アプリが止めた遷移、外部スキーム）の後も、この時間だけ再読込が遅れる。これより長くかかる遷移は打ち消すことがある。iOS の WKWebView で `beforeunload` が発火するかは未確認
+- bfcache から復元された場合（`pageshow` の `persisted`）は、目印、遷移の種類、`readyState` を判定し直さずに監視をやり直す。代替ページは「復帰待ち」から、504 ページは `enableGatewayTimeoutAutoReload` が有効な場合だけ「監視中」から始め（継続復帰には戻らない）、自動再読込の連続回数は保存済みの値を使う。`beforeunload` の記録は消す
+- proxy の停止やポートの変更からの復旧は `ProxyLifecycleGuard` が担う
+
+#### 状態遷移
+
+初期状態は、代替ページが「復帰待ち」。504 ページは、自動再読込の結果として表示され継続復帰が有効なら「継続復帰」、それ以外で `enableGatewayTimeoutAutoReload` が有効なら「監視中」、どちらでもなければ監視しない。
+
+| 状態 | 条件 | 次の状態 |
+| ---- | ---- | -------- |
+| 監視中 | `isUpstreamReachable: false` を読んだ | 復帰待ち |
+| 復帰待ち | `true` を 2 回続けて読んだ（間に `false` か取得失敗があれば数え直す） | 再送待ち |
+| 継続復帰 | 10 秒待った後に `true` を読んだ | 再送待ち |
+| 継続復帰 | `false` を読んだ | 復帰待ち |
+| 再送待ち | `false` を読んだ、または取得に失敗した | 復帰待ち |
+| 再送待ち | 直前の取得が成功し、かつ（`queueLength` が 0、または再送待ちに入ってから `autoReloadQueueWaitTimeout` が経過） | 再読込判定 |
+| 再読込判定 | `beforeunload` を受け取ってから `requestTimeout` に 30 秒を足した時間が経っていない | 再送待ちのまま、次の周期で判定し直す |
+| 再読込判定 | 自動再読込の連続回数が上限（3 回）未満 | 目印を保存して再読込 |
+| 再読込判定 | 自動再読込の連続回数が上限に達した | 停止（再試行ボタンだけを残す） |
+
+- 監視中、復帰待ち、継続復帰で取得に失敗した場合は、状態を変えない（復帰待ちでは `true` を続けて読んだ回数だけを数え直す）
+- 再送待ちの上限時間は再送待ちに入った時点から数え、復帰待ちへ戻ると計測を捨てる
+- 「2 回続けて `true`」は待ち時間であり、上流への到達を確かめた結果ではない。サーキットブレーカが遮断していない状態でリンク層だけが切れて戻った場合は復帰確認が走らないため、最初の再読込が 504 になることがある
+- 504 ページが表示時点から `true` を読み続けても、継続復帰でない限り再読込しない
+
+#### 自動再読込の連続回数と目印
+
+- `sessionStorage` に、`__offline_web_proxy_recovery:` にパスとクエリを連ねたキーで、目印（再読込直前の時刻）と自動再読込の連続回数を保存する
+- proxy のページを読み込んだとき、遷移の種類が `reload` で、`performance.timeOrigin` と目印の差が -1 秒以上 10 秒以内なら、自動再読込の結果とみなして連続回数を加算する。それ以外は 0 に戻す。`performance.timeOrigin` を使えない場合は、`Date.now()` との差が `requestTimeout` に 30 秒を足した時間以内かで判定する。Navigation Timing Level 2 を使えない場合は `performance.navigation.type` で遷移の種類を判定する
+- 目印は読み込み時に必ず消す。再試行ボタンは目印を保存しないため、手動の再読込は数えない
+- 自動再読込が成功して本来の画面が表示された場合は数えない（次に proxy のページが表示されたときに 0 に戻る）
+- 他の URL のキーのうち、最終更新から 10 分を過ぎたものを掃除する
+- `sessionStorage` を使えない場合は回数を数えず、継続復帰も行わない
+- 自動再読込の途中でリダイレクトを挟んで別の URL に着いた場合、その 1 回は継続復帰が働かない。着いた先の 504 ページは、`enableGatewayTimeoutAutoReload` が無効なら再試行ボタンだけを残す
+
+#### 要求ログ
+
+- 監視による要求でログが埋まらないよう、GET / HEAD の `healthCheckPath` と GET の `statusPath` は `shelf.logRequests` の出力から除外する。管理 API と、同じパスへの他メソッドの要求は記録する（【18】）
 
 ### Cache-Control 応答ヘッダの処理
 
@@ -1169,6 +1241,11 @@ proxy:
 - **既定レベル**: info（本番運用に適したレベル）
 - **デバッグ**: debug 指定時も機密情報は出力しない
 
+### 要求ログ
+
+- `shelf.logRequests` で要求ごとに 1 行を出力する
+- 代替ページの監視による要求でログが埋まらないよう、GET / HEAD の `healthCheckPath` と GET の `statusPath` は出力しない（【10】の「代替ページの自動復帰」）
+
 ### マスキング対象
 
 - **Authorization**: Bearer token 等の認証情報
@@ -1334,6 +1411,7 @@ WebView が保持していた URL を、現行ポートで読み込める URL �
   - `onRecovered`: 再バインドが発生した場合に呼ばれるコールバック
   - `onFailed`: 復旧できなかった場合に呼ばれるコールバック（省略可）
   - `currentUrlProvider`: 現在表示中の URL を返す関数（省略可）。指定時は `reloadUri` の算出に使用します
+- **代替ページとの関係**: proxy が返すオフライン代替ページは、状態通知を読んで自分で再読込します。504 ページが再読込するのは、自動再読込の結果として表示された場合（`enableAutoReloadContinuation`）と、`enableGatewayTimeoutAutoReload` を有効にした場合です（【10】の「代替ページの自動復帰」）。`ProxyLifecycleGuard` が担うのは、proxy のソケット自体が応答しなくなった場合の復旧です
 
 ```dart
 final guard = ProxyLifecycleGuard(
@@ -2036,6 +2114,12 @@ class ProxyConfig {
   final int maxRestartAttemptsPerMinute; // 1 分あたりの再バインド上限回数（デフォルト: 5）
   final String? offlineFallbackHtml; // オフライン応答の差し替え HTML（null=内蔵ページ）
   final String? gatewayTimeoutHtml; // タイムアウト応答の差し替え HTML（null=内蔵ページ）
+  final bool enableOfflinePageAutoReload; // 代替ページの自動復帰（既定: true）
+  final bool enableAutoReloadContinuation; // 自動再読込の結果の 504 ページの再読込（既定: true）
+  final bool enableGatewayTimeoutAutoReload; // 504 ページの監視中からの自動再読込（既定: false）
+  final Duration autoReloadPollInterval; // 状態通知を読む間隔（既定: 3 秒、100 ミリ秒以上 24 時間以下）
+  final Duration autoReloadQueueWaitTimeout; // 再送の完了を待つ上限時間（既定: 10 秒、0=待たない）
+  static const String recoveryScriptPlaceholder = '<!--offline-web-proxy:recovery-->'; // 差し替え HTML の目印
 }
 ```
 

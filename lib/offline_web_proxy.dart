@@ -93,6 +93,7 @@ import 'src/models/queued_request.dart';
 import 'src/models/response_header_snapshot.dart';
 import 'src/models/upstream_circuit_state.dart';
 import 'src/models/warmup_result.dart';
+import 'src/pages/offline_recovery_page.dart';
 
 export 'src/exceptions/exceptions.dart';
 export 'src/lifecycle/proxy_lifecycle_guard.dart';
@@ -198,6 +199,12 @@ const Duration _defaultConnectTimeout = Duration(seconds: 5);
 
 /// 設定が読み込めない場合に使う既定のリクエスト全体の締め切り。
 const Duration _defaultRequestTimeout = Duration(seconds: 20);
+
+/// 代替ページが状態通知を読む間隔の既定値。
+const Duration _defaultAutoReloadPollInterval = Duration(seconds: 3);
+
+/// 代替ページが再送の完了を待つ上限時間の既定値。
+const Duration _defaultAutoReloadQueueWaitTimeout = Duration(seconds: 10);
 
 /// 上流の復帰確認で使う既定のバックオフ秒数。
 /// 設定が空の場合のフォールバックとして使用します。
@@ -530,6 +537,7 @@ class OfflineWebProxy {
       _config = config ?? await _loadDefaultConfig();
       _validateHealthCheckPath();
       _validateStatusPath();
+      _validateAutoReloadSettings();
       _validateMirroredOrigins();
       _compileConfiguredPatterns();
       _resetRecoveryState();
@@ -557,7 +565,7 @@ class OfflineWebProxy {
       final router = _createRouter();
       final handler = const shelf.Pipeline()
           .addMiddleware(_errorHandlingMiddleware)
-          .addMiddleware(shelf.logRequests())
+          .addMiddleware(_requestLoggingMiddleware())
           .addMiddleware(_corsMiddleware)
           .addMiddleware(_statisticsMiddleware)
           .addHandler(router.call);
@@ -913,9 +921,7 @@ class OfflineWebProxy {
       return true;
     }
 
-    final normalizedPath = request.url.path.startsWith('/')
-        ? request.url.path
-        : '/${request.url.path}';
+    final normalizedPath = _normalizedRequestPath(request);
 
     final statusPath = _statusPath;
     if (statusPath.isNotEmpty && normalizedPath == statusPath) {
@@ -1117,10 +1123,55 @@ class OfflineWebProxy {
       return false;
     }
 
+    return _normalizedRequestPath(request) == _healthCheckPath;
+  }
+
+  /// 要求のパスを `/` で始まる形にそろえて返します。
+  ///
+  /// [request] 対象の要求。
+  ///
+  /// Returns: 先頭に `/` を付けた要求のパス。
+  String _normalizedRequestPath(shelf.Request request) {
     final requestPath = request.url.path;
-    final normalizedPath =
-        requestPath.startsWith('/') ? requestPath : '/$requestPath';
-    return normalizedPath == _healthCheckPath;
+    return requestPath.startsWith('/') ? requestPath : '/$requestPath';
+  }
+
+  /// 要求ログを出力するミドルウェアを返します。
+  ///
+  /// 表示中の代替ページは状態通知を一定間隔で読むため、そのまま記録すると
+  /// ログが埋まります。GET / HEAD の稼働確認と GET の状態通知だけを出力から
+  /// 外し、管理 API や同じパスへの他メソッドの要求は従来どおり記録します。
+  ///
+  /// Returns: 要求ログを出力するミドルウェア。
+  shelf.Middleware _requestLoggingMiddleware() {
+    final logRequests = shelf.logRequests();
+    return (shelf.Handler innerHandler) {
+      final loggedHandler = logRequests(innerHandler);
+      return (shelf.Request request) {
+        if (_isUnloggedInternalRequest(request)) {
+          return innerHandler(request);
+        }
+        return loggedHandler(request);
+      };
+    };
+  }
+
+  /// 要求ログへ出力しない内部要求かどうかを返します。
+  ///
+  /// [request] 判定する要求。
+  ///
+  /// Returns: GET / HEAD の稼働確認、または GET の状態通知の場合は `true`。
+  bool _isUnloggedInternalRequest(shelf.Request request) {
+    if (_isHealthCheckRequest(request)) {
+      return true;
+    }
+
+    final statusPath = _statusPath;
+    if (statusPath.isEmpty || request.method.toUpperCase() != 'GET') {
+      return false;
+    }
+
+    return _normalizedRequestPath(request) == statusPath;
   }
 
   /// 稼働確認要求に応答します。
@@ -1389,6 +1440,38 @@ class OfflineWebProxy {
     if (configuredPath == _healthCheckPath) {
       throw ProxyStartException(
         'statusPath must differ from healthCheckPath: $configuredPath',
+        null,
+      );
+    }
+  }
+
+  /// 代替ページの自動復帰に関する設定値を検証します。
+  ///
+  /// Throws:
+  ///   * [ProxyStartException] 監視間隔が 100 ミリ秒未満または 24 時間を超える
+  ///     場合、または再送の完了を待つ上限時間が負の場合。
+  void _validateAutoReloadSettings() {
+    final config = _config;
+    if (config == null) {
+      return;
+    }
+
+    final pollInterval = config.autoReloadPollInterval;
+    if (pollInterval < offlineRecoveryMinimumPollInterval ||
+        pollInterval > offlineRecoveryMaximumPollInterval) {
+      throw ProxyStartException(
+        'autoReloadPollInterval must be between '
+        '${offlineRecoveryMinimumPollInterval.inMilliseconds} milliseconds '
+        'and ${offlineRecoveryMaximumPollInterval.inHours} hours: '
+        '$pollInterval',
+        null,
+      );
+    }
+
+    if (config.autoReloadQueueWaitTimeout.isNegative) {
+      throw ProxyStartException(
+        'autoReloadQueueWaitTimeout must not be negative: '
+        '${config.autoReloadQueueWaitTimeout}',
         null,
       );
     }
@@ -4312,23 +4395,21 @@ window.__offline_web_proxy_web_storage_bridge = {
       );
     }
 
+    final options =
+        _buildOfflineRecoveryOptions(OfflineRecoveryPageKind.gatewayTimeout);
     final customContent = _config?.gatewayTimeoutHtml;
-    if (customContent != null && customContent.isNotEmpty) {
-      return shelf.Response(
-        HttpStatus.gatewayTimeout,
-        body: customContent,
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'X-Offline-Source': 'none',
-          'Connection': 'close',
-        },
-      );
-    }
+    final body = customContent != null && customContent.isNotEmpty
+        ? applyOfflineRecoveryPlaceholder(customContent, options)
+        : buildDefaultOfflineRecoveryPage(options);
 
     return shelf.Response(
       HttpStatus.gatewayTimeout,
-      body: '上流サーバがタイムアウトしました',
+      body: body,
       headers: {
+        // 文字列の本文だけでは octet-stream になり、WebView が画面として扱えない場合がある
+        'Content-Type': 'text/html; charset=utf-8',
+        // 履歴移動で WebView が保存済みのページを再表示しないようにする
+        'Cache-Control': 'no-store',
         'X-Offline-Source': 'none',
         'Connection': 'close',
       },
@@ -4367,6 +4448,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       _getOfflineFallbackContent(),
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
+        // 履歴移動で WebView が保存済みの代替ページを再表示しないようにする
+        'Cache-Control': 'no-store',
         'X-Offline': '1',
         'X-Offline-Source': 'fallback',
       },
@@ -6323,28 +6406,41 @@ window.__offline_web_proxy_web_storage_bridge = {
   ///
   /// GETリクエストでキャッシュが見つからない場合に
   /// 表示するユーザーフレンドリーなメッセージを返却します。
+  /// 差し替え HTML は、目印だけを監視スクリプトへ置き換えます。
   ///
   /// Returns: オフライン用HTMLコンテンツ。
   String _getOfflineFallbackContent() {
+    final options =
+        _buildOfflineRecoveryOptions(OfflineRecoveryPageKind.offlineFallback);
     final customContent = _config?.offlineFallbackHtml;
     if (customContent != null && customContent.isNotEmpty) {
-      return customContent;
+      return applyOfflineRecoveryPlaceholder(customContent, options);
     }
 
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>オフライン</title>
-      <meta charset="utf-8">
-    </head>
-    <body>
-      <h1>オフライン中です</h1>
-      <p>現在オフラインのため、リクエストされたコンテンツを表示できません。</p>
-      <p>インターネット接続を確認してから再試行してください。</p>
-    </body>
-    </html>
-    ''';
+    return buildDefaultOfflineRecoveryPage(options);
+  }
+
+  /// 代替ページと 504 ページへ埋め込む監視スクリプトの設定を組み立てます。
+  ///
+  /// [pageKind] 埋め込み先のページの種類。
+  ///
+  /// Returns: 現在の設定に基づく監視スクリプトの設定。
+  OfflineRecoveryScriptOptions _buildOfflineRecoveryOptions(
+    OfflineRecoveryPageKind pageKind,
+  ) {
+    final config = _config;
+    return OfflineRecoveryScriptOptions(
+      pageKind: pageKind,
+      statusPath: _statusPath,
+      pollInterval:
+          config?.autoReloadPollInterval ?? _defaultAutoReloadPollInterval,
+      queueWaitTimeout: config?.autoReloadQueueWaitTimeout ??
+          _defaultAutoReloadQueueWaitTimeout,
+      requestTimeout: config?.requestTimeout ?? _defaultRequestTimeout,
+      offlinePageAutoReload: config?.enableOfflinePageAutoReload ?? true,
+      continuation: config?.enableAutoReloadContinuation ?? true,
+      gatewayTimeoutAutoReload: config?.enableGatewayTimeoutAutoReload ?? false,
+    );
   }
 
   /// プロキシイベントを発生させます。

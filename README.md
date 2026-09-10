@@ -15,6 +15,7 @@ It runs on 127.0.0.1, forwards requests to one configured upstream origin while 
 - Serving of static resources bundled under `assets/static/`, so CDN-hosted files can be shipped inside the app
 - Fetching and caching of another origin's resources, such as a CDN, through the proxy (`mirroredOrigins`)
 - Fallback cache limited to offline and unreachable-upstream recovery
+- Offline fallback page that reloads itself once the upstream is reachable again, with a retry button
 - Offline queue for POST, PUT, and DELETE requests
 - AES-256 encrypted cookie persistence with restore support
 - WebView navigation helper APIs for same-origin, external, and new-window flows
@@ -220,6 +221,11 @@ const config = ProxyConfig(
   healthCheckInterval: Duration.zero,
   serverIdleTimeout: Duration(seconds: 120),
   maxRestartAttemptsPerMinute: 5,
+  enableOfflinePageAutoReload: true,
+  enableAutoReloadContinuation: true,
+  enableGatewayTimeoutAutoReload: false,
+  autoReloadPollInterval: Duration(seconds: 3),
+  autoReloadQueueWaitTimeout: Duration(seconds: 10),
 );
 ```
 
@@ -232,11 +238,16 @@ Notes:
 - `startupPaths` is used by `warmupCache()` for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.
   - Warmup sends the cookie jar exactly as the forwarding path does, so calling it after sign-in also warms up the APIs that require authentication.
   - `warmupCache(followReferences: true)` also fetches the resources referenced by the warmed HTML (`<script src>`, `<link href>`, `<img src>`), both same-origin ones and those on an origin listed in `mirroredOrigins`. Only one level is followed, and a URL assembled by JavaScript at runtime is out of reach. A `<link>` counts only when its `rel` names a resource, such as `stylesheet`.
-- `healthCheckPath` is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics. Change it when it collides with a route of your web application.
-- `statusPath` returns the proxy state as JSON. It gets the same treatment as `healthCheckPath` — never forwarded, never counted — and an empty string disables it.
+- `healthCheckPath` is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics, and `GET` and `HEAD` requests to it are omitted from the request log. Change it when it collides with a route of your web application.
+- `statusPath` returns the proxy state as JSON. It gets the same treatment as `healthCheckPath` — never forwarded, never counted, and `GET` requests omitted from the request log. An empty string disables it, which also stops the auto-reload of the fallback and `504` pages.
 - `enableAdminApi` set to `true` exposes listing, resending and discarding of quarantined requests over HTTP. Disabled by default.
 - Setting `healthCheckInterval` above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by `ProxyLifecycleGuard` is the primary path.
 - `offlineFallbackHtml` and `gatewayTimeoutHtml` replace the built-in offline and timeout response bodies with wording supplied by your app.
+  - Both the built-in pages and replacement pages are answered with `Content-Type: text/html; charset=utf-8` and `Cache-Control: no-store`. The built-in pages carry a retry button.
+  - A replacement page receives the auto-reload script only where it contains `ProxyConfig.recoveryScriptPlaceholder` (`<!--offline-web-proxy:recovery-->`). Write it where a `<script>` element may appear, such as inside `body`. When the marker appears more than once, only the first occurrence receives the script and the rest are removed. Add your own retry button as well.
+  - The script is inserted when `statusPath` is not empty and, for the fallback page, `enableOfflinePageAutoReload` is on, or, for the `504` page, any of `enableOfflinePageAutoReload`, `enableAutoReloadContinuation` or `enableGatewayTimeoutAutoReload` is on. Otherwise the marker is replaced with an empty string.
+  - A `Content-Security-Policy` meta element that forbids inline scripts stops the script.
+- `enableOfflinePageAutoReload`, `enableAutoReloadContinuation`, `enableGatewayTimeoutAutoReload`, `autoReloadPollInterval` and `autoReloadQueueWaitTimeout` control the auto-reload of the pages the proxy generates. `autoReloadPollInterval` must be between 100 milliseconds and 24 hours, and `autoReloadQueueWaitTimeout` must not be negative. See [Auto-reload of the offline fallback page](#auto-reload-of-the-offline-fallback-page).
 - `upstreamFailureThreshold` is how many consecutive unreachable attempts stop forwarding. It prevents every request from waiting for the timeout when the link layer is up but the upstream is down. Set it to `0` to disable the behavior.
 - `upstreamProbePath`, `upstreamProbeMethod`, `upstreamProbeTimeout` and `upstreamProbeBackoffSeconds` control the reachability probe used while forwarding is stopped. Any response counts as reachable, regardless of status code.
 - `queuedResponse` and `offlineMissResponse` define the responses the proxy generates itself. Both default to JSON so that `response.json()` succeeds in the web app.
@@ -283,10 +294,34 @@ if (res.headers.get('X-Offline-Queued') === '1') {
 const saved = await res.json();
 ```
 
-An offline read with no cached entry answers with `504` and `{"offline":true}` by default, so `response.ok` is false and normal error handling applies. Only page navigations (`Sec-Fetch-Mode: navigate`) receive the readable HTML fallback page.
+An offline read with no cached entry answers with `504` and `{"offline":true}` by default, so `response.ok` is false and normal error handling applies. Only page navigations (`Sec-Fetch-Mode: navigate`) receive the readable HTML fallback page (`200`).
 
-The same body is returned when the link layer is up but the upstream cannot be reached. That response carries `X-Offline-Source: none`, so it can be told apart from a `504` the upstream itself returned.
+When the link layer is up but the upstream cannot be reached, anything but a page navigation receives the same body. A page navigation receives the HTML `504` page with a retry button (replaceable via `gatewayTimeoutHtml`). Once the circuit breaker opens, requests take the offline path and page navigations receive the fallback page. A `504` the proxy returns because the upstream is unreachable carries `X-Offline-Source: none`, so it can be told apart from a `504` the upstream itself returned.
 - The supported configuration entry point is `ProxyConfig`. The package does not currently load an external YAML file automatically.
+
+### Auto-reload of the offline fallback page
+
+An offline navigation to an uncached screen receives a `200` fallback page. The WebView sees no error, so without help the page would stay on screen after connectivity returns. The built-in fallback page reads `statusPath` on its own origin at a fixed interval and reloads itself once the upstream is reachable again.
+
+- After reading `isUpstreamReachable: true` twice in a row, the page waits until `queueLength` is zero, or at most `autoReloadQueueWaitTimeout`, and reloads. Reloading before the queue is resent can show a screen without the updates made offline, which invites entering them twice.
+- The decision uses `isUpstreamReachable`, not `isOnline`. `isOnline` reflects the link layer only and stays `true` while the device is on Wi-Fi but the upstream is down.
+- "Reachable" is the proxy's own decision, not proof that the upstream answered. A reload right after airplane mode is turned off can still end in a `504` while the network settles.
+- When an automatic reload lands on the `504` page, that page waits ten seconds and reloads again once it reads `isUpstreamReachable: true` (`enableAutoReloadContinuation`, on by default). After three automatic reloads in a row that land on a proxy page, the page stops and leaves the retry button.
+- Reloading the `504` page from the moment it is shown (`enableGatewayTimeoutAutoReload`) is off by default. Even when enabled, it acts only after the proxy detected the upstream as unreachable (the circuit breaker opening or the link layer dropping) and then reachable again.
+- While the status cannot be read (the proxy stopped or moved to another port), the page does not reload; it keeps reading at an interval that grows up to 30 seconds. Recovering the proxy itself is the job of `ProxyLifecycleGuard`.
+- For `requestTimeout` plus 30 seconds after `beforeunload`, the reload is put off so a navigation started from the page is not cancelled. A navigation that never replaces the page (a `204` response, a download, a navigation stopped by the app, an external scheme) delays the reload for that long as well, and a navigation that takes longer can still be cancelled. Whether WKWebView on iOS fires `beforeunload` has not been verified.
+- The script needs JavaScript in the WebView. Inside an iframe, each frame acts on its own.
+- The consecutive count of automatic reloads is kept in the web app origin's `sessionStorage`, under keys starting with `__offline_web_proxy_recovery:`; keys not updated for ten minutes are removed. Without `sessionStorage`, the consecutive-reload limit and the continuation do not work.
+- When an automatic reload passes through a redirect and lands on another URL, continuation does not act for that one reload. A `504` page reached that way keeps only its retry button unless `enableGatewayTimeoutAutoReload` is on.
+- An empty `statusPath` leaves the page with the retry button only.
+- `GET` requests to the status path and `GET` / `HEAD` requests to the health check path are omitted from the request log (`shelf.logRequests`).
+
+When your app shows its own error screen from an HTTP error callback (`NavigationDelegate.onHttpError` in webview_flutter, `onReceivedHttpError` in flutter_inappwebview), every automatic reload that lands on a `504` triggers that callback again, up to three times in a row. A `504` generated by the proxy carries `X-Offline-Source: none`.
+
+- If you use the built-in `504` page, or a replacement page with its own retry button, you can skip the app's error screen for a main-frame `504` carrying `X-Offline-Source: none`, provided JavaScript is enabled in the WebView.
+- Compare the header name case-insensitively.
+- If you still show an error screen, take care with when you dismiss it. Dismissing it when the `504` page itself finishes loading may make it disappear right after it appears. The order of the HTTP error callback and the page-finished callback depends on the WebView implementation, so confirm it on a device before relying on it.
+- If the two conflict, set `enableAutoReloadContinuation: false`.
 
 ### Waiting times for WebView front ends
 
@@ -357,6 +392,8 @@ For upstream `301`, `302`, `303`, `307`, and `308` responses returned to WebView
 ## Connection Recovery APIs
 
 After device suspension or a process resume, the socket can stop responding even though the internal state still reports the server as running. In that state the WebView shows its own native error page (a message about not being able to connect to `127.0.0.1:...`), so the proxy verifies responsiveness and rebinds when the app resumes.
+
+The offline fallback page reloads itself by reading the status endpoint. The `504` page reloads only when it was reached by an automatic reload (`enableAutoReloadContinuation`) or when `enableGatewayTimeoutAutoReload` is on (see [Auto-reload of the offline fallback page](#auto-reload-of-the-offline-fallback-page)). `ProxyLifecycleGuard` covers the other case, where the proxy socket itself stops responding.
 
 ```dart
 // Hook into the app lifecycle
@@ -484,9 +521,9 @@ The response looks like this.
 }
 ```
 
-- `GET` only, never forwarded upstream, and excluded from statistics.
+- `GET` only, never forwarded upstream, excluded from statistics, and omitted from the request log.
 - Only callers on the proxy's own origin are served. A request carrying another `Origin` is answered with `403`, and `Access-Control-Allow-Origin: *` is never attached.
-- Setting `statusPath` to an empty string disables it.
+- Setting `statusPath` to an empty string disables it, which also stops the auto-reload of the fallback and `504` pages.
 
 ### Operating the quarantine store from the page
 
@@ -655,6 +692,30 @@ The hook runs:
 - `dart analyze --fatal-warnings`
 
 If a Dart file is reformatted or auto-fixed, the hook stops the commit so you can review and stage the changes.
+
+### Recovery script regression test
+
+The auto-reload script for the offline fallback page is tested in headless Chrome. You need Node.js and one of Chrome, Chromium, or Microsoft Edge (verified with Node.js 24 and Chrome). CI runs the same steps in the `Recovery Script Test` job.
+
+```bash
+dart run tool/offline_recovery_harness/generate_pages.dart build/offline_recovery_harness
+node tool/offline_recovery_harness/run.mjs build/offline_recovery_harness
+```
+
+- If the `CHROME_PATH` environment variable is set, that executable is used; otherwise the browser is looked up in its standard install locations.
+- Add scenario names after the directory passed to `run.mjs` to run only those scenarios. The names are listed in `buildScenarios` in `run.mjs` (for example, `node tool/offline_recovery_harness/run.mjs build/offline_recovery_harness queue_wait_timeout`).
+- Running all scenarios took about three and a half minutes on Windows.
+
+### Example e2e tests
+
+CI does not run the e2e tests under `example/integration_test/`. Run them on an Android device or emulator by passing a test file (this procedure was verified on an emulator).
+
+```bash
+cd example
+flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.dart -d <device id>
+```
+
+Find the device ID with `flutter devices`.
 
 ## Release Process
 
