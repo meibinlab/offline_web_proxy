@@ -94,6 +94,7 @@ import 'src/models/response_header_snapshot.dart';
 import 'src/models/upstream_circuit_state.dart';
 import 'src/models/warmup_result.dart';
 import 'src/pages/offline_recovery_page.dart';
+import 'src/storage/async_lock.dart';
 
 export 'src/exceptions/exceptions.dart';
 export 'src/lifecycle/proxy_lifecycle_guard.dart';
@@ -509,6 +510,30 @@ class OfflineWebProxy {
   /// 停止後にソケットやバックグラウンドタイマーが残らないようにする。
   final Semaphore _lifecycleLock = Semaphore(1);
 
+  /// 保存領域の初期化（段階 1 と段階 2）を直列化するためのロック。
+  ///
+  /// 鍵（secure storage 上の固定の名前）と Box（Hive への登録）は同じ isolate 内の
+  /// インスタンスで共有されるため、インスタンスをまたいで直列化する。同時に
+  /// 呼ばれても、鍵の生成と Box のオープンが重ならないようにする。static な
+  /// フィールドと Hive への登録は isolate ごとのため、複数の isolate から同時に
+  /// 使う場合は対象外。
+  static final AsyncLock _storageInitializationLock = AsyncLock();
+
+  /// 実行中または完了済みの段階 1（鍵と Cookie Box）の結果。失敗した場合は捨てる。
+  ///
+  /// 別の error zone から待つ呼び出しにも失敗を伝えられるよう、Future 自体は
+  /// 失敗させず、失敗も結果として持つ。
+  Future<_StageOutcome<Box>>? _keyStageFuture;
+
+  /// 段階 1 が完了しているかどうか。
+  bool _keyStageCompleted = false;
+
+  /// 実行中または完了済みの段階 2（キューなどの Box）の結果。失敗した場合は捨てる。
+  Future<_StageOutcome<void>>? _dataStageFuture;
+
+  /// 段階 2 が完了しているかどうか。
+  bool _dataStageCompleted = false;
+
   /// プロキシサーバを起動します。
   ///
   /// [config] 設定オブジェクト。省略時はデフォルト設定を使用します。
@@ -658,6 +683,11 @@ class OfflineWebProxy {
       _handler = null;
       // 障害解析のため診断値は残し、実行制御状態のみ初期化する
       _resetRecoveryControlState();
+      // 閉じた Box を共有しないよう、次の起動や Cookie API で初期化し直す
+      _keyStageFuture = null;
+      _keyStageCompleted = false;
+      _dataStageFuture = null;
+      _dataStageCompleted = false;
       _lifecycleLock.release();
     }
 
@@ -2905,18 +2935,122 @@ class OfflineWebProxy {
 
   /// Hiveデータベースの初期化を行います。
   ///
-  /// キャッシュ、キュー、Cookie、べき等性キー用の
-  /// ボックスをそれぞれ開きます。
+  /// 段階 1（鍵と Cookie Box）と段階 2（キャッシュ、キュー、べき等性キー
+  /// などの Box）を順に完了させます。
   Future<void> _initializeStorage() async {
-    _cacheBox = await Hive.openBox('proxy_cache');
-    _queueBox = await Hive.openBox('proxy_queue');
-    _portPreferenceBox = await Hive.openBox(_portPreferenceBoxName);
-    _webStorageBox = await Hive.openBox(_webStorageBoxName);
-    await _ensureCookieStorageInitialized();
-    _idempotencyBox = await Hive.openBox('proxy_idempotency');
-    _droppedRequestBox = await Hive.openBox(_droppedRequestBoxName);
-    _quarantinedRequestBox = await Hive.openBox(_quarantinedRequestBoxName);
-    _unacknowledgedDroppedCount = null;
+    await _ensureDataStage();
+  }
+
+  /// 保存領域の初期化の段階 2 を実行します。
+  ///
+  /// `start()` だけが呼び出します。段階 1 の完了を待ってから、段階 1 と
+  /// 同じ直列化の中で実行します。実行中または完了済みの段階 2 があれば
+  /// その結果を共有します。失敗した場合は段階 2 の結果だけを捨て、段階 1 の
+  /// 結果（Cookie Box）はそのまま使えるようにします。
+  Future<void> _ensureDataStage() async {
+    await _ensureKeyStage();
+
+    final current = _dataStageFuture;
+    final isStale = _dataStageCompleted &&
+        _dataStageBoxes.any((box) => box == null || !box.isOpen);
+    if (current != null && !isStale) {
+      (await current).unwrap();
+      return;
+    }
+
+    late final Future<_StageOutcome<void>> stage;
+    stage = _storageInitializationLock.synchronized(() async {
+      try {
+        await _runDataStage();
+        if (identical(_dataStageFuture, stage)) {
+          _dataStageCompleted = true;
+        }
+        return const _StageOutcome<void>.success(null);
+      } catch (error, stackTrace) {
+        if (identical(_dataStageFuture, stage)) {
+          _dataStageFuture = null;
+        }
+        return _StageOutcome<void>.failure(error, stackTrace);
+      }
+    });
+    _dataStageFuture = stage;
+    _dataStageCompleted = false;
+    (await stage).unwrap();
+  }
+
+  /// 段階 2 で開く Box の一覧を返します。
+  ///
+  /// 段階 2 の結果を共有してよいか（どれも閉じられていないか）の判定に使います。
+  List<Box?> get _dataStageBoxes => [
+        _cacheBox,
+        _queueBox,
+        _portPreferenceBox,
+        _webStorageBox,
+        _idempotencyBox,
+        _droppedRequestBox,
+        _quarantinedRequestBox,
+      ];
+
+  /// 段階 2 の本体です。キャッシュ、キュー、ポート設定、WebStorage、
+  /// べき等性キー、ドロップ履歴、隔離の Box を開きます。
+  ///
+  /// 失敗した場合は、この呼び出しで開いた Box を閉じ、フィールドを `null` に
+  /// 戻してから例外を送出します。
+  ///
+  /// 初期化のロックを保持したまま実行されます。ロックは再入できないため、
+  /// ここから `_ensure` で始まる関数や Cookie を保存する関数を呼んではいけません。
+  Future<void> _runDataStage() async {
+    final openedBoxes = <Box>[];
+
+    // 失敗時に閉じるのは、この呼び出しで新たに開いた Box だけにする。
+    // 他の処理やインスタンスが開いている Box を閉じないため。
+    Future<Box> openTracked(String name) async {
+      final wasOpen = Hive.isBoxOpen(name);
+      final box = await Hive.openBox(name);
+      if (!wasOpen) {
+        openedBoxes.add(box);
+      }
+      return box;
+    }
+
+    try {
+      _cacheBox = await openTracked('proxy_cache');
+      _queueBox = await openTracked('proxy_queue');
+      _portPreferenceBox = await openTracked(_portPreferenceBoxName);
+      _webStorageBox = await openTracked(_webStorageBoxName);
+      _idempotencyBox = await openTracked('proxy_idempotency');
+      _droppedRequestBox = await openTracked(_droppedRequestBoxName);
+      _quarantinedRequestBox = await openTracked(_quarantinedRequestBoxName);
+      _unacknowledgedDroppedCount = null;
+    } catch (_) {
+      await _closeBoxesQuietly(openedBoxes);
+      _cacheBox = null;
+      _queueBox = null;
+      _portPreferenceBox = null;
+      _webStorageBox = null;
+      _idempotencyBox = null;
+      _droppedRequestBox = null;
+      _quarantinedRequestBox = null;
+      rethrow;
+    }
+  }
+
+  /// 失敗時の後始末として Box を閉じます。
+  ///
+  /// 元の失敗を呼び出し側へ伝えるため、閉じる処理の失敗は送出しません。
+  ///
+  /// [boxes] 閉じる Box の一覧。
+  Future<void> _closeBoxesQuietly(Iterable<Box> boxes) async {
+    for (final box in boxes) {
+      if (!box.isOpen) {
+        continue;
+      }
+      try {
+        await box.close();
+      } catch (_) {
+        // 元の失敗を優先して送出するため、閉じる処理の失敗は無視する
+      }
+    }
   }
 
   /// サーバ起動時に使用するポートを解決します。
@@ -3017,28 +3151,97 @@ class OfflineWebProxy {
 
   /// Cookie 用ストレージを必要時に初期化します。
   ///
-  /// 戻り値は利用可能な Cookie Box です。
+  /// 保存領域の初期化の段階 1 を待ちます。Cookie を読み書きする処理（Cookie API、
+  /// 上流への転送・キュー再送・ウォームアップ）から呼ばれます。`start()` も
+  /// 段階 2 の前に同じ段階 1 を待つため、同時に呼ばれても鍵の生成と Box の
+  /// オープンが重ならないようにします。失敗した場合は、次の呼び出しで再試行します。
+  ///
+  /// Returns: 利用可能な Cookie Box。
   Future<Box> _ensureCookieStorageInitialized() async {
+    final cookieBox = _cookieBox;
+    if (_keyStageCompleted && cookieBox != null && cookieBox.isOpen) {
+      return cookieBox;
+    }
+
+    return _ensureKeyStage();
+  }
+
+  /// 保存領域の初期化の段階 1（鍵と Cookie Box）を実行します。
+  ///
+  /// 実行中または完了済みの段階 1 があればその結果を共有します。完了後に
+  /// Cookie Box が閉じられていた場合は、改めて実行します。失敗した場合は
+  /// 共有する結果を捨て、次の呼び出しで再試行できるようにします。失敗は
+  /// 待っている呼び出しそれぞれの zone で投げ直します。
+  ///
+  /// Returns: 段階 1 で開いた Cookie Box。
+  Future<Box> _ensureKeyStage() async {
+    final current = _keyStageFuture;
+    final cookieBox = _cookieBox;
+    final isStale =
+        _keyStageCompleted && (cookieBox == null || !cookieBox.isOpen);
+    if (current != null && !isStale) {
+      return (await current).unwrap();
+    }
+
+    late final Future<_StageOutcome<Box>> stage;
+    stage = _storageInitializationLock.synchronized(() async {
+      try {
+        final box = await _runKeyStage();
+        if (identical(_keyStageFuture, stage)) {
+          _keyStageCompleted = true;
+        }
+        return _StageOutcome<Box>.success(box);
+      } catch (error, stackTrace) {
+        if (identical(_keyStageFuture, stage)) {
+          _keyStageFuture = null;
+        }
+        return _StageOutcome<Box>.failure(error, stackTrace);
+      }
+    });
+    _keyStageFuture = stage;
+    _keyStageCompleted = false;
+    return (await stage).unwrap();
+  }
+
+  /// 段階 1 の本体です。鍵を取得または生成し、Cookie Box を開いて、
+  /// 旧平文 Cookie Box を移行します。
+  ///
+  /// 失敗した場合は、この呼び出しで開いた Cookie Box を閉じ、フィールドを
+  /// `null` に戻してから例外を送出します。
+  ///
+  /// 初期化のロックを保持したまま実行されます。ロックは再入できないため、
+  /// ここから `_ensure` で始まる関数や Cookie を保存する関数を呼んではいけません。
+  ///
+  /// Returns: 開いた Cookie Box。
+  Future<Box> _runKeyStage() async {
     if (!Hive.isAdapterRegistered(0)) {
       await Hive.initFlutter();
     }
 
-    if (_cookieBox != null && _cookieBox!.isOpen) {
-      return _cookieBox!;
-    }
-
     if (Hive.isBoxOpen(_encryptedCookieBoxName)) {
-      _cookieBox = Hive.box(_encryptedCookieBoxName);
-      return _cookieBox!;
+      final openedBox = Hive.box(_encryptedCookieBoxName);
+      _cookieBox = openedBox;
+      return openedBox;
     }
 
     final encryptionKey = await _getOrCreateCookieEncryptionKey();
-    _cookieBox = await Hive.openBox(
-      _encryptedCookieBoxName,
-      encryptionCipher: HiveAesCipher(encryptionKey),
-    );
-    await _migrateLegacyCookieBoxIfNeeded(_cookieBox!);
-    return _cookieBox!;
+    Box? openedBox;
+    try {
+      openedBox = await Hive.openBox(
+        _encryptedCookieBoxName,
+        encryptionCipher: HiveAesCipher(encryptionKey),
+      );
+      await _migrateLegacyCookieBoxIfNeeded(openedBox);
+    } catch (_) {
+      if (openedBox != null) {
+        await _closeBoxesQuietly([openedBox]);
+      }
+      _cookieBox = null;
+      rethrow;
+    }
+
+    _cookieBox = openedBox;
+    return openedBox;
   }
 
   /// Cookie Box 用の暗号化鍵を取得または生成します。
@@ -7518,5 +7721,46 @@ class Semaphore {
     } else {
       _currentCount++;
     }
+  }
+}
+
+/// 保存領域の初期化の段階の結果です。
+///
+/// 共有する Future を失敗させると、別の error zone から待つ呼び出しに失敗が
+/// 伝わらず、待ったまま完了しません。そこで失敗も値として持ち、待つ側の zone で
+/// 投げ直します。
+class _StageOutcome<T> {
+  /// 成功した結果を生成します。
+  ///
+  /// [value] 段階の戻り値。
+  const _StageOutcome.success(this.value)
+      : error = null,
+        stackTrace = null;
+
+  /// 失敗した結果を生成します。
+  ///
+  /// [error] 段階で起きたエラー。
+  /// [stackTrace] エラーのスタックトレース。
+  const _StageOutcome.failure(Object this.error, StackTrace this.stackTrace)
+      : value = null;
+
+  /// 成功した場合の戻り値。
+  final T? value;
+
+  /// 失敗した場合のエラー。
+  final Object? error;
+
+  /// 失敗した場合のスタックトレース。
+  final StackTrace? stackTrace;
+
+  /// 成功した場合は戻り値を返し、失敗した場合はエラーを投げ直します。
+  ///
+  /// Returns: 段階の戻り値。
+  T unwrap() {
+    final failure = error;
+    if (failure != null) {
+      Error.throwWithStackTrace(failure, stackTrace!);
+    }
+    return value as T;
   }
 }
