@@ -473,6 +473,63 @@ class ProxyConfig {
   /// **Default**: [DropPolicy.quarantine]
   final DropPolicy dropPolicy;
 
+  /// Maximum number of requests kept in the quarantine store.
+  ///
+  /// When more requests are quarantined, the oldest ones are first recorded in
+  /// the dropped-request history with `dropReason` `quarantine_limit`, then
+  /// removed. Order follows `quarantinedAt`. `0` disables the limit; negative
+  /// values are rejected by `start()` with a `ProxyStartException`.
+  ///
+  /// **Default**: `1000`
+  final int quarantineMaxCount;
+
+  /// How long a request stays in the quarantine store.
+  ///
+  /// Counted from `quarantinedAt`. An expired request is first recorded in the
+  /// dropped-request history with `dropReason` `quarantine_expired`, then
+  /// removed. The limits are checked at startup, whenever a request is
+  /// quarantined, and every hour. [Duration.zero] disables the limit; negative
+  /// values are rejected by `start()` with a `ProxyStartException`.
+  ///
+  /// **Default**: `Duration(days: 30)`
+  final Duration quarantineRetention;
+
+  /// Upper bound of the total size of quarantined requests, in bytes.
+  ///
+  /// The size is estimated from the body plus the header names and values.
+  /// Hive keeps every value of an open box in memory, so the count limit alone
+  /// cannot bound memory when bodies vary in size; opening the box may briefly
+  /// use about twice this size. Beyond the bound, the oldest requests are moved
+  /// out as with [quarantineMaxCount].
+  ///
+  /// A single request larger than the bound is not quarantined and does not
+  /// push others out: it is recorded in the dropped-request history with
+  /// `dropReason` `quarantine_too_large`, without its body, and removed from
+  /// the queue. `0` disables the limit; negative values are rejected by
+  /// `start()` with a `ProxyStartException`.
+  ///
+  /// **Default**: `20 * 1024 * 1024` (20 MB)
+  final int quarantineMaxBytes;
+
+  /// Maximum number of entries kept in the dropped-request history.
+  ///
+  /// Beyond this number, the oldest acknowledged entries are removed, in
+  /// `droppedAt` order. Unacknowledged entries are never removed by this
+  /// limit, only by [droppedRequestRetention]. `0` disables the limit;
+  /// negative values are rejected by `start()` with a `ProxyStartException`.
+  ///
+  /// **Default**: `1000`
+  final int droppedRequestMaxCount;
+
+  /// How long an entry stays in the dropped-request history.
+  ///
+  /// Counted from `droppedAt`, for acknowledged and unacknowledged entries
+  /// alike. [Duration.zero] disables the limit; negative values are rejected
+  /// by `start()` with a `ProxyStartException`.
+  ///
+  /// **Default**: `Duration(days: 30)`
+  final Duration droppedRequestRetention;
+
   /// Response returned when an update request is stored in the offline queue.
   ///
   /// A queued request has not reached the upstream yet, so the front end must
@@ -673,6 +730,11 @@ class ProxyConfig {
     this.enableAcceptedAtHeader = true,
     this.acceptedAtHeaderName = 'X-Offline-Accepted-At',
     this.dropPolicy = DropPolicy.quarantine,
+    this.quarantineMaxCount = 1000,
+    this.quarantineRetention = const Duration(days: 30),
+    this.quarantineMaxBytes = 20 * 1024 * 1024,
+    this.droppedRequestMaxCount = 1000,
+    this.droppedRequestRetention = const Duration(days: 30),
     this.queuedResponse = const ProxyResponseConfig(
       statusCode: 202,
       contentType: 'application/json; charset=utf-8',

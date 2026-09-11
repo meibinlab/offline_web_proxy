@@ -111,12 +111,13 @@ void main() {
         expect(bin2.statusCode, 200);
         expect(bin2.bodyBytes, bin1.bodyBytes);
 
-        // 非 GET の再送経路でもハングやクラッシュが起きないこと
+        // 非 GET の再送経路でもハングやクラッシュが起きないこと。上流へ
+        // 到達できない場合は、キューに入れて 202 を返す（0.10.0 から）
         final post = await http.post(
           Uri.parse('$proxyBase/echo'),
           body: Uint8List.fromList(List<int>.filled(1024, 7)),
         );
-        expect(post.statusCode, anyOf(200, 500, 502, 503, 504));
+        expect(post.statusCode, anyOf(200, 202, 500, 502, 503, 504));
 
         await proxy.stop();
 

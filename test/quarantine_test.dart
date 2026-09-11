@@ -21,8 +21,8 @@ class _RealHttpOverrides extends HttpOverrides {
   }
 }
 
-/// 隔離領域の保存名。退避に失敗する状況を作るために使用する。
-const String _quarantinedRequestBoxName = 'proxy_quarantined_requests';
+/// 隔離領域の暗号化 Box の保存名。退避に失敗する状況を作るために使用する。
+const String _quarantinedRequestBoxName = 'proxy_quarantined_requests_secure';
 
 /// 再送を先送りしたと判断する最小の間隔。
 ///
@@ -329,6 +329,64 @@ void main() {
         );
         // 破棄したことにもしないこと
         expect(await proxy.getDroppedRequests(), isEmpty);
+      });
+    });
+
+    /// 破棄方針が drop で履歴へ記録できない場合は、キューから取り除かずバックオフを適用し、
+    /// 破棄したことにもしないこと
+    test(
+        'keeps the request queued with backoff when the history is unavailable',
+        () async {
+      await withRealHttpClient(() async {
+        // ドロップ履歴の暗号化 Box の保存名。記録に失敗する状況を作るために使う
+        const droppedRequestBoxName = 'proxy_dropped_requests_secure';
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            dropPolicy: DropPolicy.drop,
+          ),
+        );
+        final droppedEvents = <ProxyEvent>[];
+        final subscription = proxy.events
+            .where((event) => event.type == ProxyEventType.requestDropped)
+            .listen(droppedEvents.add);
+        addTearDown(subscription.cancel);
+
+        // 5xx で再送用にキューへ保存させる
+        upstream!.statusCode = HttpStatus.internalServerError;
+        await _performPost(
+          Uri.parse('http://127.0.0.1:$port/api/sales'),
+          '{"total":1000}',
+        );
+        expect(await proxy.getQueuedRequests(), hasLength(1));
+
+        // ドロップ履歴の保存領域を閉じ、履歴へ記録できない状況を作る
+        await Hive.box(droppedRequestBoxName).close();
+        final retryCountBefore =
+            (await proxy.getQueuedRequests()).single.retryCount;
+
+        // 4xx を返して再送を打ち切らせる
+        upstream!.statusCode = HttpStatus.badRequest;
+        await _waitUntil(() async {
+          final queued = await proxy.getQueuedRequests();
+          return queued.isNotEmpty &&
+              queued.single.retryCount > retryCountBefore;
+        });
+
+        final queued = await proxy.getQueuedRequests();
+        // 記録できない状態で消してしまわないこと
+        expect(queued, hasLength(1));
+        // 消化間隔ごとに同じ 4xx を叩き続けないよう、再送を先送りすること
+        expect(queued.single.retryCount, greaterThan(retryCountBefore));
+        expect(
+          queued.single.nextRetryAt.difference(queued.single.queuedAt),
+          greaterThanOrEqualTo(_minimumBackoff),
+        );
+        // 履歴に記録せず、破棄したことも知らせないこと
+        expect(await proxy.getDroppedRequests(), isEmpty);
+        expect((await proxy.getStats()).droppedRequestsCount, 0);
+        expect(droppedEvents, isEmpty);
       });
     });
 

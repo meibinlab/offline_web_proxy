@@ -27,6 +27,13 @@ class QueuedRequest {
   /// 次回再試行予定日時
   final DateTime nextRetryAt;
 
+  /// 暗号化する前の保存領域に残り、移行を待っているかどうか
+  ///
+  /// この proxy インスタンスで暗号化鍵を生成した場合、旧版の保存領域からの
+  /// 移行を一定時間遅らせます。その間、旧版の保存領域にある項目は `true` に
+  /// なり、暗号化した保存領域の項目より後に再送されます。
+  final bool pendingMigration;
+
   const QueuedRequest({
     required this.url,
     required this.method,
@@ -35,6 +42,7 @@ class QueuedRequest {
     required this.acceptedAt,
     required this.retryCount,
     required this.nextRetryAt,
+    this.pendingMigration = false,
   });
 
   @override

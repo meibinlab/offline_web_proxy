@@ -13,7 +13,7 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 - **ベース技術**: shelf（Dart の軽量 HTTP サーバフレームワーク）, shelf_router（ルーティング）, shelf_proxy（プロキシ機能）
 - **通信経路**: WebView → http://127.0.0.1:<port> → (proxy) → 上流サーバ
-- **データ永続化**: Hive を使用したローカルストレージ
+- **データ永続化**: Hive を使用したローカルストレージ。Cookie、キュー、隔離、ドロップ履歴は AES-256 で暗号化して保存（【4】【5】）
 - **Cache-Control 対応**: レスポンスヘッダを保存可否とフォールバック可否の判定に利用
 
 ### データ処理戦略
@@ -22,6 +22,23 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 - **キュー**: POST/PUT/DELETE リクエストを FIFO（先入先出）で管理。ネットワーク復旧時に順次送信
 - **オフライン応答**: キャッシュヒット時はキャッシュを返却、未キャッシュ時はフォールバックページを表示（上流へ到達できる状態に戻るとページ自身が再読込）
 - **静的リソース**: `pubspec.yaml` で宣言され `AssetManifest.json` に掲載された `assets/static/` 配下ファイルを一覧化し、同梱アセットとして配信
+
+### 端末に保存するデータ
+
+proxy は Hive の Box と secure storage にデータを保存します。暗号化 Box で暗号化されるのは値だけで、Box のキーは平文のまま保存されます（キュー・隔離・ドロップ履歴は保存した時刻から採番した ID、Cookie はドメイン・パス・名前など）。**キューと隔離は、要求のヘッダと本文をそのまま保持します。** 保存先ごとの内容、暗号化の有無、保持期間は次のとおりです。
+
+| 保存先 | 内容 | 暗号化 | 保持期間 |
+| --- | --- | --- | --- |
+| `proxy_cookies_secure` | Cookie（名前、値、ドメイン、パス、有効期限、属性）。キーはドメイン、パス、名前など | 値のみ（AES-256） | 有効期限を過ぎたものは、送信する Cookie を探すときに削除。`clearCookies()` で削除 |
+| `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
+| `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限（【5】の「保持上限」） |
+| `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
+| `proxy_cache` | 応答キャッシュ（ステータスコード、ヘッダ、本文、有効期限）。キーは正規化した URL の SHA-256 | なし | stale 期間を過ぎたものを 1 時間ごとに削除 |
+| `proxy_web_storage` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット | なし | 次のスナップショットで上書きされるまで |
+| `proxy_idempotency` | 上流へ届いたべき等性キーと、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
+| `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号 | なし | 次のバインドで上書きされるまで |
+| secure storage の `offline_web_proxy.cookie_box_encryption_key` | 暗号化 Box の鍵。Cookie、キュー、隔離、ドロップ履歴で共有 | secure storage に保存 | `recoverEncryptedStorage()` が削除するか、判定表に従って作り直すまで（【4】の「判定表」） |
+| `proxy_queue`、`proxy_quarantined_requests`、`proxy_dropped_requests`、`proxy_cookies` | 0.14.0 以前（Cookie は 0.4.0 より前）が平文で保存した内容 | なし | 暗号化 Box へ移行した後に削除。キュー・隔離・ドロップ履歴の旧 Box は、削除の前に空にする |
 
 ### プロキシ対象
 
@@ -293,10 +310,158 @@ flowchart TD
 ### ストレージ戦略
 
 - **永続化必須**: 全ての Cookie をファイルベースで永続化。アプリ再起動後も保持
-- **暗号化**: AES-256 を使用して Cookie データを暗号化してから保存
-- **鍵管理**: 暗号化鍵は secure storage に保存し、既存の平文 `proxy_cookies` は可能な場合に 1 回だけ移行
-- **鍵喪失時**: secure storage 上の鍵が失われた場合、既存の暗号化 Cookie は復号できず再ログインが必要
+- **暗号化**: AES-256 を使用して Cookie データを暗号化してから保存（Box 名 `proxy_cookies_secure`）。暗号化されるのは値だけで、キー（ドメイン・パス・名前など）は平文
+- **鍵管理**: 暗号化鍵は secure storage（`offline_web_proxy.cookie_box_encryption_key`）に保存し、キュー・隔離・ドロップ履歴の暗号化 Box（【5】）と共有する
+- **旧平文 Box の移行**: 既存の平文 `proxy_cookies` は、保存領域の初期化の段階 1 で 1 回だけ移行する。暗号化 Box に同じキーの Cookie が既にあれば書き写さない（新しいセッションを古い値で上書きしないため）。旧 Box を読めない、書き写せない、または削除できない場合は `CookieOperationException`（`operation: migrateLegacy`）とし、`start()` は `ProxyStartException` の `cause`、Cookie API は `CookieOperationException` の `cause` に持つ
+- **鍵喪失時**: 暗号化 Box を開く前に鍵と照合する。Cookie Box だけに問題がある場合は Cookie Box を破棄して続け、再ログインが必要になる。キュー・隔離・ドロップ履歴の Box に問題がある場合は、何も消さずに起動失敗とする（「暗号化鍵の管理と照合」）
 - **メモリキャッシュ**: ファイルから読み込んだ Cookie を高速アクセスのためメモリ上にキャッシュ
+
+### 暗号化鍵の管理と照合
+
+Hive は鍵が合わない暗号化 Box を開くと、先頭フレームの CRC 不一致を破損とみなしてファイルを切り詰めます。そのため proxy は、暗号化 Box（Cookie・キュー・隔離・ドロップ履歴）を開かずにファイルを読んで鍵と照合し、判定表に従って、そのまま開く・Cookie Box を破棄する・起動を失敗させる、のいずれかを選びます。
+
+#### 初期化の直列化
+
+保存領域の初期化は 2 段に分け、同じ isolate にある proxy のインスタンスすべてで 1 つの直列化の中で行います。新規インストール直後に Cookie API を同時に呼んでも、鍵が 2 つ生成されたり Box が重ねて開かれたりしないようにするためです。各段階の処理と、実行する API は次のとおりです。
+
+| 段階 | 処理 | 実行する API |
+| --- | --- | --- |
+| 段階 1（鍵） | 保存先の特定、鍵の読み取りと照合、判定表に従う鍵の生成と Cookie Box の破棄、Cookie Box のオープン、旧平文 Cookie Box の移行 | `start()` と Cookie API（起動前・停止後にも呼べる） |
+| 段階 2（業務データ） | キャッシュ・Web ストレージ・べき等性キーの Box と、キュー・隔離・ドロップ履歴の暗号化 Box のオープン、旧平文 Box の移行（【5】） | `start()` だけ |
+
+- 失敗した段階は、その段階で開いた Box を閉じ、結果を共有せずに次の呼び出しで再試行する。段階 2 の失敗後も、段階 1 の結果（Cookie Box）は使える
+- `stop()` は段階 1・段階 2 の結果を捨てる。停止後に呼んだ Cookie API と次の `start()` は、段階 1 から照合し直す
+- Cookie API は初期化の失敗を、`CookieOperationException`（`cause` に元の例外）として返す
+- 直列化するのは同じ isolate の中だけで、複数のインスタンスを同時に使う構成は想定しない（【17】の「インスタンスと isolate」）
+
+#### 保存先と中身の判定
+
+- **保存先**: ポート設定の平文 Box（`proxy_port_preferences`）を開き、そのファイルの親ディレクトリを Hive の保存先とする。Hive の保存先は公開されておらず、アダプタ 0 が登録済みの場合は proxy が `Hive.initFlutter()` を呼ばないため、path_provider で求めた場所とずれ得る
+- **中身のある Box**: 保存先の `<Box 名>.hive`（無ければ `<Box 名>.hivec`）が 0 バイトより大きいもの。`.lock` だけのものと 0 バイトのものは、中身なしとみなす
+
+#### 鍵の状態の区分
+
+secure storage から鍵を読んだ結果は、次のように区分します。
+
+| 区分 | 条件 | `StorageIntegrityFailure` |
+| --- | --- | --- |
+| 一時的に読めない | iOS / macOS で `isCupertinoProtectedDataAvailable()` が `false`（端末のロック中など）。このときは読み取りの `null` も例外も判定に使わない。戻り値が `null`（iOS / macOS 以外）の場合と、値を取得できなかった場合は利用可能とみなす | `temporarilyUnavailable` |
+| 読み取り不能 | 読み取りが例外で失敗した | `keyUnreadable` |
+| なし | 読み取りの結果が `null` | `keyMissing` |
+| 形式不正 | 空文字、Base64 として読めない、または 32 バイトでない。値そのものの問題のため読み直さない | `keyInvalid` |
+| あり | 上記以外 | — |
+
+#### 読み直し
+
+中身のある暗号化 Box があり、最初の読み取りが「なし」か「読み取り不能」の場合だけ、500 ミリ秒間隔で 3 回まで読み直します。中身のある暗号化 Box が無い場合は、失うものが無いため読み直しません。
+
+- 1 回でも値を読めた場合（形式不正を含む）は、その値で判定を続ける
+- すべて同じ結果（すべて `null`、またはすべて例外）の場合だけ、その状態が続いているとみなす
+- 結果が `null` と例外で入り混じる場合、または読み直しの途中で一時的に読めない状態に変わった場合は、一時的に読めないものとして扱う
+
+#### 暗号化 Box の照合
+
+鍵が「あり」の場合、中身のある暗号化 Box ごとに次の手順で照合します。
+
+1. **先頭フレームの照合**: 先頭フレームの CRC32 を、鍵から求めた値（Hive の `HiveAesCipher.calculateKeyCrc()` と同じ値）を初期値として計算し、フレームに記録された値と比べる。一致すれば、後ろは走査しない（先頭フレームが 1 MiB を超える場合は、別の isolate でファイル全体を読んでから照合する）
+2. **走査**: 先頭フレームが一致しない、または完結していない（フレーム長の欄がファイルの残りを超える）場合は、ファイル全体から鍵と一致するフレームを探す
+   - CRC を計算する位置は、Hive のフレーム構造に合う位置に絞る。キーの型が文字列でキー長が 1〜255 の位置のうち、キュー・隔離・ドロップ履歴はキーが数字と `-` だけのもの、Cookie はキーが ASCII だけのものを候補にする。移行はキーを保つため、v0.11.0 より前の 13 桁・16 桁のキーも候補に含まれる
+   - UI の isolate を止めないよう、別の isolate で走査する
+   - 判定が端末の速さで変わらないよう、バイト数では打ち切らない。異常な場合の安全装置として、時間の上限（Box ごとに 10 秒。ファイルの読み込みと isolate の起動にかかる時間は含まない）だけを設ける。4 つの Box は順に照合する
+3. **結果**: 次の表のいずれかになる
+
+| 結果 | 条件 | `StorageBoxCheckResult` |
+| --- | --- | --- |
+| 中身なし | ファイルが無いか 0 バイト | `empty` |
+| 一致 | 先頭フレームが鍵と一致した | `match` |
+| 不一致なし | 先頭フレームが完結しておらず、鍵と一致するフレームも無い。最初の書き込みの途中で止まった Box とみなす（開くと Hive が切り詰める） | `noMismatch` |
+| 不一致 | 先頭フレームが鍵と一致せず、鍵と一致するフレームも無い | `mismatch` |
+| 破損 | 先頭フレームは一致しないが、後ろに鍵と一致するフレームがある。鍵は正しく、先頭側が壊れている | `corrupted` |
+| 照合打ち切り | 走査が時間の上限を超えた | `aborted` |
+| 未照合 | 使える鍵が無いため照合していない（中身はある） | `notVerified` |
+
+以降の「問題なし」は、中身なし・一致・不一致なしのいずれかを指します。
+
+#### 判定表
+
+中身のある暗号化 Box が無い場合は、次のとおりです。
+
+| 鍵 | 動作 |
+| --- | --- |
+| 一時的に読めない | 起動失敗（`temporarilyUnavailable`） |
+| あり | そのまま開く |
+| なし・形式不正・読み取り不能 | 鍵を作り直して書き込む（暗号化データが無いため失うものは無い）。書き込みに失敗した場合は、Box を作らずに起動失敗（`keyWriteFailed`） |
+
+中身のある暗号化 Box がある場合は、次のとおりです。
+
+| 鍵 | キュー・隔離・ドロップ履歴の Box | Cookie Box | 動作 |
+| --- | --- | --- | --- |
+| 一時的に読めない（読み直しの規則による場合を含む） | 問わない | 問わない | 起動失敗（`temporarilyUnavailable`）。何も消さない |
+| あり | すべて問題なし | 問題なし | そのまま開く（0.14.0 からの通常の更新はこの行か、上の表の「あり」の行） |
+| あり | すべて問題なし | 不一致・破損・照合打ち切り | Cookie Box を破棄して続ける。通知する |
+| あり | 1 つ以上が不一致・破損・照合打ち切り | 問わない | 起動失敗（`keyMismatch`・`corrupted`・`verificationAborted`。複数ある場合はこの順に優先）。何も消さない |
+| 形式不正、または なし・読み取り不能（読み直しても続く） | すべて中身なし | 中身あり | 鍵を作り直して書き込んでから、Cookie Box を破棄して続ける。通知する。書き込みに失敗した場合は、何も消さずに起動失敗（`keyWriteFailed`） |
+| 形式不正、または なし・読み取り不能（読み直しても続く） | 1 つ以上が中身あり | 問わない | 起動失敗（`keyInvalid`・`keyMissing`・`keyUnreadable`）。何も消さない |
+
+- 破損したキュー・隔離・ドロップ履歴の Box を起動時に自動で直さないのは、先頭側の記録が失われるため。利用者の確認を経て、復旧 API で作り直す
+- Cookie Box だけを失う場合に破棄して続けるのは、Cookie の喪失は再ログインで済み、版を上げただけでアプリが起動しなくなる事態を避けるため。0.14.0 までは、鍵が無く Cookie Box が残っている場合に起動失敗としていた
+
+#### Cookie Box の破棄と通知
+
+- Cookie Box を破棄したときは、`ProxyEventType.cookieStorageDiscarded` を発行する。`data['reason']` に `StorageIntegrityFailure` の名前が入る
+- 破棄は `start()` や、起動前・停止後に呼んだ Cookie API の中で起きる。イベントはブロードキャストのため、後から購読したアプリには届かない
+- 起動後は `ProxyDiagnostics.lastCookieStorageDiscardedAt` と `lastCookieStorageDiscardReason` で照会できる（インスタンスごとの値）
+- 復旧 API による削除では `cookieStorageDiscarded` を発行せず、診断情報も変えない
+- 起動前の `restoreCookies()` の中で古い Box を破棄した場合も、復元した Cookie は新しい Box に残る
+
+#### 起動失敗
+
+- `start()` は `StorageIntegrityException`（`ProxyStartException` のサブクラス）を包まずに送出する。Cookie API は `CookieOperationException` の `cause` に持つ
+- `failure` に種別、`boxResults` に Box ごとの照合結果（Cookie Box を含む）、`error` に元のエラー（鍵の読み取りで起きた例外など。`Exception` でないものを含む）を持つ
+- 何も消していない。`temporarilyUnavailable` と `keyWriteFailed` は、時間をおいて `start()` を再試行する。それ以外の種別で再試行しても続く場合は、利用者の確認を経て復旧 API を呼ぶ
+- この例外は保存領域を開く前に送出するため、起動に失敗した後の `getStats()` は、キュー・隔離・ドロップ履歴の件数に 0 を返す
+
+#### 復旧 API
+
+`recoverEncryptedStorage()` は、利用者の確認を経てアプリが呼び出します。
+
+- **前提**: この isolate の proxy のいずれかが稼働中または起動処理中の場合は、何もせずに `proxyActive` を返す。初期化と同じ直列化の中で実行するため、Cookie API がきっかけの初期化とも重ならない
+- **起動との重なり**: 復旧 API が照合を始めた後に呼ばれた `start()` は、復旧が終わるのを待ってから、保存領域の初期化を段階 1 からやり直す
+- **判定**: 削除の直前に、`start()` と同じく鍵を読み直し、同じ時間の上限で照合する
+
+復旧 API の動作は次のとおりです。
+
+| 状況 | 動作 | 戻り値 |
+| --- | --- | --- |
+| 鍵を一時的に読めない（読み直しの規則による場合を含む） | 何もしない | `rejection: temporarilyUnavailable` |
+| 鍵があり、キュー・隔離・ドロップ履歴の Box に不一致・破損・照合打ち切りが無い | 何もしない（Cookie Box だけの問題は `start()` が破棄して続けるため） | `rejection: startWillSucceed` |
+| 鍵があり、キュー・隔離・ドロップ履歴の Box に不一致・破損・照合打ち切りがある（Cookie Box も同じ規則で扱う） | 鍵を残し、Box ごとに扱う（下の表） | `performed: true` |
+| 形式不正、または なし・読み取り不能（読み直しても続く）で、キュー・隔離・ドロップ履歴の Box に中身がある | 暗号化 Box（Cookie・キュー・隔離・ドロップ履歴）をすべて削除してから、鍵を削除する | `performed: true`、`keyDeleted: true` |
+| 形式不正、または なし・読み取り不能で、キュー・隔離・ドロップ履歴の Box に中身が無い | 何もしない | `rejection: startWillSucceed` |
+
+- 鍵を書き込めずに起動に失敗した場合（`keyWriteFailed`）も、消す必要のある Box が無いため `startWillSucceed` になる。時間をおいて `start()` を再試行する
+
+鍵がある場合の Box ごとの扱いは、次のとおりです。照合打ち切りと破損の Box は、Box を閉じた後のファイルを時間の上限なしで走査し直してから扱いを決めます。
+
+| 照合結果 | 扱い | 戻り値の分類 |
+| --- | --- | --- |
+| 不一致 | 削除する | `deletedBoxes` |
+| 破損 | 鍵と一致した最初のフレームより前のバイトを捨てて作り直す。失うのは先頭側の記録だけで、その件数は分からない | `rebuiltBoxes` |
+| 照合打ち切りで、走査し直した結果が不一致なし | 0 バイトに切り詰める。鍵と一致する記録が無く、開けば Hive も同じく切り詰めるため失うものは無い（残すと、再試行した `start()` が再び打ち切りで失敗する） | `rebuiltBoxes` |
+| 問題なし（中身あり） | 残す | `keptBoxes` |
+
+- 照合打ち切りの Box を走査し直した結果が不一致・破損の場合は、それぞれの行に従う
+- **作り直しの手順**: 残す部分を `<Box 名>.hivec` へ書いてディスクへ書き出し、`<Box 名>.hive` へ名前を変えて置き換える。置き換えるまで元の `.hive` は消さない。Hive は開くときに `.hive` があれば `.hivec` を削除するため、置き換えの前に止まっても元の Box が使われる
+- **Box を閉じる**: 削除・作り直しの前に、proxy の Box をすべて閉じる（別のインスタンスが開いている暗号化 Box を含む）。残骸の `.hivec`（`.hive` がある暗号化 Box のもの）は、閉じた後に削除する
+- **予期しない失敗**: Box のファイルや鍵を削除できないなどの予期しない失敗は、`StorageRecoveryException` を送出する
+- **再実行**: 途中で止まっても、再実行すれば残りを処理し、ファイルは最初の実行が終わった場合と同じ状態になる。戻り値は同じにならず、前回までに削除・作り直しを済ませた Box は `deletedBoxes`・`rebuiltBoxes` に含まれない。鍵を使えない場合の経路で、暗号化 Box を消した後に鍵の削除だけが失敗していた場合は、再実行は `startWillSucceed` を返す（使えない鍵は次の `start()` が作り直す）
+- **旧平文 Box**: 削除しない。鍵が無くても読めるため、次の `start()` で移行する。鍵を削除した場合、次の `start()` は鍵を生成するため、【5】の遅らせる移行になる
+- **終了後**: 共有していた初期化の結果を捨てるため、プロセスを再起動せずに `start()` できる
+- **件数**: 暗号化された記録の件数は読めないため返さない。`StorageIntegrityException` で起動に失敗した後の `getStats()` は 0 件を返すため、確認画面の根拠に使わない
+
+#### Hive の内部形式への依存
+
+先頭フレームの照合、走査、作り直し、保存順の前提は、Hive 2.2.3 の内部形式（フレームの並び、キーの符号化、`calculateKeyCrc`、`.hive` と `.hivec` の扱い、キーの並べ方）に依存します。Hive の CRC32 は公開されていないため、同じ計算を proxy の中に実装しています。Hive を更新するときは、これらの互換を確認してください。走査が偶然一致するフレームを見つける確率は極めて小さいものの、ゼロではありません。
 
 ### Cookie 評価基準
 
@@ -322,10 +487,10 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 
 - **保存順の維持**: 保存日時の昇順で再送し、リクエストの順序を保持
 - **キーの一意性**: マイクロ秒精度のタイムスタンプと同一マイクロ秒内の連番でキーを採番し、同時に保存したリクエストが上書きで失われないようにする
-- **永続化**: Hive でキュー状態を保存。アプリ再起動後も再送を継続
+- **永続化**: Hive の暗号化 Box（`proxy_queue_secure`）でキュー状態を保存。アプリ再起動後も再送を継続（「保存領域の暗号化」）
 - **再試行待ちの扱い**: バックオフ待機中のリクエストは今回の送信対象から外し、待機時間を過ぎた後続のリクエストを先に送信する
 - **接続の解放**: 再送では上流の応答本文を必ず読み切り、接続を解放してから次の要求へ進む。件数が同時接続数の上限を超えても最後まで送り切れるようにする
-- **隔離できない場合**: 隔離領域へ退避できない状況では、キューから取り除かずバックオフを適用して再試行する
+- **隔離できない場合**: 隔離領域へ退避できない状況では、キューから取り除かずバックオフを適用して再試行する（1 件で `quarantineMaxBytes` を超える場合を除く。「保持上限」）
 
 ### 再試行戦略
 
@@ -346,13 +511,13 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 
 | 方針 | 動作 | 用途 |
 | ---- | ---- | ---- |
-| `quarantine`（既定） | 本文を保持したまま隔離領域へ退避する | 会計データなど、失うと業務上の影響があるもの |
+| `quarantine`（既定） | 本文を保持したまま隔離領域へ退避する。合計バイト数の上限（`quarantineMaxBytes`）を 1 件で超える場合は本文を保持せず、ドロップ履歴へ `quarantine_too_large` で記録する | 会計データなど、失うと業務上の影響があるもの |
 | `drop` | 破棄し、履歴のみ残す | 失っても影響が小さいもの |
 
 - **隔離時の通知**: `ProxyEventType.requestQuarantined` を発行します
 - **破棄時の通知**: `ProxyEventType.requestDropped` を発行します
-- **二重記録の回避**: 隔離した場合はドロップ履歴へ記録しません
-- **記録の順序**: 隔離もドロップ履歴も、キューから取り除く前に記録します。記録できなかった場合はキューへ残すため、取り除いたのに記録が無い状態にはなりません
+- **二重記録の回避**: 隔離した場合はドロップ履歴へ記録しません。例外は保持上限を超えた場合で、隔離から移す分と、1 件で合計バイト数の上限を超える分をドロップ履歴へ記録します（「保持上限」）
+- **記録の順序**: 隔離もドロップ履歴も、キューから取り除く前に記録します。記録できなかった場合はキューへ残すため、取り除いたのに記録が無い状態にはなりません。保持上限で隔離から移す場合も、ドロップ履歴へ記録してから隔離から削除します
 
 ### キューへ入れない更新系（queueExcludePaths）
 
@@ -407,17 +572,107 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 キュー管理のためのメソッドを提供します。詳細は【20】API リファレンスを参照してください。
 
-- **`getQuarantinedRequests()`**: 隔離されたリクエストの一覧取得。本文は返しません
-- **`retryQuarantinedRequest(id)`**: 原因を解消したあとにキューへ戻して再送。再試行回数は初期化し、保存日時は受け付けた時点に更新するため、待機中のリクエストより後に送信します。業務上の発生時刻を表す `acceptedAt` は更新しません
-- **`discardQuarantinedRequest(id)`**: 内容を確認したうえで破棄
+- **`getQuarantinedRequests()`**: 隔離されたリクエストの一覧取得。本文は返しません。隔離した日時の古い順に並びます
+- **`retryQuarantinedRequest(id)`**: 原因を解消したあとにキューへ戻して再送。再試行回数は初期化し、保存日時は受け付けた時点に更新するため、待機中のリクエストより後に送信します。業務上の発生時刻を表す `acceptedAt` は更新しません。移行を待っている項目は再送できません
+- **`discardQuarantinedRequest(id)`**: 内容を確認したうえで破棄。移行を待っている項目は破棄できません
 - **`clearQuarantinedRequests()`**: 隔離されたリクエストを全て破棄
-- **`getDroppedRequests()`**: ドロップされたリクエストの履歴取得。デバッグやトラブルシューティングに活用
+- **`getDroppedRequests()`**: ドロップされたリクエストの履歴取得。デバッグやトラブルシューティングに活用。記録した日時の古い順に並びます
 - **`acknowledgeDroppedRequests()`**: 履歴を確認済みにする。履歴自体は残します
 
 ### 未確認の検知
 
 - **`ProxyStats.quarantinedCount`**: 隔離されているリクエスト件数。0 でなければ要対応です
 - **`ProxyStats.unacknowledgedDroppedCount`**: 未確認のドロップ履歴の件数。アプリ起動時に確認すると、監視していない間に破棄されたリクエストへ気付けます
+- **移行を待つ分**: どちらの件数も、旧平文 Box から移行を待っている分を含みます
+
+### 保存領域の暗号化
+
+- **対象**: キュー（`proxy_queue_secure`）、隔離（`proxy_quarantined_requests_secure`）、ドロップ履歴（`proxy_dropped_requests_secure`）を AES-256 の暗号化 Box に保存する。ドロップ履歴も含めるのは、隔離の上限超過分を履歴へ移すと、クエリを含む URL が履歴へ写るため
+- **鍵**: Cookie と共有する。照合と判定表は【4】の「暗号化鍵の管理と照合」に従う
+- **暗号化の範囲**: 暗号化されるのは値だけで、Box のキー（保存した時刻から採番した ID）は平文
+- **保持する内容**: キューと隔離は、クエリを含む URL、メソッド、クライアントが送ったヘッダ、本文をそのまま保持する。ドロップ履歴はヘッダと本文を持たない
+
+### 旧平文 Box からの移行
+
+0.14.0 以前の平文の Box（`proxy_queue`、`proxy_quarantined_requests`、`proxy_dropped_requests`）を、暗号化 Box へ自動で移行します。
+
+- **手順**: 旧 Box を平文で開く → キーを保ったまま暗号化 Box へ書き写す → 暗号化 Box を `flush()` → 旧 Box を `clear()` → 閉じる → ファイルを削除する
+- **ID**: キーを保つため、`X-Offline-Queue-Id` と隔離の ID は変わらない
+- **削除の失敗**: `clear()` の後にファイルを削除できなくても中身は空のため、処理を続けて `errorOccurred`（`operation: legacyStorageDelete`）を発行する
+  - `start()` の中で旧 Box を削除した場合（鍵が既にある場合の移行と、空のまま残った旧 Box の削除）、このイベントは `start()` の後に購読したアプリには届かない
+  - 空のまま残った旧 Box は、次の `start()` で改めて削除する
+- **中断**: 書き写しと `clear()` の間でプロセスが落ちても、移行中は再送が動かないため、次回に同じキーで書き写し直した結果は同じになる
+- **注意**: `flush()` がディスクへの書き込みの確定（fsync 相当）まで保証するかは未確認で、電源断では新旧とも失われる可能性が残る。旧ファイルの削除は、フラッシュストレージ上の完全消去を保証しない
+- **版を戻す場合**: 0.14.0 以前へ戻すと、移行済みのデータは見えない。戻している間は、移行済みの未送信キューは送られない。再び上げると、戻している間に積んだ分も含めて移行する
+- **保持上限**: 移行した隔離とドロップ履歴にも保持上限を適用する（段階 2 で移行した場合は同じ `start()` の中、遅らせた移行の場合は移行の後）。既定値では、上限を超えた隔離は本文とヘッダを残さずにドロップ履歴へ移り、30 日を過ぎたドロップ履歴は未確認でも消える。件数の上限を超えた確認済みのドロップ履歴も、古いものから消える。残す場合は、該当する設定に `0`（期間は `Duration.zero`）を指定する
+
+#### 移行する時機
+
+- **通常**: 段階 2（【4】）の中で、再送を始める前に移行する。0.14.0 からの通常の更新では鍵が既にあるため、この経路になる
+  - 失敗した場合（ロックを 30 秒以内に取得できない場合を含む）は、書き写した分があれば暗号化 Box から消し、段階 2 で開いた Box を閉じて、`start()` が `ProxyStartException` で失敗する。旧 Box は残るため、次の `start()` で改めて移行する
+- **遅らせる移行**: その proxy インスタンスで暗号化鍵を生成した場合（起動前の Cookie API の中で生成した場合を含む。判定はプロセス単位ではなくインスタンスごと）は、プラットフォームを問わず段階 2 では移行せず、鍵の生成から 30 秒後へ遅らせる
+  - Android の secure storage は、メモリ上の値を先に更新し、ディスクへは非同期に書く。同じプロセスで読み直しても書き込みの確認にならない
+  - 書き込みの確定を確かめる手段が無いため、待ち時間を置く（待っても確定は保証されない。実機では未確認）
+  - iOS / macOS の Keychain や、その他のプラットフォームが書き込みをその場で確定するかは実機で未確認のため、安全側にそろえる
+- **遅らせた移行の実行**
+  - proxy の稼働中だけ行う。同じインスタンスで再び `start()` したときに旧 Box が残っていれば、改めて予約する
+  - キュー消化と同じ排他の中で行う。実行中のキュー消化が終わるのを待ち、旧 Box の `clear()` まで次の消化を始めない。隔離は隔離のロック、ドロップ履歴は履歴のロックを `clear()` まで持つ
+  - `clear()` の前に失敗した場合は、書き写したキーを暗号化 Box から消してから排他を解き、5 秒ごとの定期処理で試み直す。定期処理は遅らせた移行が終わるのを待ってからキュー消化を始めるため、移行が失敗し続けてもキュー消化は止まらない。失敗は `errorOccurred`（`operation: legacyStorageMigration`）で知らせる（ロックを取れなかった場合を除く）
+  - 書き写したキーを消せなかった場合に備え、旧 Box のキーの一覧をメモリに持つ。旧 Box が空になるまで、暗号化 Box にある同じキーを、再送・隔離の変更・ドロップ履歴の削除・件数と一覧から外す
+  - 移行した後は、続けて保持上限を判定する
+
+#### 移行を待つ間の扱い
+
+- **再送**: 暗号化 Box のキューの再送は止めない（オンライン時の更新はキューを通らず上流へ送られるため、止めても順序は保てない）。旧キューの項目は移行するまで送らないため、後回しになる。移行後は保存日時の順で送る
+- **件数**: `getStats()` の `queueLength`、`quarantinedCount`、`droppedRequestsCount`、`unacknowledgedDroppedCount` と、状態通知の `queueLength`、`quarantinedCount`、`unacknowledgedDroppedCount` に旧 Box の分を含める。「未送信があるときは精算させない」を Web 側で実装している場合に、旧キューの未送信を見落とさないため
+- **一覧**: `getQueuedRequests()`、`getQuarantinedRequests()`、`getDroppedRequests()` に旧 Box の分を含め、`pendingMigration` を `true` にする。旧 Box と暗号化 Box の分を合わせて保存順に並べ、`getQuarantinedRequests()` と `getDroppedRequests()` の `limit` は並べた後の先頭からの件数とする。ヘッダのマスクも同じに適用する
+- **隔離の操作**: 旧 Box の隔離は再送も破棄もできない。`retryQuarantinedRequest()` / `discardQuarantinedRequest()` は `false` を返し、管理エンドポイントは `409` を返す
+- **確認済みへの変更**: `acknowledgeDroppedRequests()` は旧 Box の履歴も確認済みにする。移行後に未確認として再び出ないようにするため
+- **全削除**: `clearQuarantinedRequests()` は隔離のロック、`clearDroppedRequests()` は履歴のロックの中で、それぞれ旧 Box も合わせて消す。移行と同じロックで直列化し、全削除した分が書き写しで暗号化 Box に残らないようにするため
+- **保持上限**: 旧 Box の分は保持上限の対象にしない。移行した後に判定する
+
+#### `stop()` との関係
+
+- `stop()` の最初に停止中のフラグを立てる。キュー消化は、次の 1 件へ進む前にこのフラグを見て抜ける
+- 遅らせた移行がまだ書き写しを始めていなければ、待たずに取り消す。書き写しを始めていれば、終わるのを待つ
+- 送信を終えたキューの 1 件の保存（隔離・ドロップ履歴への記録とキューからの削除）が実行中であれば、終わるのを待ってから Box を閉じる。途中で閉じると、隔離や履歴に記録したのにキューに残り、次の起動で二重になるため
+- Box を閉じ始めた後に保存を始めようとした 1 件は、保存せずにキューに残し、次の起動で再送する。送信中の要求の完了は待たない
+
+#### Cookie
+
+- 旧平文 Cookie Box（`proxy_cookies`）は、従来どおり段階 1 で即時に移行する（失っても再ログインで済むため）
+- 暗号化 Box に同じキーの Cookie が既にあれば書き写さない（新しいセッションを古い値で上書きしないため）
+
+### 保持上限
+
+隔離とドロップ履歴は、`ProxyConfig` の次の設定で保持する量を制限します。キューには上限を設けません（未送信の業務データを捨てないため）。
+
+| 設定 | 既定 | 対象 | 超えた場合 |
+| --- | --- | --- | --- |
+| `quarantineMaxCount` | 1000 | 隔離の件数 | 保存順の古いものからドロップ履歴へ移す（`quarantine_limit`） |
+| `quarantineRetention` | 30 日 | `quarantinedAt` からの経過 | ドロップ履歴へ移す（`quarantine_expired`） |
+| `quarantineMaxBytes` | 20 MB | 本文とヘッダの名前・値から概算した合計 | 保存順の古いものからドロップ履歴へ移す（`quarantine_limit`） |
+| `droppedRequestMaxCount` | 1000 | ドロップ履歴の件数 | 確認済みの古いものから削除する。未確認は件数では消さない |
+| `droppedRequestRetention` | 30 日 | `droppedAt` からの経過 | 確認済みかどうかを問わず削除する |
+
+- **0 と負の値**: `0`（`Duration.zero`）はその上限を無効にする。負の値は `start()` が `ProxyStartException` を送出する
+- **隔離から移す順序**: ドロップ履歴へ記録してから隔離から削除する。記録できない場合は削除しない。`statusCode` と `errorMessage` は隔離時の値を引き継ぎ、`requestDropped` の `data` に `quarantineId` を含める
+- **1 件で合計バイト数の上限を超える場合**: 既存の隔離を追い出さず、隔離にも入れない。本文を捨ててドロップ履歴へ `quarantine_too_large` で記録してから、キューから取り除く。同じ 4xx を再試行し続けないため、「隔離できない場合はキューに残す」には当てはめない
+- **追加した隔離**: 隔離を追加したときの判定では、追加した 1 件は追い出さない
+- **判定の時機**: 起動時（`start()` の中、保存領域の初期化の後）、隔離やドロップ履歴を追加したとき、1 時間ごとの定期処理、遅らせた移行の後
+- **ロック**: 隔離を変更する処理は隔離のロック、ドロップ履歴を変更する処理は履歴のロックで直列化する。複数を取る場合は、キュー消化の排他 → 隔離のロック → 履歴のロックの順に取る。30 秒以内に取れない場合、起動時と定期の判定と遅らせた移行は次の定期処理へ回し、変更を伴う API（再送・破棄・全削除・確認済みへの変更）は `QueueOperationException` を送出する
+- **圧縮**: Hive の削除は論理削除で、削除を表すフレームがファイルに残る。起動時・1 時間ごと・遅らせた移行の後の判定では、ロックの外で Box を圧縮する（`compact()`）。いずれもフラッシュストレージ上の完全消去は保証しない
+- **メモリ**: Hive は Box を開くと値をすべてメモリに読み込むため、隔離は件数だけでなく合計バイト数でも制限する。開く瞬間は合計バイト数の上限の約 2 倍を使い得る
+- **イベント**: 起動時の判定で出したイベントは、`start()` の後に購読したアプリには届かない。`ProxyStats.unacknowledgedDroppedCount` で気付ける
+
+### 一覧と上限による削除の順
+
+- 一覧（`getQueuedRequests()`、`getQuarantinedRequests()`、`getDroppedRequests()`）、`getQuarantinedRequests()` と `getDroppedRequests()` の `limit`、キューの再送の順、上限による「古いものから」の削除は、保存した時刻（`queuedAt` / `quarantinedAt` / `droppedAt`）の順で決める
+- 時刻が同じ場合は、キーを時刻として読み直した値（19 桁と連番はマイクロ秒と連番、16 桁はマイクロ秒、13 桁はミリ秒として単位をそろえる）で決め、それも同じならキーの文字列で決める
+- 保存時刻を読み取れない記録は最も古いものとして扱う
+- 保存時刻が同じ場合、キーを時刻として読めない記録は、読める記録より後に並べる
+- Hive はキーを文字列の辞書順に並べ、v0.11.0 以降の 19 桁のキーが古い 13 桁・16 桁のキーより前に来るため、キーの順は保存順にならない
+- 保存時刻は UTC オフセットの無いローカル時刻のため、タイムゾーンの変更や夏時間の終了で、並び順と期間の判定がずれ得る
 
 ### 状態通知エンドポイント
 
@@ -427,6 +682,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - **無効化**: 空文字列を指定すると登録しません。代替ページと 504 ページへ自動復帰のスクリプトも入れません（【10】の「代替ページの自動復帰」）
 - **検証**: `healthCheckPath` と同じ規則で検証し、`healthCheckPath` と同じ値は起動時に拒否します
 - **応答ヘッダ**: `Cache-Control: no-store` を付与します
+- **件数**: `queueLength`、`quarantinedCount`、`unacknowledgedDroppedCount` は `getStats()` と同じ値で、旧平文 Box から移行を待っている分を含みます
 
 ```json
 {
@@ -452,6 +708,10 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 | `GET` | `/__offline_web_proxy/admin/quarantine` | 隔離の一覧（本文は返しません） |
 | `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | キューへ戻して再送 |
 | `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | 破棄 |
+
+- **一覧の項目**: `id`、`url`、`method`、`quarantinedAt`、`queuedAt`、`acceptedAt`（いずれも UTC の ISO 8601）、`reason`、`statusCode`、`errorMessage`、`pendingMigration`。隔離した日時の古い順に並びます
+- **応答**: 再送は `{"retried": true}`、破棄は `{"discarded": true}` を `200` で返します
+- **失敗時の応答**: 該当が無い場合は `404`、旧平文 Box から移行を待っている項目の場合は `409` を返します。どちらも `retried` / `discarded` が `false` で、`error` に理由が入ります。隔離のロックを 30 秒以内に取得できない場合は `500`（`text/plain`）を返します
 
 ### 内部エンドポイントの origin 制御
 
@@ -1234,6 +1494,14 @@ proxy:
 - **書き込み排他**: 書き込み操作は完全に排他制御
 - **デッドロック回避**: ロック取得順序を統一してデッドロックを防止
 
+### インスタンスと isolate
+
+同じアプリで複数の `OfflineWebProxy` インスタンスを同時に使う構成は想定しません。
+
+- 保存領域の初期化（【4】の段階 1・段階 2）と復旧 API は、同じ isolate の中ではインスタンスをまたいで直列化する
+- キュー消化の排他、隔離のロック、ドロップ履歴のロック（保持上限と移行を含む）はインスタンスごとで、インスタンスをまたいで直列化しない
+- 複数の isolate から同時に使う場合は、保存領域の初期化と復旧も直列化の対象外になる
+
 ## 【18】ログと個人情報保護
 
 ### ログレベル
@@ -1286,6 +1554,12 @@ INFO: GET /api/user → 200 OK (Authorization: **\***, Cookie: **\***)
 </network-security-config>
 ```
 
+### Android の自動バックアップ
+
+- **対象**: Android の自動バックアップ（Auto Backup）の対象には、Hive の保存先と secure storage の保存領域が含まれ得る（実機では未確認）
+- **復元後**: バックアップから復元した端末では、復元した暗号化 Box に対して、鍵の読み取り不能（`keyUnreadable`）や鍵なし（`keyMissing`）になり得る（どちらも実機では未確認）。キュー・隔離・ドロップ履歴の Box に中身があれば起動に失敗し、復旧 API の対象になる（【4】）
+- **推奨**: アプリ側で、Hive の保存先と secure storage の保存領域をバックアップの対象から除外する
+
 ### 推奨事項
 
 - **IP アドレス使用**: `localhost` よりも `127.0.0.1` の使用を推奨
@@ -1303,8 +1577,10 @@ INFO: GET /api/user → 200 OK (Authorization: **\***, Cookie: **\***)
   - `config`: 設定オブジェクト（省略時はデフォルト設定またはファイル設定を使用）
 - **戻り値**: 実際に使用されるポート番号
 - **例外**:
-  - `ProxyStartException`: サーバ起動に失敗した場合
+  - `ProxyStartException`: サーバ起動に失敗した場合。既に稼働中の場合、起動処理中の場合、保持上限に負の値を指定した場合を含む
+  - `StorageIntegrityException`: 暗号化した保存領域を使えない場合（【4】の判定表）。`ProxyStartException` のサブクラスで、包まずに送出する。何も消していない
   - `PortBindException`: ポートバインドに失敗した場合
+- **保存領域**: 保存領域の初期化の後に、隔離とドロップ履歴の保持上限を判定する（【5】）
 
 ```dart
 final proxy = OfflineWebProxy();
@@ -1318,7 +1594,9 @@ print('Proxy started on port: $port');
 
 - **戻り値**: なし
 - **例外**:
-  - `ProxyStopException`: サーバ停止に失敗した場合
+  - `ProxyStopException`: サーバ停止に失敗した場合。再バインドによる復旧（`ensureRunning()` など）との排他を上限時間（30 秒）内に取得できなかった場合を含む（`cause` に `TimeoutException`。この場合は停止しない）
+- **キュー消化**: 実行中のキュー消化は、次の 1 件へ進まずに抜ける。書き写しを始めていない遅らせた移行は取り消し、書き写し中であれば終わるのを待つ
+- **保存中の 1 件**: 送信を終えたキューの 1 件の保存は、終わるのを待ってから Box を閉じる。閉じ始めた後に保存を始めようとした 1 件はキューに残し、次の起動で再送する
 
 ```dart
 await proxy.stop();
@@ -1401,6 +1679,7 @@ WebView が保持していた URL を、現行ポートで読み込める URL �
 
 - **戻り値**: 診断情報（`ProxyDiagnostics`）
 - **用途**: 障害発生時の原因切り分け、ログ出力
+- **Cookie の保存領域**: `lastCookieStorageDiscardedAt` と `lastCookieStorageDiscardReason` で、このインスタンスが Cookie Box を破棄した日時と理由を確認できる（【4】）
 
 #### `ProxyLifecycleGuard`
 
@@ -1543,6 +1822,8 @@ print('Success: ${result.successCount}, Failed: ${result.failureCount}');
 ```
 
 ### Cookie 管理
+
+Cookie API は、起動前や停止後に呼んだ場合も保存領域の初期化の段階 1（【4】）を待ちます。暗号化した保存領域を使えない場合、送出する `CookieOperationException` の `cause` に `StorageIntegrityException` を持ちます。失敗は保持せず、次の呼び出しや `start()` で照合をやり直します。
 
 #### `Future<List<CookieInfo>> getCookies({String? domain})`
 
@@ -1717,9 +1998,16 @@ await proxy.clearCookies(domain: 'example.com'); // 特定ドメインのみ削�
 
 現在キューに保存されているリクエストの一覧を取得します。
 
-- **戻り値**: キューイングされたリクエストのリスト
+- **戻り値**: キューイングされたリクエストのリスト。保存日時（`queuedAt`）の古い順（【5】の「一覧と上限による削除の順」）
 - **例外**:
   - `QueueOperationException`: キュー取得に失敗した場合
+- **移行待ち**: 旧平文 Box から移行を待っている項目も含み、`pendingMigration` が `true` になる
+- **ヘッダのマスク**: 機密情報を含み得るヘッダの値を `***` に置き換える。名前は小文字にし、`_` を `-` とみなして判定する
+  - 一致で対象: `cookie`、`authorization`、`proxy-authorization`
+  - 部分一致で対象: `auth`、`token`、`secret`、`session`、`csrf`、`xsrf`、`key`、`pass`、`credential`、`signature`、`jwt`、`cookie`
+  - 対象外: `ProxyConfig.idempotencyHeaderName` のヘッダ
+  - 保存されるヘッダはクライアントが送ったものだけで、proxy が付けるヘッダは送信時に加える
+  - URL のクエリはマスクしない。再送には保存した値をそのまま使う
 
 ```dart
 final queued = await proxy.getQueuedRequests();
@@ -1745,8 +2033,9 @@ for (final result in proxy.recentResendResults) {
 ドロップされたリクエストの履歴を取得します。
 
 - **パラメータ**:
-  - `limit`: 取得件数の上限（デフォルト: 100）
-- **戻り値**: ドロップされたリクエストのリスト
+  - `limit`: 取得件数の上限（省略時は全件、0 以下は空のリスト）。並べた後の先頭からの件数
+- **戻り値**: ドロップされたリクエストのリスト。記録した日時（`droppedAt`）の古い順
+- **移行待ち**: 旧平文 Box から移行を待っている履歴も含み、`pendingMigration` が `true` になる
 - **例外**:
   - `QueueOperationException`: 履歴取得に失敗した場合
 
@@ -1763,7 +2052,8 @@ for (final request in dropped) {
 
 - **戻り値**: なし
 - **例外**:
-  - `QueueOperationException`: 履歴削除に失敗した場合
+  - `QueueOperationException`: 履歴削除に失敗した場合。履歴のロックを 30 秒以内に取得できない場合を含む
+- **注意**: 移行を待っている旧平文 Box の履歴も削除する
 
 ```dart
 await proxy.clearDroppedRequests();
@@ -1775,8 +2065,9 @@ await proxy.clearDroppedRequests();
 
 - **戻り値**: 確認済みへ変更した件数
 - **例外**:
-  - `QueueOperationException`: 更新に失敗した場合
+  - `QueueOperationException`: 更新に失敗した場合。履歴のロックを 30 秒以内に取得できない場合を含む
 - **用途**: 起動時に `ProxyStats.unacknowledgedDroppedCount` で未確認の履歴を検知し、利用者へ提示し終えた時点で呼び出します。履歴自体は削除しないため、内容は後から参照できます
+- **注意**: 移行を待っている旧平文 Box の履歴も確認済みにし、移行後に未確認へ戻らないようにする
 
 ```dart
 final stats = await proxy.getStats();
@@ -1795,8 +2086,9 @@ if (stats.unacknowledgedDroppedCount > 0) {
 隔離されたリクエストの一覧を取得します。
 
 - **パラメータ**:
-  - `limit`: 取得件数の上限（デフォルト: 100）
-- **戻り値**: 隔離されているリクエストのリスト（隔離した順）
+  - `limit`: 取得件数の上限（省略時は全件、0 以下は空のリスト）。並べた後の先頭からの件数
+- **戻り値**: 隔離されているリクエストのリスト。隔離した日時（`quarantinedAt`）の古い順
+- **移行待ち**: 旧平文 Box から移行を待っている項目も含み、`pendingMigration` が `true` になる
 - **例外**:
   - `QueueOperationException`: 取得に失敗した場合
 - **注意**: 本文は返しません。再送する場合は `retryQuarantinedRequest()` を使用します
@@ -1814,9 +2106,9 @@ for (final request in quarantined) {
 
 - **パラメータ**:
   - `id`: `getQuarantinedRequests()` が返した識別子
-- **戻り値**: キューへ戻した場合は `true`、該当が無い場合は `false`
+- **戻り値**: キューへ戻した場合は `true`、該当が無い場合と、旧平文 Box から移行を待っている項目の場合は `false`
 - **例外**:
-  - `QueueOperationException`: 操作に失敗した場合
+  - `QueueOperationException`: 操作に失敗した場合。隔離のロックを 30 秒以内に取得できない場合を含む
 - **注意**: 再試行回数は初期化されます。拒否の原因を解消してから呼び出してください
 
 ```dart
@@ -1830,9 +2122,9 @@ await proxy.retryQuarantinedRequest(quarantined.first.id);
 
 - **パラメータ**:
   - `id`: `getQuarantinedRequests()` が返した識別子
-- **戻り値**: 破棄した場合は `true`、該当が無い場合は `false`
+- **戻り値**: 破棄した場合は `true`、該当が無い場合と、旧平文 Box から移行を待っている項目の場合は `false`
 - **例外**:
-  - `QueueOperationException`: 操作に失敗した場合
+  - `QueueOperationException`: 操作に失敗した場合。隔離のロックを 30 秒以内に取得できない場合を含む
 
 ```dart
 await proxy.discardQuarantinedRequest(quarantined.first.id);
@@ -1844,10 +2136,53 @@ await proxy.discardQuarantinedRequest(quarantined.first.id);
 
 - **戻り値**: なし
 - **例外**:
-  - `QueueOperationException`: 破棄に失敗した場合
+  - `QueueOperationException`: 破棄に失敗した場合。隔離のロックを 30 秒以内に取得できない場合を含む
+- **注意**: 移行を待っている旧平文 Box の隔離も破棄する
 
 ```dart
 await proxy.clearQuarantinedRequests();
+```
+
+### 暗号化した保存領域の復旧
+
+#### `Future<EncryptedStorageRecoveryResult> recoverEncryptedStorage()`
+
+`start()` や Cookie API が `StorageIntegrityException` で失敗し、再試行しても解消しない場合に、失われる内容を利用者へ説明し、同意を得てから呼び出します。判定と扱いは【4】の「復旧 API」を参照してください。
+
+- **戻り値**: `EncryptedStorageRecoveryResult`。実行したかどうか、処理を行わなかった理由、削除・作り直し・そのまま残した Box、鍵を削除したかどうか
+- **例外**:
+  - `StorageRecoveryException`: Box のファイルや鍵の削除などに失敗した場合。再実行しても安全
+- **注意**:
+  - この isolate の proxy が稼働中または起動処理中の場合は、何もせずに `proxyActive` を返す
+  - 先頭側が壊れた Box を作り直すと、先頭側の記録が件数不明のまま失われる（`rebuiltBoxes`）
+  - 照合が時間の上限を超えた Box は、Box を閉じた後に時間の上限を設けずに照合し直し、その結果で扱う。鍵と一致しなければ削除（`deletedBoxes`）、先頭側が壊れていれば作り直し（`rebuiltBoxes`）。先頭の記録が書きかけで鍵と一致する記録も無ければ 0 バイトに切り詰め、失うものは無い（`rebuiltBoxes`）
+  - 鍵を削除した場合は、Cookie（ログイン状態）も消える
+  - `StorageIntegrityException` で起動に失敗した後の `getStats()` は 0 件を返すため、確認画面の根拠に使わない
+
+```dart
+// start() の再試行を済ませても StorageIntegrityException が続く場合の例
+try {
+  await proxy.start(config: config);
+} on StorageIntegrityException catch (error) {
+  if (error.failure == StorageIntegrityFailure.temporarilyUnavailable ||
+      error.failure == StorageIntegrityFailure.keyWriteFailed) {
+    // 復旧 API では直らないため、時間をおいて start() を再試行する
+    rethrow;
+  }
+
+  // 失われる内容を利用者へ説明し、同意を得られた場合だけ復旧する。
+  // askUserToConfirm はアプリで用意する仮の関数
+  if (!await askUserToConfirm(error.failure)) {
+    rethrow;
+  }
+  final result = await proxy.recoverEncryptedStorage();
+  if (!result.performed &&
+      result.rejection != StorageRecoveryRejection.startWillSucceed) {
+    // temporarilyUnavailable / proxyActive: 時間をおいて再試行する
+    rethrow;
+  }
+  await proxy.start(config: config);
+}
 ```
 
 ### 統計・監視
@@ -1859,6 +2194,7 @@ await proxy.clearQuarantinedRequests();
 - **戻り値**: プロキシ統計情報
 - **例外**:
   - `StatsOperationException`: 統計情報取得に失敗した場合
+- **件数**: キュー・隔離・ドロップ履歴の件数には、移行を待っている旧平文 Box の分を含む。保存領域を開く前に起動に失敗した場合（`StorageIntegrityException` など）と停止後は 0
 
 ```dart
 final stats = await proxy.getStats();
@@ -1940,6 +2276,7 @@ class QueuedRequest {
   final DateTime acceptedAt; // 最初に受け付けた日時（隔離と再送を経ても不変）
   final int retryCount; // 現在の再試行回数
   final DateTime nextRetryAt; // 次回再試行予定日時
+  final bool pendingMigration; // 旧平文 Box から移行を待っている項目か（既定: false）
 }
 ```
 
@@ -1952,10 +2289,11 @@ class DroppedRequest {
   final String url; // ドロップされたリクエストのURL
   final String method; // HTTPメソッド
   final DateTime droppedAt; // ドロップされた日時
-  final String dropReason; // ドロップ理由（"4xx_error", "5xx_error", "network_timeout"等）
+  final String dropReason; // ドロップ理由（"4xx_error" など。隔離の保持上限では "quarantine_limit"、"quarantine_expired"、"quarantine_too_large"）
   final int statusCode; // エラー時のHTTPステータスコード
   final String errorMessage; // 詳細なエラーメッセージ
   final bool acknowledged; // 利用者へ提示済みか（既定: false）
+  final bool pendingMigration; // 旧平文 Box から移行を待っている履歴か（既定: false）
 }
 ```
 
@@ -1974,6 +2312,7 @@ class QuarantinedRequest {
   final String reason; // 隔離理由（"4xx_error" 等）
   final int statusCode; // 上流から返されたHTTPステータスコード
   final String errorMessage; // 詳細なエラーメッセージ
+  final bool pendingMigration; // 旧平文 Box から移行を待っている項目か。再送も破棄もできない（既定: false）
 }
 ```
 
@@ -2100,6 +2439,11 @@ class ProxyConfig {
   final bool enableAcceptedAtHeader; // 受付時刻の通知（既定: true）
   final String acceptedAtHeaderName; // 受付時刻のヘッダ名（既定: "X-Offline-Accepted-At"）
   final DropPolicy dropPolicy; // 再送を打ち切った要求の扱い（既定: quarantine）
+  final int quarantineMaxCount; // 隔離の件数の上限（既定: 1000、0=上限なし）
+  final Duration quarantineRetention; // 隔離の保持期間（既定: 30 日、Duration.zero=上限なし）
+  final int quarantineMaxBytes; // 隔離の合計バイト数の上限（既定: 20 MB、0=上限なし）
+  final int droppedRequestMaxCount; // ドロップ履歴の件数の上限（既定: 1000、0=上限なし）
+  final Duration droppedRequestRetention; // ドロップ履歴の保持期間（既定: 30 日、Duration.zero=上限なし）
   final ProxyResponseConfig queuedResponse; // キュー投入時の応答（既定: 202 / JSON）
   final ProxyResponseConfig offlineMissResponse; // 代替できない場合の応答（既定: 504 / JSON）
   final bool enableAdminApi; // 管理API有効化（開発時のみ）
@@ -2123,13 +2467,15 @@ class ProxyConfig {
 }
 ```
 
+保持上限の 5 項目に負の値を指定すると、`start()` が `ProxyStartException` を送出します（【5】の「保持上限」）。
+
 #### `DropPolicy`
 
 再送を打ち切った更新系リクエストの扱いを表す列挙型。
 
 ```dart
 enum DropPolicy {
-  quarantine, // 本文ごと隔離領域へ退避する（既定）
+  quarantine, // 本文ごと隔離領域へ退避する（既定）。1 件で quarantineMaxBytes を超える場合は本文を保持せず、ドロップ履歴へ quarantine_too_large で記録する（【5】）
   drop // 履歴だけを残して破棄する（本文は保持しない）
 }
 ```
@@ -2183,7 +2529,8 @@ enum ProxyEventType {
   cacheCleared, // キャッシュクリア
   errorOccurred, // エラー発生
   serverUnavailable, // 稼働確認に失敗し復旧できなかった
-  serverRecovered // 再バインドにより復旧した
+  serverRecovered, // 再バインドにより復旧した
+  cookieStorageDiscarded // 鍵と合わない Cookie Box を破棄した
 }
 ```
 
@@ -2208,6 +2555,18 @@ enum ProxyEventType {
 - `quarantineId`: 隔離領域内での識別子（`retryQuarantinedRequest` などで指定）
 - `statusCode`: 上流から返されたステータスコード
 - `reason`: 隔離理由（`"4xx_error"` 等）
+
+`requestDropped` の `data` には、次のメタ情報が入ります。
+
+- `statusCode`: 上流から返されたステータスコード（隔離から移した場合は隔離時の値）
+- `dropReason`: 取り除いた理由（`"4xx_error"` など。隔離の保持上限では `quarantine_limit`、`quarantine_expired`、`quarantine_too_large`）
+- `quarantineId`: 件数・期間・合計バイト数の上限により隔離から移した場合の、隔離領域内での識別子
+
+`cookieStorageDiscarded` の `data` には、次のメタ情報が入ります。
+
+- `reason`: 破棄した理由（`StorageIntegrityFailure` の名前）
+
+旧平文 Box の移行と保持上限の処理で発行する `errorOccurred` の `data` には、`operation`（移行は `legacyStorageDelete` か `legacyStorageMigration`、保持上限は `retentionLimit`）と `error` が入ります。`legacyStorageDelete` では、`box` に旧平文 Box の名前が入ります。
 
 `upstreamCircuitOpened` の `data` には、次のメタ情報が入ります。
 
@@ -2303,10 +2662,12 @@ class ProxyDiagnostics {
   final UpstreamCircuitState upstreamCircuitState; // サーキットブレーカの状態
   final int consecutiveUpstreamFailures; // 上流へ到達できなかった連続回数
   final DateTime? lastUpstreamSuccessAt; // 最後に上流へ到達できた日時
+  final DateTime? lastCookieStorageDiscardedAt; // このインスタンスが最後に Cookie Box を破棄した日時（破棄していない場合は null）
+  final StorageIntegrityFailure? lastCookieStorageDiscardReason; // その理由（破棄していない場合は null）
 }
 ```
 
-`isOnline` から `lastUpstreamSuccessAt` までは必須の引数です。`ProxyDiagnostics` を直接生成しているコードは、指定を追加する必要があります。
+`isOnline` から `lastUpstreamSuccessAt` までは必須の引数です。`ProxyDiagnostics` を直接生成しているコードは、指定を追加する必要があります。`lastCookieStorageDiscardedAt` と `lastCookieStorageDiscardReason` は省略可能な引数です。
 
 #### `UpstreamCircuitState`
 
@@ -2328,6 +2689,79 @@ enum UpstreamCircuitState {
 enum OnlineDecisionSource {
   initial, // start() 時に取得した接続状態（取得できない場合のフォールバックを含む）
   linkLayer // 起動後に受け取った接続状態の変化イベント
+}
+```
+
+#### `ProxyStorageBox`
+
+proxy が暗号化して保存する Box の種類を表す列挙型。
+
+```dart
+enum ProxyStorageBox {
+  cookies, // Cookie（proxy_cookies_secure）
+  queue, // キュー（proxy_queue_secure）
+  quarantine, // 隔離（proxy_quarantined_requests_secure）
+  droppedRequests // ドロップ履歴（proxy_dropped_requests_secure）
+}
+```
+
+#### `StorageBoxCheckResult`
+
+暗号化 Box のファイルを鍵と照合した結果を表す列挙型（【4】の「暗号化 Box の照合」）。
+
+```dart
+enum StorageBoxCheckResult {
+  empty, // ファイルが無いか、中身が無い
+  match, // 先頭の記録が鍵と一致した
+  noMismatch, // 先頭の記録が書きかけで照合できず、鍵と一致する記録も無い（そのまま開く）
+  mismatch, // 先頭の記録が鍵と一致せず、鍵と一致する記録も無い
+  corrupted, // 先頭側が壊れているが、後ろに鍵と一致する記録がある
+  aborted, // 照合が時間の上限を超えたため打ち切った
+  notVerified // 使える鍵が無いため照合していない（中身はある）
+}
+```
+
+#### `StorageIntegrityFailure`
+
+暗号化した保存領域を使えない理由、または Cookie Box を破棄した理由を表す列挙型。
+
+```dart
+enum StorageIntegrityFailure {
+  temporarilyUnavailable, // 端末のロック中などで、鍵を一時的に読めない
+  keyUnreadable, // 鍵の読み取りが失敗し続けている
+  keyMissing, // 鍵が無い
+  keyInvalid, // 鍵の形式が正しくない（空文字、Base64 として読めない、または 32 バイトでない）
+  keyMismatch, // 鍵と一致しない暗号化 Box がある
+  corrupted, // 先頭側が壊れた暗号化 Box がある
+  verificationAborted, // 照合が時間の上限を超えた暗号化 Box がある
+  keyWriteFailed // 新しい鍵を secure storage へ書き込めなかった
+}
+```
+
+#### `StorageRecoveryRejection`
+
+復旧 API が処理を行わなかった理由を表す列挙型。
+
+```dart
+enum StorageRecoveryRejection {
+  proxyActive, // proxy が稼働中、または起動処理中
+  temporarilyUnavailable, // 端末のロック中などで、鍵を一時的に読めない
+  startWillSucceed // 消す必要のある Box が無い。start() を再試行する（keyWriteFailed の場合を含む）
+}
+```
+
+#### `EncryptedStorageRecoveryResult`
+
+復旧 API の結果を表すクラス。
+
+```dart
+class EncryptedStorageRecoveryResult {
+  final bool performed; // 削除や作り直しを行ったか
+  final StorageRecoveryRejection? rejection; // 処理を行わなかった理由（performed が true の場合は null）
+  final Set<ProxyStorageBox> deletedBoxes; // 削除した Box
+  final Set<ProxyStorageBox> rebuiltBoxes; // 作り直した Box（破損の Box は先頭側の記録を件数不明のまま失う。照合打ち切りから 0 バイトに切り詰めた Box は失うものが無い）
+  final Set<ProxyStorageBox> keptBoxes; // 中身があり、そのまま残した Box
+  final bool keyDeleted; // secure storage の鍵を削除したか
 }
 ```
 
@@ -2360,6 +2794,19 @@ class Semaphore {
 class ProxyStartException implements Exception {
   final String message;
   final Exception? cause;
+}
+
+// 暗号化した保存領域を使えない（start() は包まずに送出し、Cookie API は cause に持つ）
+class StorageIntegrityException extends ProxyStartException {
+  final StorageIntegrityFailure failure; // 使えない理由
+  final Map<ProxyStorageBox, StorageBoxCheckResult> boxResults; // Box ごとの照合結果（Cookie を含む）
+  final Object? error; // 元のエラー（Exception でないものを含む）
+}
+
+// 暗号化した保存領域の復旧の予期しない失敗
+class StorageRecoveryException implements Exception {
+  final String message;
+  final Object? error;
 }
 
 // プロキシサーバ停止失敗

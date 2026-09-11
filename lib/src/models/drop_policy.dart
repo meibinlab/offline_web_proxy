@@ -9,6 +9,11 @@ enum DropPolicy {
   /// The request keeps its body, so an operator can resend it after fixing the
   /// cause, or discard it deliberately. Use this when losing a request means
   /// losing business data, such as a sales record.
+  ///
+  /// A request that alone exceeds `ProxyConfig.quarantineMaxBytes` is not
+  /// quarantined. It is recorded in the dropped request history without its
+  /// body, with the drop reason `quarantine_too_large`, and the requests
+  /// already in quarantine are kept.
   quarantine,
 
   /// Discard the request and keep only a history entry.

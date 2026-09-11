@@ -35,6 +35,14 @@ class QuarantinedRequest {
   /// 詳細なエラーメッセージ
   final String errorMessage;
 
+  /// 暗号化する前の保存領域に残り、移行を待っているかどうか
+  ///
+  /// この proxy インスタンスで暗号化鍵を生成した場合、旧版の保存領域からの
+  /// 移行を一定時間遅らせます。その間、旧版の保存領域にある項目は `true` に
+  /// なり、再送も破棄もできません（`retryQuarantinedRequest()` と
+  /// `discardQuarantinedRequest()` は `false` を返します）。
+  final bool pendingMigration;
+
   const QuarantinedRequest({
     required this.id,
     required this.url,
@@ -45,6 +53,7 @@ class QuarantinedRequest {
     required this.reason,
     required this.statusCode,
     required this.errorMessage,
+    this.pendingMigration = false,
   });
 
   @override

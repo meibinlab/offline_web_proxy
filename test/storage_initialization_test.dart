@@ -8,13 +8,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:offline_web_proxy/src/models/cookie_record.dart';
+import 'package:offline_web_proxy/src/storage/encryption_key_storage.dart';
 
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
 };
 
-/// 暗号化 Cookie Box の鍵を保存する secure storage のキー。
+/// Cookie と業務データの暗号化鍵を保存する secure storage のキー。
 const String _encryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 
@@ -26,6 +27,38 @@ const String _encryptedCookieBoxName = 'proxy_cookies_secure';
 
 /// 旧平文 Cookie Box の名前。
 const String _legacyCookieBoxName = 'proxy_cookies';
+
+/// 鍵の読み取りを遅らせ、書き込み回数を数える secure storage。
+///
+/// 読み取りの間に別の初期化が割り込めるようにし、直列化が外れた場合に
+/// 鍵の書き込みが 2 回になることを確実に検出するために使う。
+class _CountingKeyStorage implements EncryptionKeyStorage {
+  /// 保存されている値。
+  final Map<String, String> values = {};
+
+  /// 鍵を書き込んだ回数。
+  int writeCount = 0;
+
+  @override
+  Future<String?> read(String key) async {
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    return values[key];
+  }
+
+  @override
+  Future<void> write(String key, String value) async {
+    writeCount++;
+    values[key] = value;
+  }
+
+  @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
+
+  @override
+  Future<bool?> isProtectedDataAvailable() async => null;
+}
 
 /// 復元する Cookie を作る。
 ///
@@ -39,6 +72,15 @@ CookieRestoreEntry _cookie(String name) {
     domain: 'example.com',
     hostOnly: true,
   );
+}
+
+/// 端末のロック状態を切り替えられる secure storage。
+class _LockableKeyStorage extends SecureEncryptionKeyStorage {
+  /// 端末がロックされていて、鍵を読めない状態かどうか。
+  bool locked = true;
+
+  @override
+  Future<bool?> isProtectedDataAvailable() async => !locked;
 }
 
 /// secure storage に保存されている暗号化鍵を読む。
@@ -124,9 +166,8 @@ void main() {
     });
 
     /// start() と Cookie API を同時に呼んでも鍵は 1 つに決まり、
-    /// 再起動後も Cookie が残ること（修正前のコードでも Box を開く順序の
-    /// 都合で通るため、競合の検出ではなく、同時に呼んでも鍵と Cookie が
-    /// 保たれることの確認）
+    /// 再起動後も Cookie が残ること（競合の検出は、鍵の書き込み回数を数える
+    /// 別のテストで行う）
     test('generates a single key when start() and a cookie API run together',
         () async {
       await Future.wait([
@@ -144,17 +185,18 @@ void main() {
 
     /// 段階 1 が失敗した後、原因を取り除けば同じインスタンスで再試行できること
     test('retries stage 1 after it failed', () async {
-      // 32 バイトでない鍵は形式不正として段階 1 を失敗させる
-      FlutterSecureStorage.setMockInitialValues(<String, String>{
-        _encryptionKeyStorageKey: base64Encode(List<int>.filled(8, 1)),
-      });
+      final keyStorage = _LockableKeyStorage();
+      proxy = OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(keyStorage: keyStorage),
+      );
 
+      // 端末のロック中は鍵を読めないため、段階 1 が失敗する
       await expectLater(
         proxy.getCookies(),
         throwsA(isA<CookieOperationException>()),
       );
 
-      FlutterSecureStorage.setMockInitialValues(<String, String>{});
+      keyStorage.locked = false;
 
       // 失敗した結果を共有し続けず、改めて初期化すること
       await proxy.restoreCookies([_cookie('SESSION')]);
@@ -205,6 +247,42 @@ void main() {
         (await proxy.getCookies()).map((cookie) => cookie.name),
         contains('SESSION'),
       );
+    });
+
+    /// 鍵の読み取りが遅くても、start() と Cookie API を同時に呼んだ場合の
+    /// 鍵の書き込みは 1 回だけであること
+    test('writes the key once when start() and a cookie API overlap', () async {
+      final keyStorage = _CountingKeyStorage();
+      proxy = OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(keyStorage: keyStorage),
+      );
+
+      await Future.wait([
+        proxy.start(config: const ProxyConfig(origin: _origin)),
+        proxy.restoreCookies([_cookie('SESSION')]),
+      ]);
+
+      expect(keyStorage.writeCount, 1);
+    });
+
+    /// 2 つのインスタンスから同時に呼んでも、鍵の書き込みは 1 回だけであること
+    test('writes the key once when two instances overlap', () async {
+      final keyStorage = _CountingKeyStorage();
+      proxy = OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(keyStorage: keyStorage),
+      );
+      final another = OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(keyStorage: keyStorage),
+      );
+
+      await Future.wait([
+        proxy.restoreCookies([_cookie('SESSION')]),
+        another.restoreCookies([_cookie('PREFERENCE')]),
+      ]);
+
+      expect(keyStorage.writeCount, 1);
+      final names = (await another.getCookies()).map((cookie) => cookie.name);
+      expect(names, containsAll(<String>['SESSION', 'PREFERENCE']));
     });
 
     /// 2 つのインスタンスから同時に呼んでも鍵は 1 つに決まり、再起動後も
@@ -326,12 +404,12 @@ void main() {
       expect(uncaughtErrors, everyElement(isA<FileSystemException>()));
       // 閉じたことを確かめる Box を、この呼び出しが実際に開いていたこと
       expect(
-        File('$hiveTestDirectory${Platform.pathSeparator}proxy_queue.hive')
+        File('$hiveTestDirectory${Platform.pathSeparator}proxy_web_storage.hive')
             .existsSync(),
         isTrue,
       );
       // 失敗より前に段階 2 が開いた Box は閉じていること
-      expect(Hive.isBoxOpen('proxy_queue'), isFalse);
+      expect(Hive.isBoxOpen('proxy_web_storage'), isFalse);
       // テストが先に開いていた Box は閉じていないこと
       expect(Hive.isBoxOpen('proxy_cache'), isTrue);
     });
@@ -340,10 +418,11 @@ void main() {
     /// 届き、待ったまま完了しない状態にならないこと
     test('reports a shared stage 1 failure to callers in other error zones',
         () async {
-      // 32 バイトでない鍵は形式不正として段階 1 を失敗させる
-      FlutterSecureStorage.setMockInitialValues(<String, String>{
-        _encryptionKeyStorageKey: base64Encode(List<int>.filled(8, 1)),
-      });
+      // 端末のロック中は鍵を読めないため、段階 1 が失敗する
+      final keyStorage = _LockableKeyStorage();
+      proxy = OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(keyStorage: keyStorage),
+      );
 
       final zonedOutcome = Completer<Object?>();
       runZonedGuarded(() {
@@ -367,4 +446,106 @@ void main() {
       expect(zonedError, isA<CookieOperationException>());
     });
   });
+
+  group('起動処理中の start() の再呼び出し', () {
+    /// start() を続けて 2 回呼ぶと、2 回目は起動処理中を理由に ProxyStartException で失敗し、
+    /// 1 回目は起動できること。起動処理中の状態が残らず、その後の stop() → start() もできること
+    test('rejects the second of two concurrent start() calls', () async {
+      final first = proxy.start(config: const ProxyConfig(origin: _origin));
+      final second = proxy.start(config: const ProxyConfig(origin: _origin));
+
+      final secondError = await second.then<Object?>(
+        (_) => null,
+        onError: (Object error) => error,
+      );
+      final port = await first;
+
+      // 2 回目は起動処理中を理由に失敗し、保存領域を使えない失敗としては扱わないこと
+      expect(secondError, isA<ProxyStartException>());
+      expect(secondError, isNot(isA<StorageIntegrityException>()));
+      // 1 回目は起動できること
+      expect(port, greaterThan(0));
+      expect(proxy.isRunning, isTrue);
+      expect(proxy.port, port);
+
+      // 起動処理中の状態が残らず、停止した後に再び起動できること
+      await proxy.stop();
+      await proxy.start(config: const ProxyConfig(origin: _origin));
+      expect(proxy.isRunning, isTrue);
+    });
+
+    /// 1 回目の start() が鍵の読み取りで止まっている間に呼んだ start() は ProxyStartException で
+    /// 失敗し、1 回目の起動処理中の状態（復旧 API を拒否する状態）を崩さず、1 回目は起動できること
+    test('keeps the first start() in progress when a second call is rejected',
+        () async {
+      final keyStorage = _GatedKeyStorage();
+      proxy = OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(keyStorage: keyStorage),
+      );
+      addTearDown(() {
+        if (!keyStorage.readGate.isCompleted) {
+          keyStorage.readGate.complete();
+        }
+      });
+
+      final first = proxy.start(config: const ProxyConfig(origin: _origin));
+      await keyStorage.readEntered.future.timeout(const Duration(seconds: 10));
+
+      final secondError = await proxy
+          .start(config: const ProxyConfig(origin: _origin))
+          .then<Object?>((_) => null, onError: (Object error) => error);
+
+      // 2 回目は起動処理中を理由に失敗すること
+      expect(secondError, isA<ProxyStartException>());
+      expect(secondError, isNot(isA<StorageIntegrityException>()));
+      // 1 回目はまだ起動処理中で、復旧 API は起動処理中を理由に拒否すること
+      expect(proxy.isRunning, isFalse);
+      final recovery = await proxy.recoverEncryptedStorage();
+      expect(recovery.performed, isFalse);
+      expect(recovery.rejection, StorageRecoveryRejection.proxyActive);
+
+      keyStorage.readGate.complete();
+      final port = await first;
+
+      // 1 回目は起動できること
+      expect(port, greaterThan(0));
+      expect(proxy.isRunning, isTrue);
+    });
+  });
+}
+
+/// 鍵の読み取りを止めておける secure storage。
+///
+/// start() が段階 1 の鍵の読み取りで止まり、起動処理中のままになった状態を作るために使う。
+class _GatedKeyStorage implements EncryptionKeyStorage {
+  /// 保存されている値。
+  final Map<String, String> values = {};
+
+  /// 読み取りを止めておく待ち合わせ。完了するまで読み取りは戻らない。
+  final Completer<void> readGate = Completer<void>();
+
+  /// 読み取りが始まったことを知らせる待ち合わせ。
+  final Completer<void> readEntered = Completer<void>();
+
+  @override
+  Future<String?> read(String key) async {
+    if (!readEntered.isCompleted) {
+      readEntered.complete();
+    }
+    await readGate.future;
+    return values[key];
+  }
+
+  @override
+  Future<void> write(String key, String value) async {
+    values[key] = value;
+  }
+
+  @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
+
+  @override
+  Future<bool?> isProtectedDataAvailable() async => null;
 }
