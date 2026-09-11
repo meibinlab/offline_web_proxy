@@ -74,7 +74,8 @@
   <p>プロキシサーバを停止します。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/ProxyStopException-class.html">ProxyStopException</a> サーバ停止に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/ProxyStopException-class.html">ProxyStopException</a> サーバ停止に失敗した場合。復旧処理との排他を
+上限時間内に取得できなかった場合を含みます。</li>
 </ul>
 </section>
 
@@ -87,9 +88,24 @@
     return;
   }
 
+  &#47;&#47; キュー消化が次の 1 件へ進まず、遅らせた移行が書き写しを始めないよう、最初に立てる。
+  &#47;&#47; 同時に呼ばれた stop() がすべて終わるまで下ろさない
+  _pendingStopCount++;
+  _isStopping = true;
+
   &#47;&#47; 復旧処理と同時に実行されないよう排他制御する
-  await _lifecycleLock.acquire();
+  try {
+    await _lifecycleLock.acquire();
+  } catch (e) {
+    &#47;&#47; 取得できなかった場合は停止しないため、キュー消化と移行を止めたままにしない
+    _finishStopCall();
+    throw ProxyStopException(
+      &#39;Failed to stop proxy server: $e&#39;,
+      e is Exception ? e : null,
+    );
+  }
   if (!_isRunning) {
+    _finishStopCall();
     _lifecycleLock.release();
     return;
   }
@@ -98,6 +114,8 @@
   try {
     _queueDrainTimer?.cancel();
     _queueDrainTimer = null;
+    _deferredMigrationTimer?.cancel();
+    _deferredMigrationTimer = null;
     _cachePurgeTimer?.cancel();
     _cachePurgeTimer = null;
     _healthCheckTimer?.cancel();
@@ -108,6 +126,22 @@
     await _server?.close();
     await _connectivitySubscription.cancel();
 
+    &#47;&#47; 書き写しを始めた遅らせた移行は、ネットワークを使わず短いため終わるのを待つ。
+    &#47;&#47; まだ始めていなければ、停止中フラグを見て取り消される。
+    final deferredMigration = _deferredMigrationFuture;
+    if (deferredMigration != null &amp;&amp; _deferredMigrationCopying) {
+      await deferredMigration;
+    }
+
+    &#47;&#47; 送信を終えたキューの 1 件の保存も、ネットワークを使わず短いため終わるのを待つ。
+    &#47;&#47; 途中で Box を閉じると、隔離や履歴に記録したのにキューに残り、次の起動で二重になる。
+    &#47;&#47; この後に保存を始める 1 件は、閉じ始めたことを見てキューに残す
+    _isClosingStorage = true;
+    final queuedItemSaving = _queuedItemSaving;
+    if (queuedItemSaving != null) {
+      await queuedItemSaving;
+    }
+
     &#47;&#47; Hiveボックスを閉じる
     await _cacheBox?.close();
     await _queueBox?.close();
@@ -117,6 +151,9 @@
     await _idempotencyBox?.close();
     await _droppedRequestBox?.close();
     await _quarantinedRequestBox?.close();
+    await _legacyQueueBox?.close();
+    await _legacyQuarantineBox?.close();
+    await _legacyDroppedRequestBox?.close();
 
     &#47;&#47; HTTPクライアントを閉じる
     _httpClient?.close(force: true);
@@ -136,6 +173,21 @@
     _handler = null;
     &#47;&#47; 障害解析のため診断値は残し、実行制御状態のみ初期化する
     _resetRecoveryControlState();
+    &#47;&#47; 閉じた Box を共有しないよう、次の起動や Cookie API で初期化し直す
+    _keyStageFuture = null;
+    _keyStageCompleted = false;
+    _dataStageFuture = null;
+    _dataStageCompleted = false;
+    &#47;&#47; 移行を待っている旧 Box は、次の起動の段階 2 で改めて開いて予約し直す
+    _legacyQueueBox = null;
+    _legacyQuarantineBox = null;
+    _legacyDroppedRequestBox = null;
+    _pendingLegacyKeys.clear();
+    &#47;&#47; 停止後の getStats() が前回の件数を返さないよう、未確認件数のキャッシュを捨てる
+    _unacknowledgedDroppedCount = null;
+    _activeInstances.remove(this);
+    _isClosingStorage = false;
+    _finishStopCall();
     _lifecycleLock.release();
   }
 
@@ -179,7 +231,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

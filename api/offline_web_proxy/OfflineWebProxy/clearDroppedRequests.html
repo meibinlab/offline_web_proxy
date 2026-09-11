@@ -72,9 +72,11 @@
     
 <section class="desc markdown">
   <p>ドロップされたリクエストの履歴を全て削除します。</p>
+<p>暗号化する前の保存領域から移行を待っている履歴も削除します。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 履歴の削除に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 履歴の削除に失敗した場合。履歴のロックを
+30 秒以内に取得できなかった場合を含みます。</li>
 </ul>
 </section>
 
@@ -84,8 +86,13 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearDroppedRequests() async {
   try {
-    await _droppedRequestBox?.clear();
-    _unacknowledgedDroppedCount = null;
+    await _droppedRequestLock.synchronized(() async {
+      await _droppedRequestBox?.clear();
+      &#47;&#47; 利用者の意図は全件の削除のため、移行を待っている分も消す。
+      &#47;&#47; 移行と同じロックの中で消し、書き写しで暗号化 Box に残らないようにする。
+      await _clearLegacyBox(ProxyStorageBox.droppedRequests);
+      _unacknowledgedDroppedCount = null;
+    }, timeout: _storageLockTimeout);
   } catch (e) {
     throw QueueOperationException(&#39;clearDropped&#39;,
         &#39;ドロップされたリクエスト履歴の削除に失敗しました: $e&#39;, e is Exception ? e : null);
@@ -124,7 +131,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

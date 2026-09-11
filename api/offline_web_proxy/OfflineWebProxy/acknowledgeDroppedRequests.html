@@ -73,11 +73,14 @@
 <section class="desc markdown">
   <p>ドロップされたリクエストの履歴を確認済みにします。</p>
 <p>起動時に未確認の履歴を検知したあと、利用者へ提示し終えた時点で
-呼び出してください。履歴自体は削除しないため、内容は後から参照できます。</p>
+呼び出してください。履歴自体は削除しないため、内容は後から参照できます。
+暗号化する前の保存領域から移行を待っている履歴も確認済みにし、移行後に
+未確認へ戻らないようにします。</p>
 <p>Returns: 確認済みへ変更した件数。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 更新に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 更新に失敗した場合。履歴のロックを
+30 秒以内に取得できなかった場合を含みます。</li>
 </ul>
 </section>
 
@@ -87,26 +90,41 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;int&gt; acknowledgeDroppedRequests() async {
   try {
-    final box = _droppedRequestBox;
-    if (box == null || !box.isOpen) {
-      return 0;
-    }
+    return await _droppedRequestLock.synchronized(() async {
+      final excludedKeys =
+          _excludedLegacyKeys(ProxyStorageBox.droppedRequests);
+      final sources = [
+        (box: _droppedRequestBox, isLegacy: false),
+        (box: _legacyDroppedRequestBox, isLegacy: true),
+      ];
 
-    var updated = 0;
-    for (final key in box.keys.toList()) {
-      final data = box.get(key) as Map?;
-      if (data == null || data[&#39;acknowledged&#39;] == true) {
-        continue;
+      var updated = 0;
+      for (final source in sources) {
+        final box = source.box;
+        if (box == null || !box.isOpen) {
+          continue;
+        }
+
+        for (final key in box.keys.toList()) {
+          if (!source.isLegacy &amp;&amp; excludedKeys.contains(key.toString())) {
+            continue;
+          }
+
+          final data = box.get(key) as Map?;
+          if (data == null || data[&#39;acknowledged&#39;] == true) {
+            continue;
+          }
+
+          final updatedData = Map&lt;String, dynamic&gt;.from(data);
+          updatedData[&#39;acknowledged&#39;] = true;
+          await box.put(key, updatedData);
+          updated++;
+        }
       }
 
-      final updatedData = Map&lt;String, dynamic&gt;.from(data);
-      updatedData[&#39;acknowledged&#39;] = true;
-      await box.put(key, updatedData);
-      updated++;
-    }
-
-    _unacknowledgedDroppedCount = null;
-    return updated;
+      _unacknowledgedDroppedCount = null;
+      return updated;
+    }, timeout: _storageLockTimeout);
   } catch (e) {
     throw QueueOperationException(&#39;acknowledgeDropped&#39;,
         &#39;ドロップされたリクエストの確認状態の更新に失敗しました: $e&#39;, e is Exception ? e : null);
@@ -145,7 +163,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

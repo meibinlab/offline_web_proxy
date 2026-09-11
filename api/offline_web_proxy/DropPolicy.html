@@ -124,6 +124,10 @@ request is for the application.</p>
 <p>The request keeps its body, so an operator can resend it after fixing the
 cause, or discard it deliberately. Use this when losing a request means
 losing business data, such as a sales record.</p>
+<p>A request that alone exceeds <code>ProxyConfig.quarantineMaxBytes</code> is not
+quarantined. It is recorded in the dropped request history without its
+body, with the drop reason <code>quarantine_too_large</code>, and the requests
+already in quarantine are kept.</p>
   
 
 </dd>
@@ -294,7 +298,7 @@ losing business data, such as a sales record.</p>
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

@@ -77,7 +77,8 @@
 <p>Returns: Cookie情報の一覧。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/CookieOperationException-class.html">CookieOperationException</a> Cookieの取得に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/CookieOperationException-class.html">CookieOperationException</a> Cookieの取得に失敗した場合。暗号化した
+保存領域を使えない場合は、<a href="../../offline_web_proxy/StorageIntegrityException-class.html">StorageIntegrityException</a> を cause に持ちます。</li>
 </ul>
 </section>
 
@@ -148,7 +149,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

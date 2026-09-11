@@ -73,7 +73,7 @@
 
     <dl class="constructor-summary-list">
         <dt id="DroppedRequest" class="callable">
-          <span class="name"><a href="../offline_web_proxy/DroppedRequest/DroppedRequest.html">DroppedRequest</a></span><span class="signature">({<span class="parameter" id="-param-url"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span>, </span><span class="parameter" id="-param-method"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">method</span>, </span><span class="parameter" id="-param-droppedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">droppedAt</span>, </span><span class="parameter" id="-param-dropReason"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">dropReason</span>, </span><span class="parameter" id="-param-statusCode"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">statusCode</span>, </span><span class="parameter" id="-param-errorMessage"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">errorMessage</span>, </span><span class="parameter" id="-param-acknowledged"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">acknowledged</span> = <span class="default-value">false</span></span>})</span>
+          <span class="name"><a href="../offline_web_proxy/DroppedRequest/DroppedRequest.html">DroppedRequest</a></span><span class="signature">({<span class="parameter" id="-param-url"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span>, </span><span class="parameter" id="-param-method"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">method</span>, </span><span class="parameter" id="-param-droppedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">droppedAt</span>, </span><span class="parameter" id="-param-dropReason"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">dropReason</span>, </span><span class="parameter" id="-param-statusCode"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">statusCode</span>, </span><span class="parameter" id="-param-errorMessage"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">errorMessage</span>, </span><span class="parameter" id="-param-acknowledged"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">acknowledged</span> = <span class="default-value">false</span>, </span><span class="parameter" id="-param-pendingMigration"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">pendingMigration</span> = <span class="default-value">false</span></span>})</span>
         </dt>
         <dd>
           
@@ -118,7 +118,7 @@
 
 </dt>
 <dd>
-  ドロップ理由（"4xx_error", "5xx_error", "network_timeout"等）
+  ドロップ理由
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -155,6 +155,18 @@
 </dt>
 <dd>
   HTTPメソッド
+  <div class="features"><span class="feature">final</span></div>
+
+</dd>
+
+        <dt id="pendingMigration" class="property">
+  <span class="name"><a href="../offline_web_proxy/DroppedRequest/pendingMigration.html">pendingMigration</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
+  
+
+</dt>
+<dd>
+  暗号化する前の保存領域に残り、移行を待っているかどうか
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -286,7 +298,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

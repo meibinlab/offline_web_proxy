@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="API docs for the rebuiltBoxes property from the EncryptedStorageRecoveryResult class, for the Dart programming language.">
+  <title>rebuiltBoxes property - EncryptedStorageRecoveryResult class - offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../../static-assets/styles.css?v1">
+  <link rel="icon" href="../../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
+    <li><a href="../../offline_web_proxy/EncryptedStorageRecoveryResult-class.html">EncryptedStorageRecoveryResult</a></li>
+    <li class="self-crumb">rebuiltBoxes property</li>
+  </ol>
+  <div class="self-name">rebuiltBoxes</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;EncryptedStorageRecoveryResult-class-sidebar.html"
+    data-below-sidebar="">
+    <div>
+<h1><span class="kind-property">rebuiltBoxes</span> property 
+</h1></div>
+
+      <section class="multi-line-signature">
+        
+        <a href="https://api.flutter.dev/flutter/dart-core/Set-class.html">Set</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/ProxyStorageBox.html">ProxyStorageBox</a></span>&gt;</span>
+        <span class="name ">rebuiltBoxes</span>
+        <div class="features"><span class="feature">final</span></div>
+
+      </section>
+      
+<section class="desc markdown">
+  <p>作り直した Box です。</p>
+<p>先頭側が壊れた Box は、壊れた部分を捨て、鍵と一致する最初の記録から後ろを
+残しています。失われた記録の件数は分かりません。</p>
+<p>照合が時間の上限を超えた Box は、時間の上限を設けずに照合し直し、
+その結果で分けます。鍵と一致しなければ <a href="../../offline_web_proxy/EncryptedStorageRecoveryResult/deletedBoxes.html">deletedBoxes</a> に、
+先頭側が壊れていればここに含みます。先頭の記録が書きかけで鍵と一致する
+記録も無かったものは、0 バイトに切り詰めてここに含みます。何も残って
+いませんが、Hive が開くときにも同じく切り詰めるため、これによって
+失われる記録はありません。</p>
+</section>
+
+      
+<section class="summary source-code" id="source">
+  <h2><span>Implementation</span></h2>
+  <pre class="language-dart"><code class="language-dart">final Set&lt;ProxyStorageBox&gt; rebuiltBoxes;</code></pre>
+</section>
+
+
+</div> <!-- /.main-content -->
+
+<div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+  <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/EncryptedStorageRecoveryResult-class.html">EncryptedStorageRecoveryResult</a></li>
+    <li class="self-crumb">rebuiltBoxes property</li>
+</ol>
+
+
+  <h5>EncryptedStorageRecoveryResult class</h5>
+  <div id="dartdoc-sidebar-left-content"></div>
+</div><!--/.sidebar-offcanvas-->
+
+<div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+</div><!--/.sidebar-offcanvas-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.15.0
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../../static-assets/highlight.pack.js?v1"></script>
+<script src="../../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+

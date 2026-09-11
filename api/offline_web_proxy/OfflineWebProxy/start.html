@@ -77,7 +77,13 @@
 <p>Returns: 実際に使用されるポート番号。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/ProxyStartException-class.html">ProxyStartException</a> サーバ起動に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/ProxyStartException-class.html">ProxyStartException</a> サーバ起動に失敗した場合。既に稼働中、または
+起動処理中の場合を含みます。</li>
+<li><a href="../../offline_web_proxy/StorageIntegrityException-class.html">StorageIntegrityException</a> 暗号化した保存領域を使えない場合。
+<a href="../../offline_web_proxy/ProxyStartException-class.html">ProxyStartException</a> のサブクラスで、包まずに送出します。何も
+消していません。<a href="../../offline_web_proxy/StorageIntegrityException/failure.html">StorageIntegrityException.failure</a> で理由を判別し、
+必要なら利用者の確認を経て <a href="../../offline_web_proxy/OfflineWebProxy/recoverEncryptedStorage.html">recoverEncryptedStorage</a> を呼び出して
+ください。</li>
 <li><a href="../../offline_web_proxy/PortBindException-class.html">PortBindException</a> ポートバインドに失敗した場合。</li>
 </ul>
 </section>
@@ -90,7 +96,15 @@
   if (_isRunning) {
     throw ProxyStartException(&#39;Proxy server is already running&#39;, null);
   }
+  if (_isStarting) {
+    throw ProxyStartException(&#39;Proxy server is already starting&#39;, null);
+  }
 
+  _isStarting = true;
+  _activeInstances.add(this);
+  &#47;&#47; 前回の stop() が残した停止中フラグを下ろし、キュー消化がすぐ抜け続けないようにする
+  _isStopping = false;
+  _isClosingStorage = false;
   try {
     if (_eventController.isClosed) {
       _eventController = StreamController&lt;ProxyEvent&gt;.broadcast();
@@ -106,12 +120,16 @@
     _validateHealthCheckPath();
     _validateStatusPath();
     _validateAutoReloadSettings();
+    _validateRetentionSettings();
     _validateMirroredOrigins();
     _compileConfiguredPatterns();
     _resetRecoveryState();
 
     &#47;&#47; ストレージを初期化
     await _initializeStorage();
+
+    &#47;&#47; 隔離とドロップ履歴の保持上限を判定する（ロックを取れない場合は定期処理へ回す）
+    await _enforceRetentionLimits();
 
     &#47;&#47; 旧ポート URL の読み替え対象として、直前のバインドポートを記録
     final persistedPort = await _loadPersistedPortForHost(_config!.host);
@@ -165,6 +183,11 @@
   } catch (e) {
     throw ProxyStartException(
         &#39;Failed to start proxy server: $e&#39;, e is Exception ? e : null);
+  } finally {
+    _isStarting = false;
+    if (!_isRunning) {
+      _activeInstances.remove(this);
+    }
   }
 }</code></pre>
 </section>
@@ -200,7 +223,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

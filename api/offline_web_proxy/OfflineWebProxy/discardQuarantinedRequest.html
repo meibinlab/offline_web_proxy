@@ -75,10 +75,12 @@
   <p>隔離されたリクエストを破棄します。</p>
 <p>内容を確認したうえで送信しないと判断した場合に呼び出してください。</p>
 <p><code>id</code> <a href="../../offline_web_proxy/OfflineWebProxy/getQuarantinedRequests.html">getQuarantinedRequests</a> が返した識別子。</p>
-<p>Returns: 破棄した場合は <code>true</code>。該当が無い場合は <code>false</code>。</p>
+<p>Returns: 破棄した場合は <code>true</code>。該当が無い場合と、暗号化する前の保存領域から
+  移行を待っている項目の場合は <code>false</code>。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 操作に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 操作に失敗した場合。隔離のロックを
+30 秒以内に取得できなかった場合を含みます。</li>
 </ul>
 </section>
 
@@ -87,18 +89,8 @@
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;bool&gt; discardQuarantinedRequest(String id) async {
-  try {
-    final box = _quarantinedRequestBox;
-    if (box == null || !box.isOpen || !box.containsKey(id)) {
-      return false;
-    }
-
-    await box.delete(id);
-    return true;
-  } catch (e) {
-    throw QueueOperationException(&#39;discardQuarantined&#39;,
-        &#39;隔離されたリクエストの破棄に失敗しました: $e&#39;, e is Exception ? e : null);
-  }
+  return await _discardQuarantinedRequestInternal(id) ==
+      _QuarantineOperationResult.done;
 }</code></pre>
 </section>
 
@@ -133,7 +125,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

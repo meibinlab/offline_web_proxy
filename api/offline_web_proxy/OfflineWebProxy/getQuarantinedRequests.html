@@ -77,7 +77,10 @@
 <a href="../../offline_web_proxy/ProxyConfig/dropPolicy.html">ProxyConfig.dropPolicy</a> が <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a> の場合に退避した
 ものを返します。本文は返しません。</p>
 <p><code>limit</code> 取得する最大件数。</p>
-<p>Returns: 隔離されているリクエストの一覧。隔離した順に並びます。</p>
+<p>Returns: 隔離されているリクエストの一覧。隔離した日時（<code>quarantinedAt</code>）の
+  古い順に並び、<code>limit</code> は並べた後の先頭からの件数です。暗号化する前の
+  保存領域から移行を待っている項目も含み、その項目は
+  <a href="../../offline_web_proxy/QuarantinedRequest/pendingMigration.html">QuarantinedRequest.pendingMigration</a> が <code>true</code> になります。</p>
 <p>Throws:</p>
 <ul>
 <li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 取得に失敗した場合。</li>
@@ -94,29 +97,18 @@
       return const &lt;QuarantinedRequest&gt;[];
     }
 
-    final box = _quarantinedRequestBox;
-    if (box == null || !box.isOpen) {
-      return const &lt;QuarantinedRequest&gt;[];
-    }
-
-    final requests = &lt;QuarantinedRequest&gt;[];
-    var index = 0;
-    for (final key in box.keys) {
-      final data = box.get(key) as Map?;
-      if (data != null) {
-        requests.add(_mapToQuarantinedRequest(key.toString(), data));
-        if (limit != null &amp;&amp; requests.length &gt;= limit) {
-          break;
-        }
-      }
-
-      index++;
-      if (index % 50 == 0) {
-        await Future.delayed(Duration.zero);
-      }
-    }
-
-    return requests;
+    final entries = await _collectStoredEntries(
+      ProxyStorageBox.quarantine,
+      &#39;quarantinedAt&#39;,
+    );
+    final selected = limit == null ? entries : entries.take(limit);
+    return selected
+        .map((entry) =&gt; _mapToQuarantinedRequest(
+              entry.key,
+              entry.data,
+              pendingMigration: entry.pendingMigration,
+            ))
+        .toList();
   } catch (e) {
     throw QueueOperationException(&#39;getQuarantined&#39;,
         &#39;隔離されたリクエストの取得に失敗しました: $e&#39;, e is Exception ? e : null);
@@ -155,7 +147,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

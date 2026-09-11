@@ -66,7 +66,9 @@
 <li>Fallback cache limited to offline and unreachable-upstream recovery</li>
 <li>Offline fallback page that reloads itself once the upstream is reachable again, with a retry button</li>
 <li>Offline queue for POST, PUT, and DELETE requests</li>
-<li>AES-256 encrypted cookie persistence with restore support</li>
+<li>AES-256 encrypted persistence of cookies, the queue, the quarantine store and the dropped history, with cookie restore support</li>
+<li>Verification of stored data against the encryption key, and a recovery API for a lost key</li>
+<li>Retention limits for the quarantine store and the dropped history (count, age and total size)</li>
 <li>WebView navigation helper APIs for same-origin, external, and new-window flows</li>
 <li>Connection recovery that verifies responsiveness on resume and rebinds automatically</li>
 <li>Runtime stats and event stream for monitoring and debugging</li>
@@ -80,7 +82,7 @@
 <h2 id="installation">Installation</h2>
 <p>Add the package to your app:</p>
 <pre class="language-yaml"><code class="language-yaml">dependencies:
-  offline_web_proxy: ^0.12.0
+  offline_web_proxy: ^0.15.0
   # Example app and CI currently use this WebView version range.
   webview_flutter: ^4.8.0
 </code></pre>
@@ -225,6 +227,11 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
     body: '{"queued":true}',
   ),
   dropPolicy: DropPolicy.quarantine,
+  quarantineMaxCount: 1000,
+  quarantineRetention: Duration(days: 30),
+  quarantineMaxBytes: 20 * 1024 * 1024,
+  droppedRequestMaxCount: 1000,
+  droppedRequestRetention: Duration(days: 30),
   enableIdempotencyKey: true,
   idempotencyHeaderName: 'Idempotency-Key',
   idempotencyRetention: Duration(hours: 24),
@@ -290,7 +297,8 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>upstreamFailureThreshold</code> is how many consecutive unreachable attempts stop forwarding. It prevents every request from waiting for the timeout when the link layer is up but the upstream is down. Set it to <code>0</code> to disable the behavior.</li>
 <li><code>upstreamProbePath</code>, <code>upstreamProbeMethod</code>, <code>upstreamProbeTimeout</code> and <code>upstreamProbeBackoffSeconds</code> control the reachability probe used while forwarding is stopped. Any response counts as reachable, regardless of status code.</li>
 <li><code>queuedResponse</code> and <code>offlineMissResponse</code> define the responses the proxy generates itself. Both default to JSON so that <code>response.json()</code> succeeds in the web app.</li>
-<li><code>dropPolicy</code> decides what happens to an update request the upstream rejected with 4xx. The default <code>quarantine</code> keeps it, body included, so <code>getQuarantinedRequests()</code> can surface it for a resend-or-discard decision. <code>drop</code> discards it and keeps only a history entry, as before.</li>
+<li><code>dropPolicy</code> decides what happens to an update request the upstream rejected with 4xx. The default <code>quarantine</code> keeps it, body included, so <code>getQuarantinedRequests()</code> can surface it for a resend-or-discard decision (a request that alone exceeds <code>quarantineMaxBytes</code> is not quarantined; it is recorded in the dropped history as <code>quarantine_too_large</code>, without its body). <code>drop</code> discards it and keeps only a history entry, as before.</li>
+<li><code>quarantineMaxCount</code> (1000 by default), <code>quarantineRetention</code> (30 days), <code>quarantineMaxBytes</code> (20 MB), <code>droppedRequestMaxCount</code> (1000) and <code>droppedRequestRetention</code> (30 days) limit what the quarantine store and the dropped history keep. <code>0</code> (<code>Duration.zero</code>) removes a limit, and a negative value makes <code>start()</code> throw <code>ProxyStartException</code>. See <a href="#retention-limits-for-quarantine-and-dropped-history">Retention limits for quarantine and dropped history</a>.</li>
 <li><code>enableIdempotencyKey</code> attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. <strong>Deduplication itself must be implemented on the upstream server.</strong></li>
 <li><code>forceCachePaths</code> lists the paths stored even when the response says <code>Cache-Control: no-store</code>. On a server that sends <code>no-store</code> everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes <code>no-store</code> handling proxy-wide.
 <ul>
@@ -491,6 +499,7 @@ print('failures=${diagnostics.consecutiveUpstreamFailures} '
 <li><code>isOnline</code> is the link-layer decision and <code>onlineDecisionSource</code> says what it is based on: the value read at startup, or a later change event.</li>
 <li><code>isUpstreamReachable</code> is whether requests can actually be forwarded, reflecting both the link layer and the circuit breaker.</li>
 <li><code>consecutiveUpstreamFailures</code> and <code>lastUpstreamSuccessAt</code> show how long the upstream has been out of reach.</li>
+<li><code>lastCookieStorageDiscardedAt</code> and <code>lastCookieStorageDiscardReason</code> show when and why this instance discarded the cookie storage (see <a href="#when-the-encryption-key-is-lost">When the encryption key is lost</a>).</li>
 </ul>
 <h3 id="reading-resend-outcomes">Reading resend outcomes</h3>
 <p>A queued request is resent in the background, so its response never reaches the page that made it. Subscribe to the event, or read the recent outcomes, when the app has to reconcile what the upstream recorded.</p>
@@ -536,6 +545,7 @@ if (!status.isOnline) {
 <li><code>GET</code> only, never forwarded upstream, excluded from statistics, and omitted from the request log.</li>
 <li>Only callers on the proxy's own origin are served. A request carrying another <code>Origin</code> is answered with <code>403</code>, and <code>Access-Control-Allow-Origin: *</code> is never attached.</li>
 <li>Setting <code>statusPath</code> to an empty string disables it, which also stops the auto-reload of the fallback and <code>504</code> pages.</li>
+<li><code>queueLength</code>, <code>quarantinedCount</code> and <code>unacknowledgedDroppedCount</code> include entries still waiting for migration from the storage of 0.14.0 or earlier (see <a href="#migrating-from-0140-or-earlier">Migrating from 0.14.0 or earlier</a>).</li>
 </ul>
 <h3 id="operating-the-quarantine-store-from-the-page">Operating the quarantine store from the page</h3>
 <p>A sale quarantined by a 4xx is resent once the cause — a closed stocktake, for example — is resolved. When the person doing that stands at the screen, <code>enableAdminApi: true</code> exposes the same operations over HTTP.</p>
@@ -565,6 +575,18 @@ if (!status.isOnline) {
 </tr>
 </tbody>
 </table>
+<ul>
+<li>The list is ordered by <code>quarantinedAt</code>, oldest first, and every item carries <code>pendingMigration</code>.</li>
+<li>Responses to resending and discarding:
+<ul>
+<li>Success: <code>200</code> with <code>{"retried": true}</code> or <code>{"discarded": true}</code></li>
+<li>No matching item: <code>404</code></li>
+<li>An item still waiting for migration from the storage of 0.14.0 or earlier (<code>pendingMigration: true</code>): <code>409</code>. It cannot be operated on until the migration finishes</li>
+<li>With <code>404</code> and <code>409</code>, <code>retried</code> or <code>discarded</code> is <code>false</code> and <code>error</code> carries the reason</li>
+<li>The quarantine lock cannot be acquired within 30 seconds: <code>500</code> (<code>text/plain</code>)</li>
+</ul>
+</li>
+</ul>
 <pre class="language-js"><code class="language-js">const res = await fetch('/__offline_web_proxy/admin/quarantine');
 const { requests } = await res.json();
 
@@ -596,7 +618,13 @@ await proxy.clearCookies(domain: 'example.com');
 <ul>
 <li><code>getCookies()</code> returns masked values for inspection.</li>
 <li><code>getCookieHeaderForUrl()</code> only accepts URLs that match the configured origin.</li>
-<li>If the secure-storage encryption key is lost, previously encrypted cookies can no longer be decrypted and the user must sign in again.</li>
+<li>Stored data is checked against the encryption key in <code>start()</code> and in a cookie API called before <code>start()</code> or after <code>stop()</code>. See <a href="#when-the-encryption-key-is-lost">When the encryption key is lost</a>.
+<ul>
+<li>When the key is unusable (missing, unreadable or invalid) and only the cookie box has content, or when the other boxes are fine and only the cookie box does not match the key, is damaged at its head or had its check aborted, the cookies are discarded and startup continues; the user must sign in again.</li>
+<li>When a queue, quarantine or dropped-history box does not match the key, is damaged at its head or had its check aborted, or when the key is unusable (missing, unreadable or invalid) and one of those boxes has content, startup fails without deleting anything.</li>
+<li>When the check fails in a cookie API called before <code>start()</code> or after <code>stop()</code>, the API throws <code>CookieOperationException</code> with <code>StorageIntegrityException</code> as its <code>cause</code>.</li>
+</ul>
+</li>
 </ul>
 <h2 id="cache-queue-and-monitoring-apis">Cache, Queue, and Monitoring APIs</h2>
 <pre class="language-dart"><code class="language-dart">await proxy.clearCache();
@@ -645,9 +673,327 @@ proxy.events.listen((event) {
 <li>Online GET/HEAD requests are forwarded upstream and are not short-circuited by the proxy cache.</li>
 <li>The proxy cache is used only as a substitute response for offline requests or GET/HEAD requests that could not reach the upstream. Connection refused, a dropped connection, and exceeding <code>requestTimeout</code> are covered, while a 4xx / 5xx returned by the upstream is passed through. When no eligible cache exists, 504 is returned.</li>
 <li><code>warmupCache()</code> is intended to prepare fallback responses in advance, not to optimize normal online browsing. While the upstream is considered unreachable, it returns a failure entry for each path instead of waiting, and its results feed the reachability decision.</li>
+<li><code>getQueuedRequests()</code>, <code>getQuarantinedRequests()</code> and <code>getDroppedRequests()</code> are ordered by the stored time (<code>queuedAt</code>, <code>quarantinedAt</code>, <code>droppedAt</code>), oldest first.</li>
+<li>The <code>limit</code> of <code>getQuarantinedRequests()</code> and <code>getDroppedRequests()</code> counts from the head after sorting.</li>
+<li><code>getQueuedRequests()</code> replaces the value of any header that may carry secrets with <code>***</code>.
+<ul>
+<li>Masked: with the name lower-cased and <code>_</code> read as <code>-</code>, a name equal to <code>cookie</code>, <code>authorization</code> or <code>proxy-authorization</code>, or containing any of <code>auth</code>, <code>token</code>, <code>secret</code>, <code>session</code>, <code>csrf</code>, <code>xsrf</code>, <code>key</code>, <code>pass</code>, <code>credential</code>, <code>signature</code>, <code>jwt</code> or <code>cookie</code></li>
+<li>Never masked: the header named by <code>idempotencyHeaderName</code></li>
+<li>Only the headers the client sent are stored; the headers the proxy adds are attached when sending</li>
+<li><strong>The query of the URL is not masked</strong></li>
+<li>Resends use the stored values</li>
+</ul>
+</li>
+<li>An item whose <code>pendingMigration</code> is <code>true</code> is still waiting for migration from the storage of 0.14.0 or earlier (see <a href="#migrating-from-0140-or-earlier">Migrating from 0.14.0 or earlier</a>).</li>
 </ul>
 <p>The event stream is useful for observing cache hits, queue activity, request-resolution metadata, and redirect handling metadata. <code>redirectHandled</code> includes fields such as <code>redirectStatusCode</code>, <code>locationHeader</code>, <code>redirectAction</code>, <code>resolvedProxyUrl</code>, and <code>externalUrl</code>.
 Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailable</code>, which carry <code>cause</code>, <code>previousPort</code>, <code>newPort</code>, <code>downtimeMs</code>, <code>restartCount</code>, and <code>probeError</code>.</p>
+<h2 id="data-stored-on-the-device">Data Stored on the Device</h2>
+<h3 id="what-is-stored">What is stored</h3>
+<p>The proxy stores data in Hive boxes and in secure storage. In an encrypted box only the values are encrypted; the box keys (the IDs of queued requests and the like, and the domain, path and name of a cookie) are stored in the clear. <strong>The queue and the quarantine store keep the request headers and body as they were sent.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Location</th>
+<th>Content</th>
+<th>Encryption</th>
+<th>Retention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>proxy_cookies_secure</code></td>
+<td>Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on</td>
+<td>Values only (AES-256)</td>
+<td>An expired cookie is removed when the cookies to send are looked up. <code>clearCookies()</code> removes them</td>
+</tr>
+<tr>
+<td><code>proxy_queue_secure</code></td>
+<td>Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on). Keys are IDs derived from the time the request was stored</td>
+<td>Values only (AES-256)</td>
+<td>Until the request is sent, or moved to the quarantine store or the dropped history. No limit</td>
+</tr>
+<tr>
+<td><code>proxy_quarantined_requests_secure</code></td>
+<td>Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason</td>
+<td>Values only (AES-256)</td>
+<td>Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default</td>
+</tr>
+<tr>
+<td><code>proxy_dropped_requests_secure</code></td>
+<td>History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged). No headers or body</td>
+<td>Values only (AES-256)</td>
+<td>30 days by default. The count limit (1000 by default) applies to acknowledged entries only</td>
+</tr>
+<tr>
+<td><code>proxy_cache</code></td>
+<td>Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL</td>
+<td>None</td>
+<td>Entries past their stale period are removed every hour</td>
+</tr>
+<tr>
+<td><code>proxy_web_storage</code></td>
+<td>Web storage snapshot received from the page when <code>enableWebStorageInheritance</code> is on</td>
+<td>None</td>
+<td>Until the next snapshot overwrites it</td>
+</tr>
+<tr>
+<td><code>proxy_idempotency</code></td>
+<td>Idempotency keys that reached the upstream, with the time they were recorded</td>
+<td>None</td>
+<td>Keys older than <code>idempotencyRetention</code> (24 hours by default) are removed every hour</td>
+</tr>
+<tr>
+<td><code>proxy_port_preferences</code></td>
+<td>The port last bound for each host</td>
+<td>None</td>
+<td>Until the next bind overwrites it</td>
+</tr>
+<tr>
+<td><code>offline_web_proxy.cookie_box_encryption_key</code> in secure storage</td>
+<td>The key of the encrypted boxes, shared by cookies, the queue, the quarantine store and the dropped history</td>
+<td>Kept in secure storage</td>
+<td>Until <code>recoverEncryptedStorage()</code> deletes it, or an unusable key (missing, unreadable or invalid) is replaced by a new one. A new key is written when no queue, quarantine or dropped-history box has content (see <a href="#when-the-encryption-key-is-lost">When the encryption key is lost</a>)</td>
+</tr>
+<tr>
+<td><code>proxy_queue</code>, <code>proxy_quarantined_requests</code>, <code>proxy_dropped_requests</code>, <code>proxy_cookies</code></td>
+<td>Content stored in the clear by 0.14.0 or earlier (cookies: before 0.4.0)</td>
+<td>None</td>
+<td>Deleted after migration to the encrypted boxes. The old queue, quarantine and dropped-history boxes are emptied before deletion</td>
+</tr>
+</tbody>
+</table>
+<h3 id="retention-limits-for-quarantine-and-dropped-history">Retention limits for quarantine and dropped history</h3>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>quarantineMaxCount</code></td>
+<td>1000</td>
+<td>Moves the oldest requests beyond the limit to the dropped history (<code>dropReason: quarantine_limit</code>)</td>
+</tr>
+<tr>
+<td><code>quarantineRetention</code></td>
+<td>30 days</td>
+<td>Moves requests older than this, counted from <code>quarantinedAt</code>, to the dropped history (<code>quarantine_expired</code>)</td>
+</tr>
+<tr>
+<td><code>quarantineMaxBytes</code></td>
+<td>20 MB</td>
+<td>Estimated total of bodies and headers. Moves the oldest requests beyond it to the dropped history (<code>quarantine_limit</code>)</td>
+</tr>
+<tr>
+<td><code>droppedRequestMaxCount</code></td>
+<td>1000</td>
+<td>Removes the oldest acknowledged entries beyond the limit. Unacknowledged entries are never removed by count</td>
+</tr>
+<tr>
+<td><code>droppedRequestRetention</code></td>
+<td>30 days</td>
+<td>Removes entries older than this, counted from <code>droppedAt</code>, acknowledged or not</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>0</code> (<code>Duration.zero</code>) removes that limit. A negative value makes <code>start()</code> throw <code>ProxyStartException</code>.</li>
+<li>A request leaving the quarantine store is recorded in the dropped history before it is removed, keeping the <code>statusCode</code> and <code>errorMessage</code> it was quarantined with. <code>requestDropped</code> carries its <code>quarantineId</code>.</li>
+<li>A single request larger than <code>quarantineMaxBytes</code> neither enters the quarantine store nor pushes others out. Its body is dropped, it is recorded in the dropped history as <code>quarantine_too_large</code>, and it is removed from the queue.</li>
+<li>"Oldest" follows the stored time (<code>quarantinedAt</code>, <code>droppedAt</code>).</li>
+<li>The limits are checked at startup, whenever a quarantined request or a history entry is added, after a deferred migration, and every hour.
+<ul>
+<li>They also apply to the quarantine store and dropped history carried over from 0.14.0 or earlier (see <a href="#migrating-from-0140-or-earlier">Migrating from 0.14.0 or earlier</a>).</li>
+<li>Events raised by the check at startup do not reach an app that subscribes after <code>start()</code>; <code>ProxyStats.unacknowledgedDroppedCount</code> still shows the result.</li>
+</ul>
+</li>
+<li>Hive deletes logically. The boxes are compacted after the checks at startup, after a deferred migration and every hour, but erasure from flash storage is not guaranteed.</li>
+<li>Hive loads every value into memory when it opens a box, so opening the quarantine box may briefly use about twice <code>quarantineMaxBytes</code>.</li>
+<li>The queue itself has no limit, so unsent business data is never thrown away.</li>
+</ul>
+<h3 id="when-the-encryption-key-is-lost">When the encryption key is lost</h3>
+<p>The encrypted boxes share one key kept in secure storage. Hive truncates a box opened with the wrong key, so before opening the boxes the proxy reads their files, checks them against the key, and acts as follows. The check runs in <code>start()</code> and in a cookie API called before <code>start()</code> or after <code>stop()</code> (after <code>stop()</code>, the next <code>start()</code> or cookie API checks again).</p>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>The key cannot be read for now, for example while the device is locked (iOS / macOS)</td>
+<td>Startup fails with <code>StorageIntegrityException</code> (<code>temporarilyUnavailable</code>). Nothing is deleted</td>
+</tr>
+<tr>
+<td>The key is present and every encrypted box with content matches it (an ordinary update from 0.14.0)</td>
+<td>Starts as usual</td>
+</tr>
+<tr>
+<td>No encrypted box has content (including an update from 0.14.0 whose cookie box is empty)</td>
+<td>With a key, starts as usual. With a missing, unreadable or invalid key, a new key is written and the proxy starts</td>
+</tr>
+<tr>
+<td>The key is present, the queue, quarantine and dropped-history boxes are fine, and the cookie box does not match the key, is damaged at its head or had its check aborted</td>
+<td>The cookie box is discarded and startup continues. The user must sign in again</td>
+</tr>
+<tr>
+<td>The key is unusable (missing or unreadable after rereading, or invalid) and only the cookie box has content</td>
+<td>The cookie box is discarded, a new key is written, and startup continues. The user must sign in again</td>
+</tr>
+<tr>
+<td>The key is present and a queue, quarantine or dropped-history box does not match it, is damaged at its head or had its check aborted</td>
+<td>Startup fails with <code>StorageIntegrityException</code>. Nothing is deleted</td>
+</tr>
+<tr>
+<td>The key is unusable and a queue, quarantine or dropped-history box has content</td>
+<td>Startup fails with <code>StorageIntegrityException</code>. Nothing is deleted</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Discarding the cookie box raises <code>ProxyEventType.cookieStorageDiscarded</code> with the reason in <code>data['reason']</code>.
+<ul>
+<li>The discard happens inside <code>start()</code> or a cookie API called before <code>start()</code> or after <code>stop()</code>, so an app that subscribes later never receives the event.</li>
+<li>After startup, read <code>lastCookieStorageDiscardedAt</code> and <code>lastCookieStorageDiscardReason</code> from <code>getDiagnostics()</code>.</li>
+<li>Deletion by the recovery API raises no such event and leaves the diagnostics unchanged.</li>
+</ul>
+</li>
+<li>When the check fails in a cookie API (such as <code>restoreCookies()</code>) called before <code>start()</code> or after <code>stop()</code>, the API throws <code>CookieOperationException</code> with <code>StorageIntegrityException</code> as its <code>cause</code>. The failure is not kept; the next call or <code>start()</code> checks again.</li>
+<li><code>StorageIntegrityException.failure</code> tells why:
+<ul>
+<li><code>temporarilyUnavailable</code>: protected data cannot be read, for example while the device is locked (iOS / macOS). The read result is not used to decide whether a key exists</li>
+<li><code>keyUnreadable</code>: reading the key keeps throwing</li>
+<li><code>keyMissing</code>: there is no key</li>
+<li><code>keyInvalid</code>: the key is malformed (empty, not Base64, or not 32 bytes)</li>
+<li><code>keyMismatch</code>, <code>corrupted</code>, <code>verificationAborted</code>: a box does not match the key, a box is damaged at its head, or checking a box exceeded the time limit</li>
+<li><code>keyWriteFailed</code>: a new key could not be written</li>
+</ul>
+</li>
+<li>When an encrypted box has content and the key is missing or unreadable, the key is read up to three more times, 500 milliseconds apart. A value read even once is used. If the results mix <code>null</code> and errors, or the device gets locked in the meantime, the key is treated as temporarily unavailable.</li>
+<li>A box whose first record does not match the key, or is only partly written, is searched in full for a record that matches the key, in a separate isolate.
+<ul>
+<li>A match further in means the box is damaged at its head.</li>
+<li>No match after a first record that does not match the key means the box does not match the key.</li>
+<li>No match after a partly written first record means the box stopped during its first write, and it is opened as usual.</li>
+<li>The search takes at most 10 seconds per box, and the four boxes are checked one after another. A longer search is aborted.</li>
+<li>When a queue, quarantine or dropped-history box is damaged at its head, does not match the key or had its check aborted, startup fails (<code>corrupted</code>, <code>keyMismatch</code>, <code>verificationAborted</code>) and nothing is deleted. When only the cookie box is in that state, the cookie box is discarded and startup continues.</li>
+</ul>
+</li>
+<li>A queue, quarantine or dropped-history box damaged at its head is not repaired at startup, because repairing it loses the records at its head. Confirm with the user and call <code>recoverEncryptedStorage()</code>.</li>
+<li>The recovery API cannot fix <code>temporarilyUnavailable</code> or <code>keyWriteFailed</code>. Retry <code>start()</code> later.</li>
+</ul>
+<h3 id="recovering-encrypted-storage">Recovering encrypted storage</h3>
+<p>Call <code>recoverEncryptedStorage()</code> when <code>start()</code> fails with <code>StorageIntegrityException</code> and retries do not help, after explaining to the user what will be lost and obtaining consent.</p>
+<pre class="language-dart"><code class="language-dart">// Example for when StorageIntegrityException persists after retrying start()
+try {
+  await proxy.start(config: config);
+} on StorageIntegrityException catch (error) {
+  if (error.failure == StorageIntegrityFailure.temporarilyUnavailable ||
+      error.failure == StorageIntegrityFailure.keyWriteFailed) {
+    // The recovery API cannot fix these. Retry start() later.
+    rethrow;
+  }
+
+  // Recover only after explaining what will be lost and obtaining consent.
+  // askUserToConfirm is a placeholder for a function the app provides.
+  if (!await askUserToConfirm(error.failure)) {
+    rethrow;
+  }
+  final result = await proxy.recoverEncryptedStorage();
+  if (!result.performed &amp;&amp;
+      result.rejection != StorageRecoveryRejection.startWillSucceed) {
+    // temporarilyUnavailable / proxyActive: retry later
+    rethrow;
+  }
+  await proxy.start(config: config);
+}
+</code></pre>
+<ul>
+<li>Right before deleting anything, the recovery API reads the key again and checks the boxes with the same time limit as <code>start()</code>, then acts as follows.
+<ul>
+<li>Key present and no problem in the queue, quarantine or dropped-history boxes: nothing is done and <code>startWillSucceed</code> is returned, because <code>start()</code> discards a problematic cookie box on its own.</li>
+<li>Key present and a problem in some queue, quarantine or dropped-history box: the key is kept, and every box, the cookie box included, is handled as follows.
+<ul>
+<li>A box that does not match the key is deleted (<code>deletedBoxes</code>).</li>
+<li>A box damaged at its head is rebuilt from the first record that matches the key (<code>rebuiltBoxes</code>). <strong>The records at its head are lost, and how many is unknown.</strong></li>
+<li>A box whose check exceeded the time limit is checked again without a time limit after the boxes are closed, and handled by that result.
+<ul>
+<li>When it does not match the key, it is deleted (<code>deletedBoxes</code>).</li>
+<li>When it is damaged at its head, it is rebuilt (<code>rebuiltBoxes</code>).</li>
+<li>When its first record is only partly written and no record matches the key, it is truncated to 0 bytes (<code>rebuiltBoxes</code>). Hive would truncate it on open anyway, so nothing is lost.</li>
+</ul>
+</li>
+<li>A box with content and no problem is kept (<code>keptBoxes</code>).</li>
+</ul>
+</li>
+<li>Key malformed, or missing or unreadable (when an encrypted box has content, still so after rereading):
+<ul>
+<li>When a queue, quarantine or dropped-history box has content, every encrypted box (cookies, queue, quarantine, dropped history) is deleted, and then the key (<code>keyDeleted</code>). <strong>Cookies, and with them the sign-in state, are lost as well.</strong></li>
+<li>When no queue, quarantine or dropped-history box has content (only the cookie box has content, or no box has any), nothing is deleted and <code>startWillSucceed</code> is returned, because <code>start()</code> discards the cookie box or writes a new key on its own. A startup that failed with <code>keyWriteFailed</code> falls into this case too.</li>
+</ul>
+</li>
+<li>The key cannot be read for now: <code>temporarilyUnavailable</code>. A proxy in this isolate is running or starting: <code>proxyActive</code>. Nothing is done in either case.</li>
+</ul>
+</li>
+<li>The number of encrypted records cannot be read, so the result does not carry it. <strong>After startup fails with <code>StorageIntegrityException</code>, <code>getStats()</code> reports zero for the queue, quarantine and dropped-history counts, so do not base the confirmation screen on it.</strong></li>
+<li>Recover from <code>keyUnreadable</code> or <code>keyMissing</code> only when it persists across retries. A device restored from an Android backup can end up in either state (not verified on a device).</li>
+<li>The plain boxes of 0.14.0 or earlier are not deleted.</li>
+<li>After recovery, <code>start()</code> can be called without restarting the process.</li>
+<li>An unexpected failure, such as a box file or the key that cannot be deleted, throws <code>StorageRecoveryException</code>.
+<ul>
+<li>Running the recovery again carries out the rest. Boxes already deleted or rebuilt by an earlier run are not in the new <code>deletedBoxes</code> or <code>rebuiltBoxes</code>.</li>
+<li>When, on the path for an unusable key, only deleting the key failed after the encrypted boxes were deleted, running it again returns <code>startWillSucceed</code>. The next <code>start()</code> replaces the unusable key.</li>
+</ul>
+</li>
+<li>When the host app calls <code>FlutterSecureStorage().deleteAll()</code> with the default options, this key is deleted too.</li>
+</ul>
+<h3 id="migrating-from-0140-or-earlier">Migrating from 0.14.0 or earlier</h3>
+<p>Starting with 0.15.0, the queue, the quarantine store and the dropped history are stored in encrypted boxes with new names (<code>proxy_queue_secure</code>, <code>proxy_quarantined_requests_secure</code>, <code>proxy_dropped_requests_secure</code>). The plain boxes of 0.14.0 or earlier (<code>proxy_queue</code>, <code>proxy_quarantined_requests</code>, <code>proxy_dropped_requests</code>) are migrated automatically. Their keys are kept, so <code>X-Offline-Queue-Id</code> and the quarantine IDs do not change.</p>
+<ul>
+<li>When the key already exists, as in an ordinary update from 0.14.0, the boxes are migrated inside <code>start()</code> before resending begins.</li>
+<li>When the proxy instance generated the key itself (including in a cookie API called before <code>start()</code>), the migration is put off until 30 seconds after the key was generated, on every platform.
+<ul>
+<li>Secure storage on Android writes to disk asynchronously, so reading the key back in the same process does not prove it was written.</li>
+<li>Whether iOS and other platforms commit the write immediately has not been verified on devices either.</li>
+<li>With no way to confirm that the write was committed, the proxy waits instead. The wait does not guarantee the commit (not verified on a device).</li>
+</ul>
+</li>
+<li>While the migration waits:
+<ul>
+<li>Resending from the encrypted queue continues. Requests in the old queue are not sent until they are migrated, so they go after the others. Once migrated, they are sent in stored-time order.</li>
+<li><code>getStats()</code>, the counts of the status endpoint, and lists such as <code>getQueuedRequests()</code> include the old boxes, with <code>pendingMigration</code> set to <code>true</code> on those items.</li>
+<li>A quarantined request in the old box can be neither resent nor discarded: <code>retryQuarantinedRequest()</code> and <code>discardQuarantinedRequest()</code> return <code>false</code>, and the administrative endpoints answer <code>409</code>.</li>
+<li><code>acknowledgeDroppedRequests()</code>, <code>clearQuarantinedRequests()</code> and <code>clearDroppedRequests()</code> also apply to the old boxes.</li>
+</ul>
+</li>
+<li>If the file of an old box cannot be deleted, the box has already been emptied, so processing continues and <code>errorOccurred</code> is raised with <code>operation: legacyStorageDelete</code>.
+<ul>
+<li>When an old box is deleted inside <code>start()</code> (the migration when the key already exists, and the deletion of an old box left empty), an app that subscribes after <code>start()</code> does not receive this event.</li>
+<li>An old box left empty is deleted again by the next <code>start()</code>.</li>
+</ul>
+</li>
+<li><strong>The default retention limits also apply to the quarantine store and dropped history carried over from 0.14.0 or earlier, at the first startup after the update</strong> (after the migration, when it is deferred).
+<ul>
+<li>Quarantined requests beyond the limits move to the dropped history, which keeps neither their body nor their headers.</li>
+<li>Dropped history entries older than 30 days are removed even when unacknowledged. Acknowledged entries beyond the count limit are removed as well.</li>
+<li>To keep them, set the corresponding settings (<code>quarantineMaxCount</code>, <code>quarantineRetention</code>, <code>quarantineMaxBytes</code>, <code>droppedRequestMaxCount</code>, <code>droppedRequestRetention</code>) to <code>0</code> (<code>Duration.zero</code> for the periods).</li>
+</ul>
+</li>
+<li><strong>Rolling back to 0.14.0 or earlier hides the migrated queue, quarantine store and dropped history.</strong>
+<ul>
+<li>While rolled back, the migrated unsent queue is not sent.</li>
+<li>Upgrading to 0.15.0 or later again migrates the requests stored while rolled back as well.</li>
+</ul>
+</li>
+<li>As before, the legacy plain cookie box (<code>proxy_cookies</code>) is migrated when the storage is initialized by <code>start()</code> or by a cookie API called before <code>start()</code> or after <code>stop()</code>. Since 0.15.0, a cookie that already exists in the encrypted box is not overwritten.</li>
+</ul>
+<h3 id="android-auto-backup">Android Auto Backup</h3>
+<p>Android Auto Backup may include both Hive's storage directory and the secure storage data (not verified on a device). On a device restored from such a backup, the key for the restored encrypted boxes may be unreadable (<code>keyUnreadable</code>) or missing (<code>keyMissing</code>) (neither verified on a device). Excluding them from backup in the app is recommended.</p>
 <h2 id="platform-setup">Platform Setup</h2>
 <h3 id="ios">iOS</h3>
 <p>Allow local networking in <code>ios/Runner/Info.plist</code>:</p>
@@ -676,6 +1022,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 <li><code>ProxyConfig</code> is the supported configuration path. External YAML configuration loading is not implemented.</li>
 <li>Static resources under <code>assets/static/</code> are served for <code>GET</code> and <code>HEAD</code> only. An update request on the same path is forwarded upstream instead. Range requests are not supported.</li>
 <li>If <code>AssetManifest.json</code> or its runtime equivalent cannot be loaded, the proxy continues with no indexed static resources and falls back to normal upstream resolution.</li>
+<li>Using several <code>OfflineWebProxy</code> instances at the same time in one app is not supported. Storage initialization and recovery are serialized across instances within one isolate, but the exclusion for queue draining, retention limits and migration belongs to each instance. When the proxy is used from several isolates at once, even storage initialization and recovery are not serialized.</li>
 </ul>
 <h2 id="example-and-reference">Example and Reference</h2>
 <ul>
@@ -710,6 +1057,7 @@ node tool/offline_recovery_harness/run.mjs build/offline_recovery_harness
 flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.dart -d &lt;device id&gt;
 </code></pre>
 <p>Find the device ID with <code>flutter devices</code>.</p>
+<p><code>offline_web_proxy_storage_e2e_test.dart</code> deletes the cookie, queue, quarantine, and dropped-request boxes (including the legacy plain boxes) and the encryption key of the example app before each test. The first test waits for the migration delay of the legacy plain queue (30 seconds), so it takes more than 30 seconds.</p>
 <h2 id="release-process">Release Process</h2>
 <ul>
 <li>Update <code>pubspec.yaml</code> and <code>CHANGELOG.md</code> first, then commit those changes to <code>main</code>.</li>
@@ -765,7 +1113,7 @@ flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.d
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

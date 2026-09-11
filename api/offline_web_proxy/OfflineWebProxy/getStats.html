@@ -72,6 +72,9 @@
     
 <section class="desc markdown">
   <p>プロキシサーバの統計情報を取得します。</p>
+<p>キュー・隔離・ドロップ履歴の件数には、暗号化する前の保存領域から移行を
+待っている分も含みます。保存領域を開く前に起動に失敗した場合
+（<a href="../../offline_web_proxy/StorageIntegrityException-class.html">StorageIntegrityException</a> など）と停止後は、これらの件数は 0 です。</p>
 <p>Returns: リクエスト数、キャッシュヒット率、キュー長などの統計情報。</p>
 <p>Throws:</p>
 <ul>
@@ -85,9 +88,12 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;ProxyStats&gt; getStats() async {
   try {
-    final queueLength = _queueBox?.length ?? 0;
-    final droppedRequestsCount = _droppedRequestBox?.length ?? 0;
-    final quarantinedCount = _quarantinedRequestBox?.length ?? 0;
+    &#47;&#47; 暗号化する前の保存領域から移行を待っている分も含める。
+    &#47;&#47; 未送信があるときに精算させない、といった判断で見落とさないようにするため。
+    final queueLength = _countStoredEntries(ProxyStorageBox.queue);
+    final droppedRequestsCount =
+        _countStoredEntries(ProxyStorageBox.droppedRequests);
+    final quarantinedCount = _countStoredEntries(ProxyStorageBox.quarantine);
     final unacknowledgedDroppedCount = _countUnacknowledgedDroppedRequests();
     final uptime = _startedAt != null
         ? DateTime.now().difference(_startedAt!)
@@ -143,7 +149,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

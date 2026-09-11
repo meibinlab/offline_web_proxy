@@ -129,7 +129,13 @@ mutexロックを使用してシリアライズされ、データの一貫性が
           <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/OfflineWebProxy.html">OfflineWebProxy</a></span><span class="signature">()</span>
         </dt>
         <dd>
-          
+          プロキシサーバのインスタンスを生成します。
+        </dd>
+        <dt id="OfflineWebProxy.withStorageTestHooks" class="callable">
+          <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/OfflineWebProxy.withStorageTestHooks.html">OfflineWebProxy.withStorageTestHooks</a></span><span class="signature">(<span class="parameter" id="withStorageTestHooks-param-hooks"><span class="type-annotation">ProxyStorageTestHooks</span> <span class="parameter-name">hooks</span></span>)</span>
+        </dt>
+        <dd>
+          保存領域の処理を差し替えたインスタンスを生成します。
         </dd>
     </dl>
   </section>
@@ -530,6 +536,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 
 </dd>
 
+        <dt id="recoverEncryptedStorage" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/recoverEncryptedStorage.html">recoverEncryptedStorage</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/EncryptedStorageRecoveryResult-class.html">EncryptedStorageRecoveryResult</a></span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  暗号化した保存領域を、利用者の確認を経て復旧します。
+  
+
+</dd>
+
         <dt id="recoverFromWebResourceError" class="callable">
   <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/recoverFromWebResourceError.html">recoverFromWebResourceError</a></span><span class="signature">(<wbr>{<span class="parameter" id="recoverFromWebResourceError-param-errorCode"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">errorCode</span>, </span><span class="parameter" id="recoverFromWebResourceError-param-failingUrl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">failingUrl</span>, </span><span class="parameter" id="recoverFromWebResourceError-param-isMainFrame"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">isMainFrame</span> = <span class="default-value">true</span></span>})
     <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/ProxyRecoveryResult-class.html">ProxyRecoveryResult</a></span>&gt;</span></span>
@@ -717,7 +736,7 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

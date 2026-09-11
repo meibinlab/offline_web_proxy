@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="API docs for the recoverEncryptedStorage method from the OfflineWebProxy class, for the Dart programming language.">
+  <title>recoverEncryptedStorage method - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../../static-assets/styles.css?v1">
+  <link rel="icon" href="../../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">recoverEncryptedStorage method</li>
+  </ol>
+  <div class="self-name">recoverEncryptedStorage</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html"
+    data-below-sidebar="">
+    <div>
+<h1><span class="kind-method">recoverEncryptedStorage</span> method 
+</h1></div>
+
+    <section class="multi-line-signature">
+      
+
+<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/EncryptedStorageRecoveryResult-class.html">EncryptedStorageRecoveryResult</a></span>&gt;</span></span>
+<span class="name ">recoverEncryptedStorage</span>(<wbr>)
+
+      
+
+    </section>
+    
+<section class="desc markdown">
+  <p>暗号化した保存領域を、利用者の確認を経て復旧します。</p>
+<p><code>start()</code> や Cookie API が <a href="../../offline_web_proxy/StorageIntegrityException-class.html">StorageIntegrityException</a> で失敗し、再試行しても
+解消しない場合に、失われる内容を利用者へ説明し、同意を得てから呼び出して
+ください。この isolate の proxy のいずれかが稼働中または起動処理中の場合は、
+使用中の Box を閉じないよう何もしません
+（<a href="../../offline_web_proxy/StorageRecoveryRejection.html">StorageRecoveryRejection.proxyActive</a>）。</p>
+<p>直前に <code>start()</code> と同じく鍵を読み直し、同じ時間の上限で暗号化 Box と照合して、
+次のとおり扱います。</p>
+<ul>
+<li>鍵を一時的に読めない場合は、何もしません
+（<a href="../../offline_web_proxy/StorageRecoveryRejection.html">StorageRecoveryRejection.temporarilyUnavailable</a>）。</li>
+<li>鍵があり、キュー・隔離・ドロップ履歴の Box に問題が無い場合は、何もしません
+（<a href="../../offline_web_proxy/StorageRecoveryRejection.html">StorageRecoveryRejection.startWillSucceed</a>）。Cookie Box だけの問題は
+<code>start()</code> が Cookie Box を破棄して続けるためです。</li>
+<li>鍵があり、問題のある Box がある場合は、鍵を残して Box ごとに扱います。
+鍵と一致しない Box は削除します。先頭側が壊れた Box は、鍵と一致する
+最初の記録から後ろを残して作り直します（失われる先頭側の記録の件数は
+分かりません）。照合が時間の上限を超えた Box は、Box を閉じた後に
+時間の上限を設けずに照合し直し、その結果で扱います（鍵と一致しなければ
+削除、先頭側が壊れていれば作り直し）。先頭の記録が書きかけで鍵と一致する
+記録も無ければ、0 バイトに切り詰めます（開いたときに Hive も同じく
+切り詰めるため、失うものはありません）。問題の無い Box は残します。</li>
+<li>鍵の形式が正しくない場合、または鍵なし・読み取り不能の場合（中身のある
+暗号化 Box があれば、読み直しても続く場合）は、次のとおりです。
+キュー・隔離・ドロップ履歴の Box のどれかに中身があれば、暗号化 Box
+（Cookie・キュー・隔離・ドロップ履歴）をすべて削除してから鍵を削除します。
+Cookie も消えるため、再ログインが必要になります。どれにも中身が無ければ
+何も消しません（<a href="../../offline_web_proxy/StorageRecoveryRejection.html">StorageRecoveryRejection.startWillSucceed</a>）。</li>
+</ul>
+<p>鍵を書き込めずに起動に失敗した場合（<a href="../../offline_web_proxy/StorageIntegrityFailure.html">StorageIntegrityFailure.keyWriteFailed</a>）は、
+消す必要のある Box が無いため何もしません
+（<a href="../../offline_web_proxy/StorageRecoveryRejection.html">StorageRecoveryRejection.startWillSucceed</a>）。時間をおいて <code>start()</code> を
+再試行してください。</p>
+<p>削除や作り直しの前に proxy の Box をすべて閉じます。作り直しは置き換えが
+終わるまで元のファイルを残すため、途中で失敗しても再実行できます。
+暗号化する前の旧平文 Box は削除しません（鍵が無くても読めるため、次の
+<code>start()</code> で移行します）。終了後は、プロセスを再起動せずに <code>start()</code> を
+呼び出せます。鍵を削除した場合、次の <code>start()</code> は新しい鍵を生成します。</p>
+<p>暗号化された記録の件数は読めないため返しません。起動に失敗した後の
+<a href="../../offline_web_proxy/OfflineWebProxy/getStats.html">getStats</a> は 0 件を返すため、確認画面の根拠には使わないでください。</p>
+<p>Returns: 実行したかどうか、削除・作り直し・そのまま残した Box、鍵を
+削除したかどうか。</p>
+<p>Throws:</p>
+<ul>
+<li><a href="../../offline_web_proxy/StorageRecoveryException-class.html">StorageRecoveryException</a> Box のファイルや鍵の削除などに失敗した場合。</li>
+</ul>
+</section>
+
+
+    
+<section class="summary source-code" id="source">
+  <h2><span>Implementation</span></h2>
+  <pre class="language-dart"><code class="language-dart">Future&lt;EncryptedStorageRecoveryResult&gt; recoverEncryptedStorage() async {
+  if (_activeInstances.isNotEmpty) {
+    return const EncryptedStorageRecoveryResult.rejected(
+      StorageRecoveryRejection.proxyActive,
+    );
+  }
+
+  try {
+    &#47;&#47; 初期化と同じ直列化に入り、Cookie API がきっかけの初期化とも重ならないようにする
+    return await _storageInitializationLock.synchronized(_runStorageRecovery);
+  } on StorageRecoveryException {
+    rethrow;
+  } catch (error) {
+    throw StorageRecoveryException(
+      &#39;Failed to recover encrypted storage: $error&#39;,
+      error,
+    );
+  }
+}</code></pre>
+</section>
+
+
+  </div> <!-- /.main-content -->
+
+  <div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+    <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">recoverEncryptedStorage method</li>
+</ol>
+
+
+    <h5>OfflineWebProxy class</h5>
+    <div id="dartdoc-sidebar-left-content"></div>
+  </div><!--/.sidebar-offcanvas-->
+
+  <div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+</div><!--/.sidebar-offcanvas-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.15.0
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../../static-assets/highlight.pack.js?v1"></script>
+<script src="../../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+

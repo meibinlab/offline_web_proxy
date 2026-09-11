@@ -77,7 +77,8 @@
 start 前でも呼び出せ、復元済み Cookie は起動後の上流リクエストに利用されます。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/CookieOperationException-class.html">CookieOperationException</a> Cookie の復元に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/CookieOperationException-class.html">CookieOperationException</a> Cookie の復元に失敗した場合。暗号化した
+保存領域を使えない場合は、<a href="../../offline_web_proxy/StorageIntegrityException-class.html">StorageIntegrityException</a> を cause に持ちます。</li>
 </ul>
 </section>
 
@@ -136,7 +137,7 @@ start 前でも呼び出せ、復元済み Cookie は起動後の上流リクエ
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

@@ -75,7 +75,8 @@
 <h2 id="">主な機能</h2>
 <ul>
 <li><strong>インテリジェントキャッシング</strong>: RFC準拠のキャッシュ制御とオフライン戦略</li>
-<li><strong>リクエストキューイング</strong>: オフライン時のPOST/PUT/DELETEリクエストの自動キュー</li>
+<li><strong>リクエストキューイング</strong>: オフライン時のPOST/PUT/DELETEリクエストの自動キュー。
+キュー・隔離・ドロップ履歴は AES-256 で暗号化して保存し、隔離と履歴には保持上限を設ける</li>
 <li><strong>Cookie管理</strong>: AES-256暗号化による安全なCookie永続化</li>
 <li><strong>静的リソース配信</strong>: <code>assets/static/</code> 配下を起動時に走査し、同梱アセットとして配信</li>
 <li><strong>シームレスなオフライン対応</strong>: 透過的なオンライン/オフライン切り替え</li>
@@ -157,6 +158,14 @@ webViewController.loadUrl('http://127.0.0.1:$port/your-app-path');
 </dt>
 <dd>
   エラーによりキューからドロップされたリクエストの履歴を表すクラス
+</dd>
+
+          <dt id="EncryptedStorageRecoveryResult">
+  <span class="name "><a href="../offline_web_proxy/EncryptedStorageRecoveryResult-class.html">EncryptedStorageRecoveryResult</a></span> 
+
+</dt>
+<dd>
+  暗号化した保存領域の復旧 API の結果です。
 </dd>
 
           <dt id="OfflineWebProxy">
@@ -360,12 +369,44 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   稼働確認と復旧処理の判定種別です。
 </dd>
 
+          <dt id="ProxyStorageBox">
+  <span class="name "><a href="../offline_web_proxy/ProxyStorageBox.html">ProxyStorageBox</a></span> 
+
+</dt>
+<dd>
+  proxy が暗号化して保存する Box の種類です。
+</dd>
+
           <dt id="ProxyWebViewNavigationAction">
   <span class="name "><a href="../offline_web_proxy/ProxyWebViewNavigationAction.html">ProxyWebViewNavigationAction</a></span> 
 
 </dt>
 <dd>
   WebView delegate 向けの推奨アクションです。
+</dd>
+
+          <dt id="StorageBoxCheckResult">
+  <span class="name "><a href="../offline_web_proxy/StorageBoxCheckResult.html">StorageBoxCheckResult</a></span> 
+
+</dt>
+<dd>
+  暗号化 Box のファイルを、secure storage の鍵と照合した結果です。
+</dd>
+
+          <dt id="StorageIntegrityFailure">
+  <span class="name "><a href="../offline_web_proxy/StorageIntegrityFailure.html">StorageIntegrityFailure</a></span> 
+
+</dt>
+<dd>
+  暗号化した保存領域を使えない理由、または Cookie Box を破棄した理由です。
+</dd>
+
+          <dt id="StorageRecoveryRejection">
+  <span class="name "><a href="../offline_web_proxy/StorageRecoveryRejection.html">StorageRecoveryRejection</a></span> 
+
+</dt>
+<dd>
+  暗号化した保存領域の復旧 API が処理を行わなかった理由です。
 </dd>
 
           <dt id="UpstreamCircuitState">
@@ -516,6 +557,22 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   Exception thrown when statistics collection or retrieval fails.
 </dd>
 
+          <dt id="StorageIntegrityException">
+  <span class="name "><a href="../offline_web_proxy/StorageIntegrityException-class.html">StorageIntegrityException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when the encrypted storage cannot be used.
+</dd>
+
+          <dt id="StorageRecoveryException">
+  <span class="name "><a href="../offline_web_proxy/StorageRecoveryException-class.html">StorageRecoveryException</a></span> 
+
+</dt>
+<dd>
+  Exception thrown when recovering the encrypted storage fails unexpectedly.
+</dd>
+
           <dt id="WarmupException">
   <span class="name "><a href="../offline_web_proxy/WarmupException-class.html">WarmupException</a></span> 
 
@@ -560,7 +617,7 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

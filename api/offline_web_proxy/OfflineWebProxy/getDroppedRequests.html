@@ -73,7 +73,10 @@
     
 <section class="desc markdown">
   <p>キューから除外されたリクエストの履歴を取得します。</p>
-<p><code>limit</code> 取得する最大件数。</p>
+<p>記録した日時（<code>droppedAt</code>）の古い順に並びます。暗号化する前の保存領域から
+移行を待っている履歴も含み、その履歴は <a href="../../offline_web_proxy/DroppedRequest/pendingMigration.html">DroppedRequest.pendingMigration</a> が
+<code>true</code> になります。</p>
+<p><code>limit</code> 取得する最大件数。並べた後の先頭からの件数です。</p>
 <p>Returns: ドロップされたリクエストの履歴。</p>
 <p>Throws:</p>
 <ul>
@@ -91,27 +94,17 @@
       return const &lt;DroppedRequest&gt;[];
     }
 
-    final requests = &lt;DroppedRequest&gt;[];
-
-    if (_droppedRequestBox != null) {
-      int idx = 0;
-      for (final key in _droppedRequestBox!.keys) {
-        final data = _droppedRequestBox!.get(key) as Map?;
-        if (data != null) {
-          requests.add(_mapToDroppedRequest(data));
-          if (limit != null &amp;&amp; requests.length &gt;= limit) {
-            break;
-          }
-        }
-
-        idx++;
-        if (idx % 50 == 0) {
-          await Future.delayed(Duration.zero);
-        }
-      }
-    }
-
-    return requests;
+    final entries = await _collectStoredEntries(
+      ProxyStorageBox.droppedRequests,
+      &#39;droppedAt&#39;,
+    );
+    final selected = limit == null ? entries : entries.take(limit);
+    return selected
+        .map((entry) =&gt; _mapToDroppedRequest(
+              entry.data,
+              pendingMigration: entry.pendingMigration,
+            ))
+        .toList();
   } catch (e) {
     throw QueueOperationException(&#39;getDropped&#39;, &#39;ドロップされたリクエストの取得に失敗しました: $e&#39;,
         e is Exception ? e : null);
@@ -150,7 +143,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

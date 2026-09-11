@@ -76,10 +76,12 @@
 <p>拒否の原因を解消したあとに呼び出してください。再試行回数は初期化し、
 オンラインであれば直ちに送信を試みます。</p>
 <p><code>id</code> <a href="../../offline_web_proxy/OfflineWebProxy/getQuarantinedRequests.html">getQuarantinedRequests</a> が返した識別子。</p>
-<p>Returns: キューへ戻した場合は <code>true</code>。該当が無い場合は <code>false</code>。</p>
+<p>Returns: キューへ戻した場合は <code>true</code>。該当が無い場合と、暗号化する前の
+  保存領域から移行を待っている項目の場合は <code>false</code>。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 操作に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 操作に失敗した場合。隔離のロックを
+30 秒以内に取得できなかった場合を含みます。</li>
 </ul>
 </section>
 
@@ -88,47 +90,8 @@
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;bool&gt; retryQuarantinedRequest(String id) async {
-  try {
-    final quarantineBox = _quarantinedRequestBox;
-    final queueBox = _queueBox;
-    if (quarantineBox == null ||
-        !quarantineBox.isOpen ||
-        queueBox == null ||
-        !queueBox.isOpen) {
-      return false;
-    }
-
-    final data = quarantineBox.get(id) as Map?;
-    if (data == null) {
-      return false;
-    }
-
-    final now = DateTime.now();
-    final queueData = Map&lt;String, dynamic&gt;.from(data)
-      ..remove(&#39;quarantinedAt&#39;)
-      ..remove(&#39;reason&#39;)
-      ..remove(&#39;errorMessage&#39;)
-      ..remove(&#39;statusCode&#39;)
-      ..[&#39;retryCount&#39;] = 0
-      ..[&#39;nextRetryAt&#39;] = now.toIso8601String()
-      &#47;&#47; 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る。
-      &#47;&#47; 業務上の発生時刻は acceptedAt が保持するため、ここでは触れない。
-      ..[&#39;queuedAt&#39;] = now.toIso8601String();
-
-    final key = _generateUniqueStorageKey(queueBox);
-    await queueBox.put(key, queueData);
-    await quarantineBox.delete(id);
-
-    _emitEvent(ProxyEventType.requestQueued,
-        queueData[&#39;url&#39;] as String? ?? &#39;&#39;, {&#39;queueId&#39;: key});
-
-    &#47;&#47; ignore: discarded_futures
-    _drainQueue();
-    return true;
-  } catch (e) {
-    throw QueueOperationException(&#39;retryQuarantined&#39;,
-        &#39;隔離されたリクエストの再送に失敗しました: $e&#39;, e is Exception ? e : null);
-  }
+  return await _retryQuarantinedRequestInternal(id) ==
+      _QuarantineOperationResult.done;
 }</code></pre>
 </section>
 
@@ -163,7 +126,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

@@ -362,6 +362,20 @@
 
 </dd>
 
+            <dt id="cookieStorageDiscarded" class="constant">
+    <span class="name ">cookieStorageDiscarded</span>
+  <span class="signature">&#8594; const <a href="../offline_web_proxy/ProxyEventType.html">ProxyEventType</a></span>
+  
+
+</dt>
+<dd>
+  <p>暗号化鍵と合わない Cookie の暗号化 Box を破棄した</p>
+<p><code>data['reason']</code> に <code>StorageIntegrityFailure</code> の名前が入ります。
+破棄した後は再ログインが必要です。</p>
+  
+
+</dd>
+
         </dl>
       </section>
 
@@ -515,7 +529,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

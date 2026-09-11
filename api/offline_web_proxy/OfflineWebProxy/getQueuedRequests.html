@@ -72,6 +72,19 @@
     
 <section class="desc markdown">
   <p>オフライン時にキューに保存されたリクエストの一覧を取得します。</p>
+<p>保存日時（<code>queuedAt</code>）の古い順に並びます。保存日時が同じ場合は、保存に
+使ったキーを時刻として読み直した値で並べます。暗号化する前の保存領域から
+移行を待っている項目も含み、その項目は <a href="../../offline_web_proxy/QueuedRequest/pendingMigration.html">QueuedRequest.pendingMigration</a> が
+<code>true</code> になります。</p>
+<p><a href="../../offline_web_proxy/QueuedRequest/headers.html">QueuedRequest.headers</a> は、機密情報を含み得るヘッダの値を <code>***</code> に
+置き換えます。対象は、名前を小文字にし <code>_</code> を <code>-</code> とみなしたときに
+<code>cookie</code>、<code>authorization</code>、<code>proxy-authorization</code> と一致するか、<code>auth</code>、
+<code>token</code>、<code>secret</code>、<code>session</code>、<code>csrf</code>、<code>xsrf</code>、<code>key</code>、<code>pass</code>、
+<code>credential</code>、<code>signature</code>、<code>jwt</code>、<code>cookie</code> のいずれかを含むものです。
+<a href="../../offline_web_proxy/ProxyConfig/idempotencyHeaderName.html">ProxyConfig.idempotencyHeaderName</a> のヘッダは置き換えません。保存される
+ヘッダはクライアントが送ったものだけで、proxy が付けるヘッダは送信時に
+加えます。URL のクエリは置き換えません。再送には保存した値をそのまま
+使います。</p>
 <p>Returns: キューに保存されているリクエストの一覧。</p>
 <p>Throws:</p>
 <ul>
@@ -85,25 +98,14 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;List&lt;QueuedRequest&gt;&gt; getQueuedRequests() async {
   try {
-    final requests = &lt;QueuedRequest&gt;[];
-
-    if (_queueBox != null) {
-      int idx = 0;
-      for (final key in _queueBox!.keys) {
-        final data = _queueBox!.get(key) as Map?;
-        if (data != null) {
-          requests.add(_mapToQueuedRequest(data));
-        }
-
-        &#47;&#47; 大量キュー走査時にUIをブロックしないようyield
-        idx++;
-        if (idx % 50 == 0) {
-          await Future.delayed(Duration.zero);
-        }
-      }
-    }
-
-    return requests;
+    final entries =
+        await _collectStoredEntries(ProxyStorageBox.queue, &#39;queuedAt&#39;);
+    return entries
+        .map((entry) =&gt; _mapToQueuedRequest(
+              entry.data,
+              pendingMigration: entry.pendingMigration,
+            ))
+        .toList();
   } catch (e) {
     throw QueueOperationException(
         &#39;get&#39;, &#39;キューされたリクエストの取得に失敗しました: $e&#39;, e is Exception ? e : null);
@@ -142,7 +144,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

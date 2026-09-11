@@ -102,6 +102,11 @@
 <li><span class="parameter" id="-param-enableAcceptedAtHeader"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">enableAcceptedAtHeader</span> = <span class="default-value">true</span>, </span></li>
 <li><span class="parameter" id="-param-acceptedAtHeaderName"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">acceptedAtHeaderName</span> = <span class="default-value">&#39;X-Offline-Accepted-At&#39;</span>, </span></li>
 <li><span class="parameter" id="-param-dropPolicy"><span class="type-annotation"><a href="../../offline_web_proxy/DropPolicy.html">DropPolicy</a></span> <span class="parameter-name">dropPolicy</span> = <span class="default-value">DropPolicy.quarantine</span>, </span></li>
+<li><span class="parameter" id="-param-quarantineMaxCount"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">quarantineMaxCount</span> = <span class="default-value">1000</span>, </span></li>
+<li><span class="parameter" id="-param-quarantineRetention"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">quarantineRetention</span> = <span class="default-value">const Duration(days: 30)</span>, </span></li>
+<li><span class="parameter" id="-param-quarantineMaxBytes"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">quarantineMaxBytes</span> = <span class="default-value">20 * 1024 * 1024</span>, </span></li>
+<li><span class="parameter" id="-param-droppedRequestMaxCount"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">droppedRequestMaxCount</span> = <span class="default-value">1000</span>, </span></li>
+<li><span class="parameter" id="-param-droppedRequestRetention"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Duration-class.html">Duration</a></span> <span class="parameter-name">droppedRequestRetention</span> = <span class="default-value">const Duration(days: 30)</span>, </span></li>
 <li><span class="parameter" id="-param-queuedResponse"><span class="type-annotation"><a href="../../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">queuedResponse</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 202, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;queued&quot;:true}&#39;)</span>, </span></li>
 <li><span class="parameter" id="-param-offlineMissResponse"><span class="type-annotation"><a href="../../offline_web_proxy/ProxyResponseConfig-class.html">ProxyResponseConfig</a></span> <span class="parameter-name">offlineMissResponse</span> = <span class="default-value">const ProxyResponseConfig(statusCode: 504, contentType: &#39;application&#47;json; charset=utf-8&#39;, body: &#39;{&quot;offline&quot;:true}&#39;)</span>, </span></li>
 </ol>})
@@ -166,6 +171,11 @@
   this.enableAcceptedAtHeader = true,
   this.acceptedAtHeaderName = &#39;X-Offline-Accepted-At&#39;,
   this.dropPolicy = DropPolicy.quarantine,
+  this.quarantineMaxCount = 1000,
+  this.quarantineRetention = const Duration(days: 30),
+  this.quarantineMaxBytes = 20 * 1024 * 1024,
+  this.droppedRequestMaxCount = 1000,
+  this.droppedRequestRetention = const Duration(days: 30),
   this.queuedResponse = const ProxyResponseConfig(
     statusCode: 202,
     contentType: &#39;application&#47;json; charset=utf-8&#39;,
@@ -210,7 +220,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   

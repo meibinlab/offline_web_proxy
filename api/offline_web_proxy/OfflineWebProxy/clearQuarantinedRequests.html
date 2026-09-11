@@ -72,9 +72,11 @@
     
 <section class="desc markdown">
   <p>隔離されたリクエストを全て破棄します。</p>
+<p>暗号化する前の保存領域から移行を待っている項目も破棄します。</p>
 <p>Throws:</p>
 <ul>
-<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 破棄に失敗した場合。</li>
+<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 破棄に失敗した場合。隔離のロックを
+30 秒以内に取得できなかった場合を含みます。</li>
 </ul>
 </section>
 
@@ -84,7 +86,12 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearQuarantinedRequests() async {
   try {
-    await _quarantinedRequestBox?.clear();
+    await _quarantineLock.synchronized(() async {
+      await _quarantinedRequestBox?.clear();
+      &#47;&#47; 利用者の意図は全件の破棄のため、移行を待っている分も消す。
+      &#47;&#47; 移行と同じロックの中で消し、書き写しで暗号化 Box に残らないようにする。
+      await _clearLegacyBox(ProxyStorageBox.quarantine);
+    }, timeout: _storageLockTimeout);
   } catch (e) {
     throw QueueOperationException(&#39;clearQuarantined&#39;,
         &#39;隔離されたリクエストの破棄に失敗しました: $e&#39;, e is Exception ? e : null);
@@ -123,7 +130,7 @@
 <footer>
   <span class="no-break">
     offline_web_proxy
-      0.14.0
+      0.15.0
   </span>
 
   
