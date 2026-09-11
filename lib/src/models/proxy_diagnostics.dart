@@ -1,5 +1,6 @@
 import 'online_decision_source.dart';
 import 'proxy_recovery_result.dart';
+import 'storage_integrity.dart';
 import 'upstream_circuit_state.dart';
 
 /// 死活監視と復旧の診断情報を表すクラスです。
@@ -60,6 +61,19 @@ class ProxyDiagnostics {
   /// 最後に上流へ到達できた日時です。未到達の場合は `null` です。
   final DateTime? lastUpstreamSuccessAt;
 
+  /// このインスタンスが最後に Cookie の暗号化 Box を破棄した日時です。
+  /// 破棄していない場合は `null` です。
+  ///
+  /// 暗号化鍵と Cookie Box が合わず、ほかの暗号化 Box に問題が無い場合、
+  /// proxy は Cookie Box を破棄して処理を続けます（再ログインが必要に
+  /// なります）。破棄は `start()` や起動前の Cookie API の中で起きるため、
+  /// 後から購読したアプリにはイベントが届きません。この値で確認できます。
+  final DateTime? lastCookieStorageDiscardedAt;
+
+  /// このインスタンスが最後に Cookie の暗号化 Box を破棄した理由です。
+  /// 破棄していない場合は `null` です。
+  final StorageIntegrityFailure? lastCookieStorageDiscardReason;
+
   /// 診断情報を生成します。
   ///
   /// [isRunning] は内部フラグ上の稼働状態です。
@@ -79,6 +93,8 @@ class ProxyDiagnostics {
   /// [upstreamCircuitState] は上流到達性のサーキットブレーカ状態です。
   /// [consecutiveUpstreamFailures] は上流へ到達できなかった連続回数です。
   /// [lastUpstreamSuccessAt] は最後に上流へ到達できた日時です。
+  /// [lastCookieStorageDiscardedAt] は最後に Cookie Box を破棄した日時です。
+  /// [lastCookieStorageDiscardReason] は最後に Cookie Box を破棄した理由です。
   const ProxyDiagnostics({
     required this.isRunning,
     required this.port,
@@ -97,6 +113,8 @@ class ProxyDiagnostics {
     required this.upstreamCircuitState,
     required this.consecutiveUpstreamFailures,
     required this.lastUpstreamSuccessAt,
+    this.lastCookieStorageDiscardedAt,
+    this.lastCookieStorageDiscardReason,
   });
 
   @override
@@ -113,6 +131,8 @@ class ProxyDiagnostics {
         'isUpstreamReachable: $isUpstreamReachable, '
         'upstreamCircuitState: $upstreamCircuitState, '
         'consecutiveUpstreamFailures: $consecutiveUpstreamFailures, '
-        'lastUpstreamSuccessAt: $lastUpstreamSuccessAt}';
+        'lastUpstreamSuccessAt: $lastUpstreamSuccessAt, '
+        'lastCookieStorageDiscardedAt: $lastCookieStorageDiscardedAt, '
+        'lastCookieStorageDiscardReason: $lastCookieStorageDiscardReason}';
   }
 }

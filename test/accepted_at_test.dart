@@ -362,10 +362,20 @@ void main() {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
 
-        // 旧バージョンが保存した、acceptedAt を持たないキューデータを再現する
+        // 旧バージョンが保存した、acceptedAt を持たないキューデータを、
+        // 暗号化したキューに再現する（平文からの移行は別のテストで扱う）
+        final encryptionKey = List<int>.generate(32, (index) => index);
+        FlutterSecureStorage.setMockInitialValues(<String, String>{
+          'offline_web_proxy.cookie_box_encryption_key':
+              base64Encode(encryptionKey),
+        });
+        await Hive.initFlutter();
         final queuedAt = DateTime.now().subtract(const Duration(hours: 9));
-        final queueBox = await Hive.openBox('proxy_queue');
-        await queueBox.put('legacy', <String, dynamic>{
+        final queueBox = await Hive.openBox(
+          'proxy_queue_secure',
+          encryptionCipher: HiveAesCipher(encryptionKey),
+        );
+        await queueBox.put('0001757000000000000-000000', <String, dynamic>{
           'url': '${upstream!.origin}/api/sales.json',
           'method': 'POST',
           'headers': <String, String>{},
@@ -374,6 +384,7 @@ void main() {
           'retryCount': 0,
           'nextRetryAt': DateTime.now().toIso8601String(),
         });
+        await queueBox.close();
 
         await proxy.start(config: ProxyConfig(origin: upstream!.origin));
         await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);

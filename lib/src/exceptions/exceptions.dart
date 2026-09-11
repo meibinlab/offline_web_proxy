@@ -28,6 +28,7 @@
 /// ```
 library;
 
+import '../models/storage_integrity.dart';
 import '../models/warmup_result.dart';
 
 /// Exception thrown when proxy server fails to start.
@@ -73,6 +74,78 @@ class ProxyStartException implements Exception {
   @override
   String toString() =>
       'ProxyStartException: $message${cause != null ? ' (caused by: $cause)' : ''}';
+}
+
+/// Exception thrown when the encrypted storage cannot be used.
+///
+/// Before opening the encrypted boxes (cookies, queue, quarantine and dropped
+/// request history), the proxy checks them against the encryption key in
+/// secure storage, because Hive truncates a box opened with the wrong key.
+/// [failure] tells why the storage cannot be used, and [boxResults] carries
+/// the result for every encrypted box.
+///
+/// `start()` throws this exception as it is. Cookie APIs, which may run the
+/// same check before `start()` or after `stop()`, report it as the `cause`
+/// of a [CookieOperationException].
+///
+/// Nothing is deleted when this exception is thrown. Retry later when
+/// [failure] is [StorageIntegrityFailure.temporarilyUnavailable] or
+/// [StorageIntegrityFailure.keyWriteFailed]; the recovery API cannot fix
+/// either of them. For the other kinds, confirm with the user and call
+/// `OfflineWebProxy.recoverEncryptedStorage()`.
+class StorageIntegrityException extends ProxyStartException {
+  /// Why the encrypted storage cannot be used.
+  final StorageIntegrityFailure failure;
+
+  /// Check result of every encrypted box, including the cookie box.
+  final Map<ProxyStorageBox, StorageBoxCheckResult> boxResults;
+
+  /// Original error, such as the error thrown while reading the key.
+  ///
+  /// Unlike [cause], this also holds errors that are not [Exception]s.
+  final Object? error;
+
+  /// Creates a new encrypted storage exception.
+  ///
+  /// [message] describes the failure.
+  /// [failure] tells why the encrypted storage cannot be used.
+  /// [boxResults] carries the check result of every encrypted box.
+  /// [error] is the original error, if any.
+  StorageIntegrityException(
+    String message, {
+    required this.failure,
+    this.boxResults = const {},
+    this.error,
+  }) : super(message, error is Exception ? error : null);
+
+  @override
+  String toString() => 'StorageIntegrityException[${failure.name}]: $message '
+      '(boxes: ${boxResults.map((box, result) => MapEntry(box.name, result.name))})'
+      '${error != null ? ' (caused by: $error)' : ''}';
+}
+
+/// Exception thrown when recovering the encrypted storage fails unexpectedly.
+///
+/// Thrown by `OfflineWebProxy.recoverEncryptedStorage()`, for example when a
+/// box file or the encryption key cannot be deleted. Running the recovery
+/// again is safe: a box being rebuilt keeps its original file until the new
+/// one replaces it.
+class StorageRecoveryException implements Exception {
+  /// Error message describing the failure.
+  final String message;
+
+  /// Original error, if any.
+  final Object? error;
+
+  /// Creates a new storage recovery exception.
+  ///
+  /// [message] describes the failure.
+  /// [error] is the original error, if any.
+  const StorageRecoveryException(this.message, [this.error]);
+
+  @override
+  String toString() =>
+      'StorageRecoveryException: $message${error != null ? ' (caused by: $error)' : ''}';
 }
 
 /// Exception thrown when proxy server fails to stop cleanly.

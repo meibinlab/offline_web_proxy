@@ -809,24 +809,26 @@ void main() {
       expect(await Hive.boxExists(_legacyCookieBoxName), isFalse);
     });
 
-    /// 不正な暗号化鍵では平文 Box にフォールバックしないこと
-    test('should fail without fallback when secure storage key is invalid',
+    /// 形式不正の鍵は、暗号化データが無ければ作り直して起動すること
+    test('should regenerate an invalid key when no encrypted data exists',
         () async {
       FlutterSecureStorage.setMockInitialValues(<String, String>{
         _cookieEncryptionKeyStorageKey: base64Encode(Uint8List(8)),
       });
       proxy = OfflineWebProxy();
 
-      expect(
-        () => proxy.start(
-          config: const ProxyConfig(origin: 'https://example.com'),
-        ),
-        throwsA(isA<ProxyStartException>()),
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
       );
+
+      final storedKey = await const FlutterSecureStorage().read(
+        key: _cookieEncryptionKeyStorageKey,
+      );
+      expect(base64Decode(storedKey!), hasLength(32));
     });
 
-    /// 暗号化 Box が残っていても鍵喪失時は復号できず失敗すること
-    test('should fail and require re-login when encryption key is missing',
+    /// 鍵を失い Cookie だけが残っている場合は、Cookie を破棄して起動を続けること
+    test('should discard cookies and require re-login when key is missing',
         () async {
       await proxy.restoreCookies([
         const CookieRestoreEntry(
@@ -841,11 +843,17 @@ void main() {
       FlutterSecureStorage.setMockInitialValues(<String, String>{});
       proxy = OfflineWebProxy();
 
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      // 復号できない Cookie は残さず、再ログインが必要な状態で起動すること
+      expect(await proxy.getCookies(), isEmpty);
+      final diagnostics = await proxy.getDiagnostics();
+      expect(diagnostics.lastCookieStorageDiscardedAt, isNotNull);
       expect(
-        () => proxy.start(
-          config: const ProxyConfig(origin: 'https://example.com'),
-        ),
-        throwsA(isA<ProxyStartException>()),
+        diagnostics.lastCookieStorageDiscardReason,
+        StorageIntegrityFailure.keyMissing,
       );
     });
 

@@ -7,7 +7,8 @@
 /// ## 主な機能
 ///
 /// * **インテリジェントキャッシング**: RFC準拠のキャッシュ制御とオフライン戦略
-/// * **リクエストキューイング**: オフライン時のPOST/PUT/DELETEリクエストの自動キュー
+/// * **リクエストキューイング**: オフライン時のPOST/PUT/DELETEリクエストの自動キュー。
+///   キュー・隔離・ドロップ履歴は AES-256 で暗号化して保存し、隔離と履歴には保持上限を設ける
 /// * **Cookie管理**: AES-256暗号化による安全なCookie永続化
 /// * **静的リソース配信**: `assets/static/` 配下を起動時に走査し、同梱アセットとして配信
 /// * **シームレスなオフライン対応**: 透過的なオンライン/オフライン切り替え
@@ -60,7 +61,6 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:shelf/shelf.dart' as shelf;
@@ -91,9 +91,16 @@ import 'src/models/queue_exclude_rule.dart';
 import 'src/models/queue_resend_result.dart';
 import 'src/models/queued_request.dart';
 import 'src/models/response_header_snapshot.dart';
+import 'src/models/storage_integrity.dart';
 import 'src/models/upstream_circuit_state.dart';
 import 'src/models/warmup_result.dart';
 import 'src/pages/offline_recovery_page.dart';
+import 'src/storage/async_lock.dart';
+import 'src/storage/encrypted_storage_integrity.dart';
+import 'src/storage/encryption_key_reader.dart';
+import 'src/storage/encryption_key_storage.dart';
+import 'src/storage/hive_frame_inspector.dart';
+import 'src/storage/storage_order.dart';
 
 export 'src/exceptions/exceptions.dart';
 export 'src/lifecycle/proxy_lifecycle_guard.dart';
@@ -116,6 +123,7 @@ export 'src/models/quarantined_request.dart';
 export 'src/models/queue_exclude_rule.dart';
 export 'src/models/queue_resend_result.dart';
 export 'src/models/queued_request.dart';
+export 'src/models/storage_integrity.dart';
 export 'src/models/upstream_circuit_state.dart';
 export 'src/models/warmup_result.dart';
 
@@ -149,8 +157,97 @@ const String _webStorageBoxName = 'proxy_web_storage';
 const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 const int _cookieEncryptionKeyLength = 32;
-const String _droppedRequestBoxName = 'proxy_dropped_requests';
-const String _quarantinedRequestBoxName = 'proxy_quarantined_requests';
+
+/// 暗号化して保存するキューの Box 名。
+const String _encryptedQueueBoxName = 'proxy_queue_secure';
+
+/// 暗号化して保存する隔離の Box 名。
+const String _encryptedQuarantineBoxName = 'proxy_quarantined_requests_secure';
+
+/// 暗号化して保存するドロップ履歴の Box 名。
+const String _encryptedDroppedRequestBoxName = 'proxy_dropped_requests_secure';
+
+/// 鍵と照合する暗号化 Box の一覧。
+const Map<ProxyStorageBox, String> _encryptedBoxNames = {
+  ProxyStorageBox.cookies: _encryptedCookieBoxName,
+  ProxyStorageBox.queue: _encryptedQueueBoxName,
+  ProxyStorageBox.quarantine: _encryptedQuarantineBoxName,
+  ProxyStorageBox.droppedRequests: _encryptedDroppedRequestBoxName,
+};
+
+/// 起動時の照合で、走査を打ち切る時間の上限。
+/// 異常な場合の安全装置で、判定が端末の速さで変わらないようバイト数では打ち切らない。
+const Duration _defaultStorageVerificationTimeLimit = Duration(seconds: 10);
+
+/// 中身のある暗号化 Box があり鍵を読めない場合に、読み直す間隔。
+const Duration _defaultKeyRereadInterval = Duration(milliseconds: 500);
+
+/// 中身のある暗号化 Box があり鍵を読めない場合に、読み直す回数。
+const int _defaultKeyRereadAttempts = 3;
+
+/// 移行元の旧平文 Box の一覧。移行する順に並べる。
+const Map<ProxyStorageBox, String> _legacyBoxNames = {
+  ProxyStorageBox.queue: _legacyQueueBoxName,
+  ProxyStorageBox.quarantine: _legacyQuarantinedRequestBoxName,
+  ProxyStorageBox.droppedRequests: _legacyDroppedRequestBoxName,
+};
+
+/// 鍵を生成したインスタンスで、旧平文 Box の移行を遅らせる時間。
+///
+/// Android の secure storage はメモリ上の値を先に更新し、ディスクへは非同期に
+/// 書くため、同じプロセスで読み直しても書き込みの確認にならない。保証できるのは
+/// この待ち時間だけ。
+const Duration _defaultDeferredMigrationDelay = Duration(seconds: 30);
+
+/// キュー消化・隔離・ドロップ履歴の排他を取得するまでの上限時間。
+const Duration _defaultStorageLockTimeout = Duration(seconds: 30);
+
+/// 機密情報としてマスクするヘッダ名（小文字にし `_` を `-` にそろえた形）。
+const Set<String> _sensitiveHeaderNames = {
+  'cookie',
+  'authorization',
+  'proxy-authorization',
+};
+
+/// 名前に含まれていれば、機密情報としてマスクするヘッダ名の一部。
+const List<String> _sensitiveHeaderNameFragments = [
+  'auth',
+  'token',
+  'secret',
+  'session',
+  'csrf',
+  'xsrf',
+  'key',
+  'pass',
+  'credential',
+  'signature',
+  'jwt',
+  'cookie',
+];
+
+/// マスクしたヘッダの値。
+const String _maskedHeaderValue = '***';
+
+/// 一覧を組み立てるときに、UI の isolate へ処理を譲る件数の間隔。
+const int _storedEntryYieldInterval = 50;
+
+/// 隔離の件数または合計バイト数の上限により、ドロップ履歴へ移したときの理由。
+const String _quarantineLimitDropReason = 'quarantine_limit';
+
+/// 隔離の保持期間を過ぎたため、ドロップ履歴へ移したときの理由。
+const String _quarantineExpiredDropReason = 'quarantine_expired';
+
+/// 1 件で隔離の合計バイト数の上限を超えたため、隔離せずに記録したときの理由。
+const String _quarantineTooLargeDropReason = 'quarantine_too_large';
+
+/// 暗号化する前のキューの Box 名（移行元）。
+const String _legacyQueueBoxName = 'proxy_queue';
+
+/// 暗号化する前のドロップ履歴の Box 名（移行元）。
+const String _legacyDroppedRequestBoxName = 'proxy_dropped_requests';
+
+/// 暗号化する前の隔離の Box 名（移行元）。
+const String _legacyQuarantinedRequestBoxName = 'proxy_quarantined_requests';
 const Set<String> _loopbackHosts = {'127.0.0.1', 'localhost'};
 const String _defaultHealthCheckPath = '/__offline_web_proxy/health';
 const String _defaultStatusPath = '/__offline_web_proxy/status';
@@ -408,9 +505,6 @@ class OfflineWebProxy {
   /// WebStorage 継承データの永続化ボックス。
   Box? _webStorageBox;
 
-  /// Cookie 暗号化鍵の永続化に利用するセキュアストレージ。
-  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
-
   /// べき等性キーの永続化ボックス。
   Box? _idempotencyBox;
 
@@ -509,6 +603,148 @@ class OfflineWebProxy {
   /// 停止後にソケットやバックグラウンドタイマーが残らないようにする。
   final Semaphore _lifecycleLock = Semaphore(1);
 
+  /// 保存領域の初期化（段階 1 と段階 2）と復旧を直列化するためのロック。
+  ///
+  /// 鍵（secure storage 上の固定の名前）と Box（Hive への登録）は同じ isolate 内の
+  /// インスタンスで共有されるため、インスタンスをまたいで直列化する。同時に
+  /// 呼ばれても、鍵の生成と Box のオープンが重ならないようにする。static な
+  /// フィールドと Hive への登録は isolate ごとのため、複数の isolate から同時に
+  /// 使う場合は対象外。
+  static final AsyncLock _storageInitializationLock = AsyncLock();
+
+  /// この isolate で稼働中または起動処理中の proxy。
+  ///
+  /// 復旧 API は Box を閉じて削除するため、どのインスタンスも保存領域を
+  /// 使っていない場合に限って実行する。
+  static final Set<OfflineWebProxy> _activeInstances = <OfflineWebProxy>{};
+
+  /// この isolate の保存領域の世代。復旧 API が Box を削除・作り直すたびに進める。
+  ///
+  /// 復旧 API は呼び出したインスタンスの状態しか捨てられないため、別のインスタンスは
+  /// 段階 1 を済ませたときの世代と比べ、違っていれば古い鍵を使わずに段階 1 から
+  /// やり直す。
+  static int _storageGeneration = 0;
+
+  /// 実行中または完了済みの段階 1（鍵と Cookie Box）の結果。失敗した場合は捨てる。
+  ///
+  /// 別の error zone から待つ呼び出しにも失敗を伝えられるよう、Future 自体は
+  /// 失敗させず、失敗も結果として持つ。
+  Future<_StageOutcome<Box>>? _keyStageFuture;
+
+  /// 段階 1 が完了しているかどうか。
+  bool _keyStageCompleted = false;
+
+  /// 実行中または完了済みの段階 2（キューなどの Box）の結果。失敗した場合は捨てる。
+  Future<_StageOutcome<void>>? _dataStageFuture;
+
+  /// 段階 2 が完了しているかどうか。
+  bool _dataStageCompleted = false;
+
+  /// Cookie と業務データの暗号化鍵の読み書きに使う窓口。
+  final EncryptionKeyStorage _keyStorage;
+
+  /// テストから差し替えた保存領域の処理と待ち時間。通常は `null`。
+  final ProxyStorageTestHooks? _storageTestHooks;
+
+  /// 段階 1 で確定した暗号化鍵。段階 2 で業務データの Box を開くために使う。
+  Uint8List? _storageEncryptionKey;
+
+  /// 段階 1 を済ませたときの保存領域の世代。済ませていない場合は `null`。
+  int? _keyStageGeneration;
+
+  /// このインスタンスで暗号化鍵を生成してからの経過時間の計測。生成していない
+  /// 場合は `null`。生成した場合は、旧平文 Box の移行を待ち時間の後へ遅らせる。
+  /// 端末の時計を戻しても遅れないよう、日時ではなく経過時間で判定する。
+  Stopwatch? _encryptionKeyGeneratedStopwatch;
+
+  /// 移行を待っている旧平文キューの Box。移行を待っていない場合は `null`。
+  Box? _legacyQueueBox;
+
+  /// 移行を待っている旧平文隔離の Box。移行を待っていない場合は `null`。
+  Box? _legacyQuarantineBox;
+
+  /// 移行を待っている旧平文ドロップ履歴の Box。移行を待っていない場合は `null`。
+  Box? _legacyDroppedRequestBox;
+
+  /// 移行を待っている旧平文 Box ごとのキーの一覧。
+  ///
+  /// 書き写したキーを暗号化 Box から消せなかった場合に備え、旧 Box が空になるまで
+  /// 暗号化 Box にある同じキーを、再送・隔離の変更・履歴の削除・件数と一覧から外す。
+  final Map<ProxyStorageBox, Set<String>> _pendingLegacyKeys = {};
+
+  /// 遅らせた移行を始めるタイマー。
+  Timer? _deferredMigrationTimer;
+
+  /// 実行中の遅らせた移行。完了すると、移行した Box があったかどうかを返す。
+  Future<bool>? _deferredMigrationFuture;
+
+  /// 遅らせた移行が書き写しを始めているかどうか。
+  bool _deferredMigrationCopying = false;
+
+  /// 送信を終えたキューの 1 件の保存（隔離・履歴への記録とキューからの削除）。
+  /// 保存中でない場合は `null`。stop() は Box を閉じる前にこれを待つ。
+  Future<void>? _queuedItemSaving;
+
+  /// stop() が Box を閉じ始めたかどうか。
+  ///
+  /// stop() が保存中の 1 件を待つと決めた後に始まった保存は待てないため、
+  /// 送信を終えたキューの 1 件は、これが立っていれば保存を始めずにキューに残す
+  /// （次の起動で再送する）。
+  bool _isClosingStorage = false;
+
+  /// 実行中の stop() の呼び出し数。同時に呼ばれた stop() がすべて終わるまで、
+  /// 停止中フラグを下ろさない。
+  int _pendingStopCount = 0;
+
+  /// start() の処理中かどうか。`_isRunning` は起動の最後に立つため、
+  /// 起動処理中の復旧 API を拒否するために別に持つ。
+  bool _isStarting = false;
+
+  /// stop() の処理中かどうか。キュー消化は次の 1 件へ進む前に、遅らせた移行は
+  /// 書き写しを始める前に、これを見て抜ける。
+  bool _isStopping = false;
+
+  /// キュー消化と遅らせた移行を排他にするロック。
+  ///
+  /// 複数のロックを取る場合は、キュー消化 → 隔離 → ドロップ履歴の順に取る。
+  final AsyncLock _queueDrainLock = AsyncLock();
+
+  /// 隔離を変更する処理（追加・上限による削除・再送・破棄・全削除・移行）を
+  /// 直列化するロック。
+  final AsyncLock _quarantineLock = AsyncLock();
+
+  /// ドロップ履歴を変更する処理（追加・確認済みへの変更・全削除・上限による削除・
+  /// 移行）を直列化するロック。
+  final AsyncLock _droppedRequestLock = AsyncLock();
+
+  /// 段階 1 で特定した Hive の保存先ディレクトリ。
+  String? _hiveDirectoryPath;
+
+  /// このインスタンスが最後に Cookie の暗号化 Box を破棄した日時。
+  DateTime? _lastCookieStorageDiscardedAt;
+
+  /// このインスタンスが最後に Cookie の暗号化 Box を破棄した理由。
+  StorageIntegrityFailure? _lastCookieStorageDiscardReason;
+
+  /// プロキシサーバのインスタンスを生成します。
+  OfflineWebProxy() : this._(null);
+
+  /// 保存領域の処理を差し替えたインスタンスを生成します。
+  ///
+  /// テスト専用です。鍵の読み取りの失敗や、照合と移行の待ち時間を差し替えます。
+  ///
+  /// [hooks] 差し替える処理と待ち時間。
+  @visibleForTesting
+  OfflineWebProxy.withStorageTestHooks(ProxyStorageTestHooks hooks)
+      : this._(hooks);
+
+  /// インスタンスを生成します。
+  ///
+  /// [hooks] テストから差し替える保存領域の処理。通常は `null`。
+  OfflineWebProxy._(ProxyStorageTestHooks? hooks)
+      : _storageTestHooks = hooks,
+        _keyStorage = hooks?.keyStorage ?? const SecureEncryptionKeyStorage();
+
   /// プロキシサーバを起動します。
   ///
   /// [config] 設定オブジェクト。省略時はデフォルト設定を使用します。
@@ -516,13 +752,27 @@ class OfflineWebProxy {
   /// Returns: 実際に使用されるポート番号。
   ///
   /// Throws:
-  ///   * [ProxyStartException] サーバ起動に失敗した場合。
+  ///   * [ProxyStartException] サーバ起動に失敗した場合。既に稼働中、または
+  ///     起動処理中の場合を含みます。
+  ///   * [StorageIntegrityException] 暗号化した保存領域を使えない場合。
+  ///     [ProxyStartException] のサブクラスで、包まずに送出します。何も
+  ///     消していません。[StorageIntegrityException.failure] で理由を判別し、
+  ///     必要なら利用者の確認を経て [recoverEncryptedStorage] を呼び出して
+  ///     ください。
   ///   * [PortBindException] ポートバインドに失敗した場合。
   Future<int> start({ProxyConfig? config}) async {
     if (_isRunning) {
       throw ProxyStartException('Proxy server is already running', null);
     }
+    if (_isStarting) {
+      throw ProxyStartException('Proxy server is already starting', null);
+    }
 
+    _isStarting = true;
+    _activeInstances.add(this);
+    // 前回の stop() が残した停止中フラグを下ろし、キュー消化がすぐ抜け続けないようにする
+    _isStopping = false;
+    _isClosingStorage = false;
     try {
       if (_eventController.isClosed) {
         _eventController = StreamController<ProxyEvent>.broadcast();
@@ -538,12 +788,16 @@ class OfflineWebProxy {
       _validateHealthCheckPath();
       _validateStatusPath();
       _validateAutoReloadSettings();
+      _validateRetentionSettings();
       _validateMirroredOrigins();
       _compileConfiguredPatterns();
       _resetRecoveryState();
 
       // ストレージを初期化
       await _initializeStorage();
+
+      // 隔離とドロップ履歴の保持上限を判定する（ロックを取れない場合は定期処理へ回す）
+      await _enforceRetentionLimits();
 
       // 旧ポート URL の読み替え対象として、直前のバインドポートを記録
       final persistedPort = await _loadPersistedPortForHost(_config!.host);
@@ -597,21 +851,42 @@ class OfflineWebProxy {
     } catch (e) {
       throw ProxyStartException(
           'Failed to start proxy server: $e', e is Exception ? e : null);
+    } finally {
+      _isStarting = false;
+      if (!_isRunning) {
+        _activeInstances.remove(this);
+      }
     }
   }
 
   /// プロキシサーバを停止します。
   ///
   /// Throws:
-  ///   * [ProxyStopException] サーバ停止に失敗した場合。
+  ///   * [ProxyStopException] サーバ停止に失敗した場合。復旧処理との排他を
+  ///     上限時間内に取得できなかった場合を含みます。
   Future<void> stop() async {
     if (!_isRunning) {
       return;
     }
 
+    // キュー消化が次の 1 件へ進まず、遅らせた移行が書き写しを始めないよう、最初に立てる。
+    // 同時に呼ばれた stop() がすべて終わるまで下ろさない
+    _pendingStopCount++;
+    _isStopping = true;
+
     // 復旧処理と同時に実行されないよう排他制御する
-    await _lifecycleLock.acquire();
+    try {
+      await _lifecycleLock.acquire();
+    } catch (e) {
+      // 取得できなかった場合は停止しないため、キュー消化と移行を止めたままにしない
+      _finishStopCall();
+      throw ProxyStopException(
+        'Failed to stop proxy server: $e',
+        e is Exception ? e : null,
+      );
+    }
     if (!_isRunning) {
+      _finishStopCall();
       _lifecycleLock.release();
       return;
     }
@@ -620,6 +895,8 @@ class OfflineWebProxy {
     try {
       _queueDrainTimer?.cancel();
       _queueDrainTimer = null;
+      _deferredMigrationTimer?.cancel();
+      _deferredMigrationTimer = null;
       _cachePurgeTimer?.cancel();
       _cachePurgeTimer = null;
       _healthCheckTimer?.cancel();
@@ -630,6 +907,22 @@ class OfflineWebProxy {
       await _server?.close();
       await _connectivitySubscription.cancel();
 
+      // 書き写しを始めた遅らせた移行は、ネットワークを使わず短いため終わるのを待つ。
+      // まだ始めていなければ、停止中フラグを見て取り消される。
+      final deferredMigration = _deferredMigrationFuture;
+      if (deferredMigration != null && _deferredMigrationCopying) {
+        await deferredMigration;
+      }
+
+      // 送信を終えたキューの 1 件の保存も、ネットワークを使わず短いため終わるのを待つ。
+      // 途中で Box を閉じると、隔離や履歴に記録したのにキューに残り、次の起動で二重になる。
+      // この後に保存を始める 1 件は、閉じ始めたことを見てキューに残す
+      _isClosingStorage = true;
+      final queuedItemSaving = _queuedItemSaving;
+      if (queuedItemSaving != null) {
+        await queuedItemSaving;
+      }
+
       // Hiveボックスを閉じる
       await _cacheBox?.close();
       await _queueBox?.close();
@@ -639,6 +932,9 @@ class OfflineWebProxy {
       await _idempotencyBox?.close();
       await _droppedRequestBox?.close();
       await _quarantinedRequestBox?.close();
+      await _legacyQueueBox?.close();
+      await _legacyQuarantineBox?.close();
+      await _legacyDroppedRequestBox?.close();
 
       // HTTPクライアントを閉じる
       _httpClient?.close(force: true);
@@ -658,6 +954,21 @@ class OfflineWebProxy {
       _handler = null;
       // 障害解析のため診断値は残し、実行制御状態のみ初期化する
       _resetRecoveryControlState();
+      // 閉じた Box を共有しないよう、次の起動や Cookie API で初期化し直す
+      _keyStageFuture = null;
+      _keyStageCompleted = false;
+      _dataStageFuture = null;
+      _dataStageCompleted = false;
+      // 移行を待っている旧 Box は、次の起動の段階 2 で改めて開いて予約し直す
+      _legacyQueueBox = null;
+      _legacyQuarantineBox = null;
+      _legacyDroppedRequestBox = null;
+      _pendingLegacyKeys.clear();
+      // 停止後の getStats() が前回の件数を返さないよう、未確認件数のキャッシュを捨てる
+      _unacknowledgedDroppedCount = null;
+      _activeInstances.remove(this);
+      _isClosingStorage = false;
+      _finishStopCall();
       _lifecycleLock.release();
     }
 
@@ -667,6 +978,17 @@ class OfflineWebProxy {
     }
 
     _emitEvent(ProxyEventType.serverStopped, '', {});
+  }
+
+  /// stop() の呼び出しを 1 つ終えます。
+  ///
+  /// 同時に呼ばれた stop() がすべて終わっていれば、停止中フラグを下ろします。
+  void _finishStopCall() {
+    _pendingStopCount--;
+    if (_pendingStopCount <= 0) {
+      _pendingStopCount = 0;
+      _isStopping = false;
+    }
   }
 
   /// プロキシサーバの動作状態を取得します。
@@ -862,6 +1184,8 @@ class OfflineWebProxy {
       upstreamCircuitState: _upstreamCircuitState,
       consecutiveUpstreamFailures: _consecutiveUpstreamFailures,
       lastUpstreamSuccessAt: _lastUpstreamSuccessAt,
+      lastCookieStorageDiscardedAt: _lastCookieStorageDiscardedAt,
+      lastCookieStorageDiscardReason: _lastCookieStorageDiscardReason,
     );
   }
 
@@ -1055,6 +1379,7 @@ class OfflineWebProxy {
                 'reason': request.reason,
                 'statusCode': request.statusCode,
                 'errorMessage': request.errorMessage,
+                'pendingMigration': request.pendingMigration,
               })
           .toList(growable: false),
     });
@@ -1076,15 +1401,23 @@ class OfflineWebProxy {
       );
     }
 
-    final retried = await retryQuarantinedRequest(id);
-    if (!retried) {
-      return _buildInternalJsonResponse(
-        HttpStatus.notFound,
-        {'retried': false, 'error': 'quarantined request was not found'},
-      );
-    }
-
-    return _buildInternalJsonResponse(HttpStatus.ok, {'retried': true});
+    final result = await _retryQuarantinedRequestInternal(id);
+    return switch (result) {
+      _QuarantineOperationResult.done =>
+        _buildInternalJsonResponse(HttpStatus.ok, {'retried': true}),
+      // 移行を待っている記録は、見つからない（404）ではなく操作できない状態として返す
+      _QuarantineOperationResult.pendingMigration => _buildInternalJsonResponse(
+          HttpStatus.conflict,
+          {
+            'retried': false,
+            'error': 'quarantined request is waiting for storage migration',
+          },
+        ),
+      _QuarantineOperationResult.notFound => _buildInternalJsonResponse(
+          HttpStatus.notFound,
+          {'retried': false, 'error': 'quarantined request was not found'},
+        ),
+    };
   }
 
   /// 隔離されたリクエストを破棄します。
@@ -1103,15 +1436,23 @@ class OfflineWebProxy {
       );
     }
 
-    final discarded = await discardQuarantinedRequest(id);
-    if (!discarded) {
-      return _buildInternalJsonResponse(
-        HttpStatus.notFound,
-        {'discarded': false, 'error': 'quarantined request was not found'},
-      );
-    }
-
-    return _buildInternalJsonResponse(HttpStatus.ok, {'discarded': true});
+    final result = await _discardQuarantinedRequestInternal(id);
+    return switch (result) {
+      _QuarantineOperationResult.done =>
+        _buildInternalJsonResponse(HttpStatus.ok, {'discarded': true}),
+      // 移行を待っている記録は、見つからない（404）ではなく操作できない状態として返す
+      _QuarantineOperationResult.pendingMigration => _buildInternalJsonResponse(
+          HttpStatus.conflict,
+          {
+            'discarded': false,
+            'error': 'quarantined request is waiting for storage migration',
+          },
+        ),
+      _QuarantineOperationResult.notFound => _buildInternalJsonResponse(
+          HttpStatus.notFound,
+          {'discarded': false, 'error': 'quarantined request was not found'},
+        ),
+    };
   }
 
   /// 稼働確認要求かどうかを返します。
@@ -1474,6 +1815,46 @@ class OfflineWebProxy {
         '${config.autoReloadQueueWaitTimeout}',
         null,
       );
+    }
+  }
+
+  /// 隔離とドロップ履歴の保持上限の設定を検証します。
+  ///
+  /// 0 は上限なしとして受け付け、負の値は拒否します。
+  ///
+  /// Throws:
+  ///   * [ProxyStartException] 負の値が指定されている場合。
+  void _validateRetentionSettings() {
+    final config = _config;
+    if (config == null) {
+      return;
+    }
+
+    final limits = <String, int>{
+      'quarantineMaxCount': config.quarantineMaxCount,
+      'quarantineMaxBytes': config.quarantineMaxBytes,
+      'droppedRequestMaxCount': config.droppedRequestMaxCount,
+    };
+    for (final entry in limits.entries) {
+      if (entry.value < 0) {
+        throw ProxyStartException(
+          '${entry.key} must not be negative: ${entry.value}',
+          null,
+        );
+      }
+    }
+
+    final retentions = <String, Duration>{
+      'quarantineRetention': config.quarantineRetention,
+      'droppedRequestRetention': config.droppedRequestRetention,
+    };
+    for (final entry in retentions.entries) {
+      if (entry.value.isNegative) {
+        throw ProxyStartException(
+          '${entry.key} must not be negative: ${entry.value}',
+          null,
+        );
+      }
     }
   }
 
@@ -2298,7 +2679,8 @@ class OfflineWebProxy {
   /// Returns: Cookie情報の一覧。
   ///
   /// Throws:
-  ///   * [CookieOperationException] Cookieの取得に失敗した場合。
+  ///   * [CookieOperationException] Cookieの取得に失敗した場合。暗号化した
+  ///     保存領域を使えない場合は、[StorageIntegrityException] を cause に持ちます。
   Future<List<CookieInfo>> getCookies({String? domain}) async {
     try {
       await _ensureCookieStorageInitialized();
@@ -2338,7 +2720,8 @@ class OfflineWebProxy {
   ///
   /// Throws:
   ///   * [ArgumentError] URL が空または絶対 URL ではない場合。
-  ///   * [CookieOperationException] Cookie ヘッダ生成に失敗した場合。
+  ///   * [CookieOperationException] Cookie ヘッダ生成に失敗した場合。暗号化した
+  ///     保存領域を使えない場合は、[StorageIntegrityException] を cause に持ちます。
   Future<String?> getCookieHeaderForUrl(String url) async {
     if (url.trim().isEmpty) {
       throw ArgumentError('URL must not be empty');
@@ -2435,7 +2818,8 @@ class OfflineWebProxy {
   /// start 前でも呼び出せ、復元済み Cookie は起動後の上流リクエストに利用されます。
   ///
   /// Throws:
-  ///   * [CookieOperationException] Cookie の復元に失敗した場合。
+  ///   * [CookieOperationException] Cookie の復元に失敗した場合。暗号化した
+  ///     保存領域を使えない場合は、[StorageIntegrityException] を cause に持ちます。
   Future<void> restoreCookies(Iterable<CookieRestoreEntry> entries) async {
     try {
       await _ensureCookieStorageInitialized();
@@ -2510,7 +2894,8 @@ class OfflineWebProxy {
   /// [domain] 特定ドメインのCookieのみを削除したい場合に指定。省略時は全Cookieを削除。
   ///
   /// Throws:
-  ///   * [CookieOperationException] Cookieの削除に失敗した場合。
+  ///   * [CookieOperationException] Cookieの削除に失敗した場合。暗号化した
+  ///     保存領域を使えない場合は、[StorageIntegrityException] を cause に持ちます。
   Future<void> clearCookies({String? domain}) async {
     try {
       await _ensureCookieStorageInitialized();
@@ -2541,31 +2926,35 @@ class OfflineWebProxy {
 
   /// オフライン時にキューに保存されたリクエストの一覧を取得します。
   ///
+  /// 保存日時（`queuedAt`）の古い順に並びます。保存日時が同じ場合は、保存に
+  /// 使ったキーを時刻として読み直した値で並べます。暗号化する前の保存領域から
+  /// 移行を待っている項目も含み、その項目は [QueuedRequest.pendingMigration] が
+  /// `true` になります。
+  ///
+  /// [QueuedRequest.headers] は、機密情報を含み得るヘッダの値を `***` に
+  /// 置き換えます。対象は、名前を小文字にし `_` を `-` とみなしたときに
+  /// `cookie`、`authorization`、`proxy-authorization` と一致するか、`auth`、
+  /// `token`、`secret`、`session`、`csrf`、`xsrf`、`key`、`pass`、
+  /// `credential`、`signature`、`jwt`、`cookie` のいずれかを含むものです。
+  /// [ProxyConfig.idempotencyHeaderName] のヘッダは置き換えません。保存される
+  /// ヘッダはクライアントが送ったものだけで、proxy が付けるヘッダは送信時に
+  /// 加えます。URL のクエリは置き換えません。再送には保存した値をそのまま
+  /// 使います。
+  ///
   /// Returns: キューに保存されているリクエストの一覧。
   ///
   /// Throws:
   ///   * [QueueOperationException] キュー情報の取得に失敗した場合。
   Future<List<QueuedRequest>> getQueuedRequests() async {
     try {
-      final requests = <QueuedRequest>[];
-
-      if (_queueBox != null) {
-        int idx = 0;
-        for (final key in _queueBox!.keys) {
-          final data = _queueBox!.get(key) as Map?;
-          if (data != null) {
-            requests.add(_mapToQueuedRequest(data));
-          }
-
-          // 大量キュー走査時にUIをブロックしないようyield
-          idx++;
-          if (idx % 50 == 0) {
-            await Future.delayed(Duration.zero);
-          }
-        }
-      }
-
-      return requests;
+      final entries =
+          await _collectStoredEntries(ProxyStorageBox.queue, 'queuedAt');
+      return entries
+          .map((entry) => _mapToQueuedRequest(
+                entry.data,
+                pendingMigration: entry.pendingMigration,
+              ))
+          .toList();
     } catch (e) {
       throw QueueOperationException(
           'get', 'キューされたリクエストの取得に失敗しました: $e', e is Exception ? e : null);
@@ -2574,7 +2963,11 @@ class OfflineWebProxy {
 
   /// キューから除外されたリクエストの履歴を取得します。
   ///
-  /// [limit] 取得する最大件数。
+  /// 記録した日時（`droppedAt`）の古い順に並びます。暗号化する前の保存領域から
+  /// 移行を待っている履歴も含み、その履歴は [DroppedRequest.pendingMigration] が
+  /// `true` になります。
+  ///
+  /// [limit] 取得する最大件数。並べた後の先頭からの件数です。
   ///
   /// Returns: ドロップされたリクエストの履歴。
   ///
@@ -2586,27 +2979,17 @@ class OfflineWebProxy {
         return const <DroppedRequest>[];
       }
 
-      final requests = <DroppedRequest>[];
-
-      if (_droppedRequestBox != null) {
-        int idx = 0;
-        for (final key in _droppedRequestBox!.keys) {
-          final data = _droppedRequestBox!.get(key) as Map?;
-          if (data != null) {
-            requests.add(_mapToDroppedRequest(data));
-            if (limit != null && requests.length >= limit) {
-              break;
-            }
-          }
-
-          idx++;
-          if (idx % 50 == 0) {
-            await Future.delayed(Duration.zero);
-          }
-        }
-      }
-
-      return requests;
+      final entries = await _collectStoredEntries(
+        ProxyStorageBox.droppedRequests,
+        'droppedAt',
+      );
+      final selected = limit == null ? entries : entries.take(limit);
+      return selected
+          .map((entry) => _mapToDroppedRequest(
+                entry.data,
+                pendingMigration: entry.pendingMigration,
+              ))
+          .toList();
     } catch (e) {
       throw QueueOperationException('getDropped', 'ドロップされたリクエストの取得に失敗しました: $e',
           e is Exception ? e : null);
@@ -2617,33 +3000,51 @@ class OfflineWebProxy {
   ///
   /// 起動時に未確認の履歴を検知したあと、利用者へ提示し終えた時点で
   /// 呼び出してください。履歴自体は削除しないため、内容は後から参照できます。
+  /// 暗号化する前の保存領域から移行を待っている履歴も確認済みにし、移行後に
+  /// 未確認へ戻らないようにします。
   ///
   /// Returns: 確認済みへ変更した件数。
   ///
   /// Throws:
-  ///   * [QueueOperationException] 更新に失敗した場合。
+  ///   * [QueueOperationException] 更新に失敗した場合。履歴のロックを
+  ///     30 秒以内に取得できなかった場合を含みます。
   Future<int> acknowledgeDroppedRequests() async {
     try {
-      final box = _droppedRequestBox;
-      if (box == null || !box.isOpen) {
-        return 0;
-      }
+      return await _droppedRequestLock.synchronized(() async {
+        final excludedKeys =
+            _excludedLegacyKeys(ProxyStorageBox.droppedRequests);
+        final sources = [
+          (box: _droppedRequestBox, isLegacy: false),
+          (box: _legacyDroppedRequestBox, isLegacy: true),
+        ];
 
-      var updated = 0;
-      for (final key in box.keys.toList()) {
-        final data = box.get(key) as Map?;
-        if (data == null || data['acknowledged'] == true) {
-          continue;
+        var updated = 0;
+        for (final source in sources) {
+          final box = source.box;
+          if (box == null || !box.isOpen) {
+            continue;
+          }
+
+          for (final key in box.keys.toList()) {
+            if (!source.isLegacy && excludedKeys.contains(key.toString())) {
+              continue;
+            }
+
+            final data = box.get(key) as Map?;
+            if (data == null || data['acknowledged'] == true) {
+              continue;
+            }
+
+            final updatedData = Map<String, dynamic>.from(data);
+            updatedData['acknowledged'] = true;
+            await box.put(key, updatedData);
+            updated++;
+          }
         }
 
-        final updatedData = Map<String, dynamic>.from(data);
-        updatedData['acknowledged'] = true;
-        await box.put(key, updatedData);
-        updated++;
-      }
-
-      _unacknowledgedDroppedCount = null;
-      return updated;
+        _unacknowledgedDroppedCount = null;
+        return updated;
+      }, timeout: _storageLockTimeout);
     } catch (e) {
       throw QueueOperationException('acknowledgeDropped',
           'ドロップされたリクエストの確認状態の更新に失敗しました: $e', e is Exception ? e : null);
@@ -2658,7 +3059,10 @@ class OfflineWebProxy {
   ///
   /// [limit] 取得する最大件数。
   ///
-  /// Returns: 隔離されているリクエストの一覧。隔離した順に並びます。
+  /// Returns: 隔離されているリクエストの一覧。隔離した日時（`quarantinedAt`）の
+  ///   古い順に並び、[limit] は並べた後の先頭からの件数です。暗号化する前の
+  ///   保存領域から移行を待っている項目も含み、その項目は
+  ///   [QuarantinedRequest.pendingMigration] が `true` になります。
   ///
   /// Throws:
   ///   * [QueueOperationException] 取得に失敗した場合。
@@ -2668,29 +3072,18 @@ class OfflineWebProxy {
         return const <QuarantinedRequest>[];
       }
 
-      final box = _quarantinedRequestBox;
-      if (box == null || !box.isOpen) {
-        return const <QuarantinedRequest>[];
-      }
-
-      final requests = <QuarantinedRequest>[];
-      var index = 0;
-      for (final key in box.keys) {
-        final data = box.get(key) as Map?;
-        if (data != null) {
-          requests.add(_mapToQuarantinedRequest(key.toString(), data));
-          if (limit != null && requests.length >= limit) {
-            break;
-          }
-        }
-
-        index++;
-        if (index % 50 == 0) {
-          await Future.delayed(Duration.zero);
-        }
-      }
-
-      return requests;
+      final entries = await _collectStoredEntries(
+        ProxyStorageBox.quarantine,
+        'quarantinedAt',
+      );
+      final selected = limit == null ? entries : entries.take(limit);
+      return selected
+          .map((entry) => _mapToQuarantinedRequest(
+                entry.key,
+                entry.data,
+                pendingMigration: entry.pendingMigration,
+              ))
+          .toList();
     } catch (e) {
       throw QueueOperationException('getQuarantined',
           '隔離されたリクエストの取得に失敗しました: $e', e is Exception ? e : null);
@@ -2704,52 +3097,94 @@ class OfflineWebProxy {
   ///
   /// [id] [getQuarantinedRequests] が返した識別子。
   ///
-  /// Returns: キューへ戻した場合は `true`。該当が無い場合は `false`。
+  /// Returns: キューへ戻した場合は `true`。該当が無い場合と、暗号化する前の
+  ///   保存領域から移行を待っている項目の場合は `false`。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 操作に失敗した場合。隔離のロックを
+  ///     30 秒以内に取得できなかった場合を含みます。
+  Future<bool> retryQuarantinedRequest(String id) async {
+    return await _retryQuarantinedRequestInternal(id) ==
+        _QuarantineOperationResult.done;
+  }
+
+  /// 隔離されたリクエストをキューへ戻し、操作の結果を返します。
+  ///
+  /// 隔離のロックの中でキューへ戻し、ロックを離してからキュー消化を始めます
+  /// （ロックの順序を守り、互いに待ち合って止まらないようにするため）。
+  ///
+  /// [id] 隔離領域内での識別子。
+  ///
+  /// Returns: 操作の結果。
   ///
   /// Throws:
   ///   * [QueueOperationException] 操作に失敗した場合。
-  Future<bool> retryQuarantinedRequest(String id) async {
+  Future<_QuarantineOperationResult> _retryQuarantinedRequestInternal(
+    String id,
+  ) async {
     try {
-      final quarantineBox = _quarantinedRequestBox;
-      final queueBox = _queueBox;
-      if (quarantineBox == null ||
-          !quarantineBox.isOpen ||
-          queueBox == null ||
-          !queueBox.isOpen) {
-        return false;
+      final result = await _quarantineLock.synchronized(() async {
+        if (_isPendingLegacyQuarantine(id)) {
+          return _QuarantineOperationResult.pendingMigration;
+        }
+
+        final quarantineBox = _quarantinedRequestBox;
+        final queueBox = _queueBox;
+        if (quarantineBox == null ||
+            !quarantineBox.isOpen ||
+            queueBox == null ||
+            !queueBox.isOpen) {
+          return _QuarantineOperationResult.notFound;
+        }
+
+        final data = quarantineBox.get(id) as Map?;
+        if (data == null) {
+          return _QuarantineOperationResult.notFound;
+        }
+
+        final now = DateTime.now();
+        final queueData = Map<String, dynamic>.from(data)
+          ..remove('quarantinedAt')
+          ..remove('reason')
+          ..remove('errorMessage')
+          ..remove('statusCode')
+          ..['retryCount'] = 0
+          ..['nextRetryAt'] = now.toIso8601String()
+          // 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る。
+          // 業務上の発生時刻は acceptedAt が保持するため、ここでは触れない。
+          ..['queuedAt'] = now.toIso8601String();
+
+        final key = _generateUniqueStorageKey(queueBox, _legacyQueueBox);
+        await queueBox.put(key, queueData);
+        await quarantineBox.delete(id);
+
+        _emitEvent(ProxyEventType.requestQueued,
+            queueData['url'] as String? ?? '', {'queueId': key});
+        return _QuarantineOperationResult.done;
+      }, timeout: _storageLockTimeout);
+
+      if (result == _QuarantineOperationResult.done) {
+        // ignore: discarded_futures
+        _drainQueue();
       }
-
-      final data = quarantineBox.get(id) as Map?;
-      if (data == null) {
-        return false;
-      }
-
-      final now = DateTime.now();
-      final queueData = Map<String, dynamic>.from(data)
-        ..remove('quarantinedAt')
-        ..remove('reason')
-        ..remove('errorMessage')
-        ..remove('statusCode')
-        ..['retryCount'] = 0
-        ..['nextRetryAt'] = now.toIso8601String()
-        // 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る。
-        // 業務上の発生時刻は acceptedAt が保持するため、ここでは触れない。
-        ..['queuedAt'] = now.toIso8601String();
-
-      final key = _generateUniqueStorageKey(queueBox);
-      await queueBox.put(key, queueData);
-      await quarantineBox.delete(id);
-
-      _emitEvent(ProxyEventType.requestQueued,
-          queueData['url'] as String? ?? '', {'queueId': key});
-
-      // ignore: discarded_futures
-      _drainQueue();
-      return true;
+      return result;
     } catch (e) {
       throw QueueOperationException('retryQuarantined',
           '隔離されたリクエストの再送に失敗しました: $e', e is Exception ? e : null);
     }
+  }
+
+  /// 隔離の記録が、移行を待っている旧平文 Box の記録かどうかを返します。
+  ///
+  /// [id] 隔離領域内での識別子。
+  ///
+  /// Returns: 移行を待っている記録の場合は `true`。
+  bool _isPendingLegacyQuarantine(String id) {
+    final legacyBox = _legacyQuarantineBox;
+    if (legacyBox != null && legacyBox.isOpen && legacyBox.containsKey(id)) {
+      return true;
+    }
+    return _excludedLegacyKeys(ProxyStorageBox.quarantine).contains(id);
   }
 
   /// 隔離されたリクエストを破棄します。
@@ -2758,19 +3193,42 @@ class OfflineWebProxy {
   ///
   /// [id] [getQuarantinedRequests] が返した識別子。
   ///
-  /// Returns: 破棄した場合は `true`。該当が無い場合は `false`。
+  /// Returns: 破棄した場合は `true`。該当が無い場合と、暗号化する前の保存領域から
+  ///   移行を待っている項目の場合は `false`。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 操作に失敗した場合。隔離のロックを
+  ///     30 秒以内に取得できなかった場合を含みます。
+  Future<bool> discardQuarantinedRequest(String id) async {
+    return await _discardQuarantinedRequestInternal(id) ==
+        _QuarantineOperationResult.done;
+  }
+
+  /// 隔離されたリクエストを破棄し、操作の結果を返します。
+  ///
+  /// [id] 隔離領域内での識別子。
+  ///
+  /// Returns: 操作の結果。
   ///
   /// Throws:
   ///   * [QueueOperationException] 操作に失敗した場合。
-  Future<bool> discardQuarantinedRequest(String id) async {
+  Future<_QuarantineOperationResult> _discardQuarantinedRequestInternal(
+    String id,
+  ) async {
     try {
-      final box = _quarantinedRequestBox;
-      if (box == null || !box.isOpen || !box.containsKey(id)) {
-        return false;
-      }
+      return await _quarantineLock.synchronized(() async {
+        if (_isPendingLegacyQuarantine(id)) {
+          return _QuarantineOperationResult.pendingMigration;
+        }
 
-      await box.delete(id);
-      return true;
+        final box = _quarantinedRequestBox;
+        if (box == null || !box.isOpen || !box.containsKey(id)) {
+          return _QuarantineOperationResult.notFound;
+        }
+
+        await box.delete(id);
+        return _QuarantineOperationResult.done;
+      }, timeout: _storageLockTimeout);
     } catch (e) {
       throw QueueOperationException('discardQuarantined',
           '隔離されたリクエストの破棄に失敗しました: $e', e is Exception ? e : null);
@@ -2779,11 +3237,19 @@ class OfflineWebProxy {
 
   /// 隔離されたリクエストを全て破棄します。
   ///
+  /// 暗号化する前の保存領域から移行を待っている項目も破棄します。
+  ///
   /// Throws:
-  ///   * [QueueOperationException] 破棄に失敗した場合。
+  ///   * [QueueOperationException] 破棄に失敗した場合。隔離のロックを
+  ///     30 秒以内に取得できなかった場合を含みます。
   Future<void> clearQuarantinedRequests() async {
     try {
-      await _quarantinedRequestBox?.clear();
+      await _quarantineLock.synchronized(() async {
+        await _quarantinedRequestBox?.clear();
+        // 利用者の意図は全件の破棄のため、移行を待っている分も消す。
+        // 移行と同じロックの中で消し、書き写しで暗号化 Box に残らないようにする。
+        await _clearLegacyBox(ProxyStorageBox.quarantine);
+      }, timeout: _storageLockTimeout);
     } catch (e) {
       throw QueueOperationException('clearQuarantined',
           '隔離されたリクエストの破棄に失敗しました: $e', e is Exception ? e : null);
@@ -2792,19 +3258,100 @@ class OfflineWebProxy {
 
   /// ドロップされたリクエストの履歴を全て削除します。
   ///
+  /// 暗号化する前の保存領域から移行を待っている履歴も削除します。
+  ///
   /// Throws:
-  ///   * [QueueOperationException] 履歴の削除に失敗した場合。
+  ///   * [QueueOperationException] 履歴の削除に失敗した場合。履歴のロックを
+  ///     30 秒以内に取得できなかった場合を含みます。
   Future<void> clearDroppedRequests() async {
     try {
-      await _droppedRequestBox?.clear();
-      _unacknowledgedDroppedCount = null;
+      await _droppedRequestLock.synchronized(() async {
+        await _droppedRequestBox?.clear();
+        // 利用者の意図は全件の削除のため、移行を待っている分も消す。
+        // 移行と同じロックの中で消し、書き写しで暗号化 Box に残らないようにする。
+        await _clearLegacyBox(ProxyStorageBox.droppedRequests);
+        _unacknowledgedDroppedCount = null;
+      }, timeout: _storageLockTimeout);
     } catch (e) {
       throw QueueOperationException('clearDropped',
           'ドロップされたリクエスト履歴の削除に失敗しました: $e', e is Exception ? e : null);
     }
   }
 
+  /// 暗号化した保存領域を、利用者の確認を経て復旧します。
+  ///
+  /// `start()` や Cookie API が [StorageIntegrityException] で失敗し、再試行しても
+  /// 解消しない場合に、失われる内容を利用者へ説明し、同意を得てから呼び出して
+  /// ください。この isolate の proxy のいずれかが稼働中または起動処理中の場合は、
+  /// 使用中の Box を閉じないよう何もしません
+  /// （[StorageRecoveryRejection.proxyActive]）。
+  ///
+  /// 直前に `start()` と同じく鍵を読み直し、同じ時間の上限で暗号化 Box と照合して、
+  /// 次のとおり扱います。
+  /// * 鍵を一時的に読めない場合は、何もしません
+  ///   （[StorageRecoveryRejection.temporarilyUnavailable]）。
+  /// * 鍵があり、キュー・隔離・ドロップ履歴の Box に問題が無い場合は、何もしません
+  ///   （[StorageRecoveryRejection.startWillSucceed]）。Cookie Box だけの問題は
+  ///   `start()` が Cookie Box を破棄して続けるためです。
+  /// * 鍵があり、問題のある Box がある場合は、鍵を残して Box ごとに扱います。
+  ///   鍵と一致しない Box は削除します。先頭側が壊れた Box は、鍵と一致する
+  ///   最初の記録から後ろを残して作り直します（失われる先頭側の記録の件数は
+  ///   分かりません）。照合が時間の上限を超えた Box は、Box を閉じた後に
+  ///   時間の上限を設けずに照合し直し、その結果で扱います（鍵と一致しなければ
+  ///   削除、先頭側が壊れていれば作り直し）。先頭の記録が書きかけで鍵と一致する
+  ///   記録も無ければ、0 バイトに切り詰めます（開いたときに Hive も同じく
+  ///   切り詰めるため、失うものはありません）。問題の無い Box は残します。
+  /// * 鍵の形式が正しくない場合、または鍵なし・読み取り不能の場合（中身のある
+  ///   暗号化 Box があれば、読み直しても続く場合）は、次のとおりです。
+  ///   キュー・隔離・ドロップ履歴の Box のどれかに中身があれば、暗号化 Box
+  ///   （Cookie・キュー・隔離・ドロップ履歴）をすべて削除してから鍵を削除します。
+  ///   Cookie も消えるため、再ログインが必要になります。どれにも中身が無ければ
+  ///   何も消しません（[StorageRecoveryRejection.startWillSucceed]）。
+  ///
+  /// 鍵を書き込めずに起動に失敗した場合（[StorageIntegrityFailure.keyWriteFailed]）は、
+  /// 消す必要のある Box が無いため何もしません
+  /// （[StorageRecoveryRejection.startWillSucceed]）。時間をおいて `start()` を
+  /// 再試行してください。
+  ///
+  /// 削除や作り直しの前に proxy の Box をすべて閉じます。作り直しは置き換えが
+  /// 終わるまで元のファイルを残すため、途中で失敗しても再実行できます。
+  /// 暗号化する前の旧平文 Box は削除しません（鍵が無くても読めるため、次の
+  /// `start()` で移行します）。終了後は、プロセスを再起動せずに `start()` を
+  /// 呼び出せます。鍵を削除した場合、次の `start()` は新しい鍵を生成します。
+  ///
+  /// 暗号化された記録の件数は読めないため返しません。起動に失敗した後の
+  /// [getStats] は 0 件を返すため、確認画面の根拠には使わないでください。
+  ///
+  /// Returns: 実行したかどうか、削除・作り直し・そのまま残した Box、鍵を
+  ///   削除したかどうか。
+  ///
+  /// Throws:
+  ///   * [StorageRecoveryException] Box のファイルや鍵の削除などに失敗した場合。
+  Future<EncryptedStorageRecoveryResult> recoverEncryptedStorage() async {
+    if (_activeInstances.isNotEmpty) {
+      return const EncryptedStorageRecoveryResult.rejected(
+        StorageRecoveryRejection.proxyActive,
+      );
+    }
+
+    try {
+      // 初期化と同じ直列化に入り、Cookie API がきっかけの初期化とも重ならないようにする
+      return await _storageInitializationLock.synchronized(_runStorageRecovery);
+    } on StorageRecoveryException {
+      rethrow;
+    } catch (error) {
+      throw StorageRecoveryException(
+        'Failed to recover encrypted storage: $error',
+        error,
+      );
+    }
+  }
+
   /// プロキシサーバの統計情報を取得します。
+  ///
+  /// キュー・隔離・ドロップ履歴の件数には、暗号化する前の保存領域から移行を
+  /// 待っている分も含みます。保存領域を開く前に起動に失敗した場合
+  /// （[StorageIntegrityException] など）と停止後は、これらの件数は 0 です。
   ///
   /// Returns: リクエスト数、キャッシュヒット率、キュー長などの統計情報。
   ///
@@ -2812,9 +3359,12 @@ class OfflineWebProxy {
   ///   * [StatsOperationException] 統計情報の取得に失敗した場合。
   Future<ProxyStats> getStats() async {
     try {
-      final queueLength = _queueBox?.length ?? 0;
-      final droppedRequestsCount = _droppedRequestBox?.length ?? 0;
-      final quarantinedCount = _quarantinedRequestBox?.length ?? 0;
+      // 暗号化する前の保存領域から移行を待っている分も含める。
+      // 未送信があるときに精算させない、といった判断で見落とさないようにするため。
+      final queueLength = _countStoredEntries(ProxyStorageBox.queue);
+      final droppedRequestsCount =
+          _countStoredEntries(ProxyStorageBox.droppedRequests);
+      final quarantinedCount = _countStoredEntries(ProxyStorageBox.quarantine);
       final unacknowledgedDroppedCount = _countUnacknowledgedDroppedRequests();
       final uptime = _startedAt != null
           ? DateTime.now().difference(_startedAt!)
@@ -2851,16 +3401,27 @@ class OfflineWebProxy {
       return cached;
     }
 
-    final box = _droppedRequestBox;
-    if (box == null || !box.isOpen) {
-      return 0;
-    }
+    final excludedKeys = _excludedLegacyKeys(ProxyStorageBox.droppedRequests);
+    final sources = [
+      (box: _droppedRequestBox, isLegacy: false),
+      (box: _legacyDroppedRequestBox, isLegacy: true),
+    ];
 
     var count = 0;
-    for (final key in box.keys) {
-      final data = box.get(key) as Map?;
-      if (data != null && data['acknowledged'] != true) {
-        count++;
+    for (final source in sources) {
+      final box = source.box;
+      if (box == null || !box.isOpen) {
+        continue;
+      }
+
+      for (final key in box.keys) {
+        if (!source.isLegacy && excludedKeys.contains(key.toString())) {
+          continue;
+        }
+        final data = box.get(key) as Map?;
+        if (data != null && data['acknowledged'] != true) {
+          count++;
+        }
       }
     }
 
@@ -2905,18 +3466,1231 @@ class OfflineWebProxy {
 
   /// Hiveデータベースの初期化を行います。
   ///
-  /// キャッシュ、キュー、Cookie、べき等性キー用の
-  /// ボックスをそれぞれ開きます。
+  /// 段階 1（鍵と Cookie Box）と段階 2（キャッシュ、キュー、べき等性キー
+  /// などの Box）を順に完了させます。
   Future<void> _initializeStorage() async {
-    _cacheBox = await Hive.openBox('proxy_cache');
-    _queueBox = await Hive.openBox('proxy_queue');
-    _portPreferenceBox = await Hive.openBox(_portPreferenceBoxName);
-    _webStorageBox = await Hive.openBox(_webStorageBoxName);
-    await _ensureCookieStorageInitialized();
-    _idempotencyBox = await Hive.openBox('proxy_idempotency');
-    _droppedRequestBox = await Hive.openBox(_droppedRequestBoxName);
-    _quarantinedRequestBox = await Hive.openBox(_quarantinedRequestBoxName);
+    await _ensureDataStage();
+  }
+
+  /// 保存領域の初期化の段階 2 を実行します。
+  ///
+  /// `start()` だけが呼び出します。段階 1 の完了を待ってから、段階 1 と
+  /// 同じ直列化の中で実行します。実行中の段階 2 があればその結果を共有します。
+  /// 完了済みの結果を使う場合も初期化のロックを 1 回通り、Box が閉じられて
+  /// いないことと保存領域の世代が変わっていないことを確かめ直します。失敗した
+  /// 場合は段階 2 の結果だけを捨て、段階 1 の結果（Cookie Box）はそのまま
+  /// 使えるようにします。
+  Future<void> _ensureDataStage() async {
+    await _ensureKeyStage();
+
+    final current = _dataStageFuture;
+    if (current != null && !_dataStageCompleted) {
+      // 実行中の段階 2 を共有する
+      (await current).unwrap();
+      return;
+    }
+
+    // 完了済みの結果を使う場合も、初期化のロックを 1 回通ってから確かめ直す。
+    // 照合の間に復旧 API がこのロックの中で Box を削除・作り直していた場合に、
+    // 閉じた Box や古い鍵のまま起動しないため
+    final wasCompleted = current != null;
+    late final Future<_StageOutcome<void>> stage;
+    stage = _storageInitializationLock.synchronized(() async {
+      try {
+        if (!wasCompleted || !_isDataStageFresh) {
+          await _runDataStage();
+        }
+        if (identical(_dataStageFuture, stage)) {
+          _dataStageCompleted = true;
+        }
+        return const _StageOutcome<void>.success(null);
+      } catch (error, stackTrace) {
+        if (identical(_dataStageFuture, stage)) {
+          _dataStageFuture = null;
+        }
+        return _StageOutcome<void>.failure(error, stackTrace);
+      }
+    });
+    _dataStageFuture = stage;
+    _dataStageCompleted = false;
+    (await stage).unwrap();
+  }
+
+  /// 完了済みの段階 2 の結果を、そのまま使えるかどうかを返します。
+  ///
+  /// 段階 2 で開いた Box がどれも閉じられておらず、段階 1 を済ませた後に
+  /// 保存領域の世代が変わっていない場合に `true` です。
+  bool get _isDataStageFresh =>
+      _keyStageGeneration == _storageGeneration &&
+      _dataStageBoxes.every((box) => box != null && box.isOpen);
+
+  /// 段階 2 で開く Box の一覧を返します（移行を待つ旧平文 Box は含みません）。
+  ///
+  /// 段階 2 の結果をそのまま使えるか（どれも閉じられていないか）の判定に使います。
+  List<Box?> get _dataStageBoxes => [
+        _cacheBox,
+        _webStorageBox,
+        _idempotencyBox,
+        _queueBox,
+        _quarantinedRequestBox,
+        _droppedRequestBox,
+      ];
+
+  /// 段階 2 の本体です。
+  ///
+  /// キャッシュ、WebStorage、べき等性キーの Box と、段階 1 で確定した鍵で
+  /// キュー・隔離・ドロップ履歴の暗号化 Box を開き、旧平文 Box を移行します。
+  /// このインスタンスで鍵を生成した場合は、旧平文 Box を開いてキーの一覧を
+  /// 持つだけにし、移行は待ち時間の後へ遅らせます。
+  ///
+  /// 失敗した場合は、この呼び出しで開いた Box を閉じ、フィールドを `null` に
+  /// 戻してから例外を送出します。
+  ///
+  /// 初期化のロックを保持したまま実行されます。ロックは再入できないため、
+  /// ここから `_ensure` で始まる関数や Cookie を保存する関数を呼んではいけません。
+  /// 段階 1 の後に復旧 API が保存領域を変えていた場合（別のインスタンスの復旧を
+  /// 含む）は、古い鍵を使わないよう、ロックの中で段階 1 の本体をやり直してから
+  /// 進みます。
+  ///
+  /// Throws:
+  ///   * [StorageIntegrityException] やり直した段階 1 が判定表で起動失敗と
+  ///     なった場合。
+  ///   * [StateError] 段階 1 で鍵と保存先が確定していない場合。
+  Future<void> _runDataStage() async {
+    if (_storageEncryptionKey == null ||
+        _hiveDirectoryPath == null ||
+        _keyStageGeneration != _storageGeneration) {
+      await _runKeyStage();
+    }
+
+    final encryptionKey = _storageEncryptionKey;
+    final directoryPath = _hiveDirectoryPath;
+    if (encryptionKey == null || directoryPath == null) {
+      throw StateError('Encrypted storage is not initialized');
+    }
+
+    final openedBoxes = <Box>[];
+    try {
+      _cacheBox = await _openBoxTracked('proxy_cache', openedBoxes);
+      _webStorageBox = await _openBoxTracked(_webStorageBoxName, openedBoxes);
+      _idempotencyBox = await _openBoxTracked('proxy_idempotency', openedBoxes);
+      _queueBox = await _openBoxTracked(
+        _encryptedQueueBoxName,
+        openedBoxes,
+        encryptionKey: encryptionKey,
+      );
+      _quarantinedRequestBox = await _openBoxTracked(
+        _encryptedQuarantineBoxName,
+        openedBoxes,
+        encryptionKey: encryptionKey,
+      );
+      _droppedRequestBox = await _openBoxTracked(
+        _encryptedDroppedRequestBoxName,
+        openedBoxes,
+        encryptionKey: encryptionKey,
+      );
+      _unacknowledgedDroppedCount = null;
+
+      await _prepareLegacyMigration(directoryPath, openedBoxes);
+    } catch (_) {
+      await _closeBoxesQuietly(openedBoxes);
+      _cacheBox = null;
+      _webStorageBox = null;
+      _idempotencyBox = null;
+      _queueBox = null;
+      _quarantinedRequestBox = null;
+      _droppedRequestBox = null;
+      _legacyQueueBox = null;
+      _legacyQuarantineBox = null;
+      _legacyDroppedRequestBox = null;
+      _pendingLegacyKeys.clear();
+      rethrow;
+    }
+  }
+
+  /// 失敗時の後始末として Box を閉じます。
+  ///
+  /// 元の失敗を呼び出し側へ伝えるため、閉じる処理の失敗は送出しません。
+  ///
+  /// [boxes] 閉じる Box の一覧。
+  Future<void> _closeBoxesQuietly(Iterable<Box> boxes) async {
+    for (final box in boxes) {
+      if (!box.isOpen) {
+        continue;
+      }
+      try {
+        await box.close();
+      } catch (_) {
+        // 元の失敗を優先して送出するため、閉じる処理の失敗は無視する
+      }
+    }
+  }
+
+  /// キュー消化・隔離・ドロップ履歴の排他を取得するまでの上限時間を返します。
+  Duration get _storageLockTimeout =>
+      _storageTestHooks?.storageLockTimeout ?? _defaultStorageLockTimeout;
+
+  /// 移行を待っている旧平文 Box があるかどうかを返します。
+  bool get _hasPendingLegacyMigration =>
+      _legacyQueueBox != null ||
+      _legacyQuarantineBox != null ||
+      _legacyDroppedRequestBox != null;
+
+  /// 種類に対応する暗号化 Box を返します。
+  ///
+  /// [kind] Box の種類。
+  ///
+  /// Returns: 暗号化 Box。開いていない場合は `null`。
+  Box? _encryptedBoxFor(ProxyStorageBox kind) {
+    return switch (kind) {
+      ProxyStorageBox.queue => _queueBox,
+      ProxyStorageBox.quarantine => _quarantinedRequestBox,
+      ProxyStorageBox.droppedRequests => _droppedRequestBox,
+      ProxyStorageBox.cookies => _cookieBox,
+    };
+  }
+
+  /// 種類に対応する、移行を待っている旧平文 Box を返します。
+  ///
+  /// [kind] Box の種類。
+  ///
+  /// Returns: 旧平文 Box。移行を待っていない場合は `null`。
+  Box? _legacyBoxFor(ProxyStorageBox kind) {
+    return switch (kind) {
+      ProxyStorageBox.queue => _legacyQueueBox,
+      ProxyStorageBox.quarantine => _legacyQuarantineBox,
+      ProxyStorageBox.droppedRequests => _legacyDroppedRequestBox,
+      ProxyStorageBox.cookies => null,
+    };
+  }
+
+  /// 種類に対応する、移行を待っている旧平文 Box を設定します。
+  ///
+  /// [kind] Box の種類。
+  /// [box] 設定する旧平文 Box。移行を終えた場合は `null`。
+  void _setLegacyBox(ProxyStorageBox kind, Box? box) {
+    switch (kind) {
+      case ProxyStorageBox.queue:
+        _legacyQueueBox = box;
+      case ProxyStorageBox.quarantine:
+        _legacyQuarantineBox = box;
+      case ProxyStorageBox.droppedRequests:
+        _legacyDroppedRequestBox = box;
+      case ProxyStorageBox.cookies:
+        break;
+    }
+  }
+
+  /// 暗号化 Box の側で対象から外す、移行を待っているキーの一覧を返します。
+  ///
+  /// 旧平文 Box が開いていて空でない間だけ外します。旧 Box が空になった後は、
+  /// 書き写した記録が唯一の記録になるためです。
+  ///
+  /// [kind] Box の種類。
+  ///
+  /// Returns: 外すキーの一覧。外すものが無い場合は空の集合。
+  Set<String> _excludedLegacyKeys(ProxyStorageBox kind) {
+    final legacyBox = _legacyBoxFor(kind);
+    if (legacyBox == null || !legacyBox.isOpen || legacyBox.isEmpty) {
+      return const <String>{};
+    }
+    return _pendingLegacyKeys[kind] ?? const <String>{};
+  }
+
+  /// 種類に対応するロックの中で処理を実行します。
+  ///
+  /// 隔離は隔離のロック、ドロップ履歴は履歴のロックを取ります。キューは、
+  /// 呼び出し側がキュー消化の排他を持つか、キュー消化を始める前に呼ぶため、
+  /// ロックを取りません。
+  ///
+  /// [kind] Box の種類。
+  /// [action] ロックの中で実行する処理。
+  ///
+  /// Returns: [action] の戻り値。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] ロックを上限時間内に取得できなかった場合。
+  Future<T> _runWithStorageLock<T>(
+    ProxyStorageBox kind,
+    Future<T> Function() action,
+  ) {
+    return switch (kind) {
+      ProxyStorageBox.quarantine =>
+        _quarantineLock.synchronized(action, timeout: _storageLockTimeout),
+      ProxyStorageBox.droppedRequests =>
+        _droppedRequestLock.synchronized(action, timeout: _storageLockTimeout),
+      _ => action(),
+    };
+  }
+
+  /// 旧平文 Box（キュー・隔離・ドロップ履歴）を移行するか、遅らせる準備をします。
+  ///
+  /// 通常は、再送を始める前のここで移行します。隔離とドロップ履歴は、`start()` を
+  /// 待たずに呼ばれた API と重ならないよう、対応するロックの中で移行します。
+  /// このインスタンスで暗号化鍵を生成した場合は、鍵の書き込みがディスクへ
+  /// 確定するのを待つため、旧 Box を開いてキーの一覧を持つだけにします。移行は
+  /// 待ち時間の後、稼働中に行います。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  /// [openedBoxes] 新たに開いた Box を記録する一覧。失敗時に閉じるために使います。
+  Future<void> _prepareLegacyMigration(
+    String directoryPath,
+    List<Box> openedBoxes,
+  ) async {
+    for (final entry in _legacyBoxNames.entries) {
+      final kind = entry.key;
+      final legacyName = entry.value;
+      if (!await Hive.boxExists(legacyName, path: directoryPath)) {
+        continue;
+      }
+
+      final legacyBox = await _openBoxTracked(legacyName, openedBoxes);
+      if (legacyBox.isEmpty) {
+        // 移す記録が無いため、待たずに片付ける
+        await _closeAndDeleteLegacyBox(legacyBox, legacyName, directoryPath);
+        continue;
+      }
+
+      if (_encryptionKeyGeneratedStopwatch == null) {
+        await _runWithStorageLock(kind, () async {
+          await _copyLegacyBox(kind, legacyBox, _encryptedBoxFor(kind)!);
+          if (kind == ProxyStorageBox.droppedRequests) {
+            _unacknowledgedDroppedCount = null;
+          }
+          await _closeAndDeleteLegacyBox(legacyBox, legacyName, directoryPath);
+        });
+        continue;
+      }
+
+      _setLegacyBox(kind, legacyBox);
+      _pendingLegacyKeys[kind] =
+          legacyBox.keys.map((key) => key.toString()).toSet();
+    }
+  }
+
+  /// 旧平文 Box の記録を、キーを保ったまま暗号化 Box へ書き写し、旧 Box を空にします。
+  ///
+  /// 旧 Box を空にする前に失敗した場合は、二重にならないよう書き写したキーを
+  /// 暗号化 Box から消してから例外を送出します。消せなかったキーは、旧 Box が
+  /// 空になるまで [_pendingLegacyKeys] で対象から外します。
+  ///
+  /// [kind] 書き写す Box の種類。
+  /// [legacyBox] 書き写す旧平文 Box。
+  /// [targetBox] 書き写し先の暗号化 Box。
+  Future<void> _copyLegacyBox(
+    ProxyStorageBox kind,
+    Box legacyBox,
+    Box targetBox,
+  ) async {
+    final copiedKeys = <dynamic>[];
+    try {
+      for (final key in legacyBox.keys.toList()) {
+        final value = legacyBox.get(key);
+        if (value == null) {
+          continue;
+        }
+        await targetBox.put(key, value);
+        copiedKeys.add(key);
+      }
+      await targetBox.flush();
+      await _storageTestHooks?.beforeLegacyBoxCleared?.call(kind);
+      await legacyBox.clear();
+    } catch (_) {
+      // 旧 Box に記録が残っている場合だけ、書き写した分を消す。
+      // 空になっている場合は、書き写した分が唯一の記録のため残す。
+      if (legacyBox.isOpen && legacyBox.isNotEmpty && targetBox.isOpen) {
+        try {
+          await targetBox.deleteAll(copiedKeys);
+        } catch (_) {
+          // 消せなかったキーは、旧 Box が空になるまで対象から外して扱う
+        }
+      }
+      rethrow;
+    }
+  }
+
+  /// 空にした旧平文 Box を閉じ、ファイルを削除します。
+  ///
+  /// 中身は空にしてあるため、削除に失敗しても処理は続け、イベントで知らせます。
+  ///
+  /// [legacyBox] 閉じる旧平文 Box。
+  /// [legacyName] 旧平文 Box の名前。
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  Future<void> _closeAndDeleteLegacyBox(
+    Box legacyBox,
+    String legacyName,
+    String directoryPath,
+  ) async {
+    if (legacyBox.isOpen) {
+      await legacyBox.close();
+    }
+
+    try {
+      await Hive.deleteBoxFromDisk(legacyName, path: directoryPath);
+    } catch (error) {
+      _emitEvent(ProxyEventType.errorOccurred, '', {
+        'operation': 'legacyStorageDelete',
+        'box': legacyName,
+        'error': error.toString(),
+      });
+    }
+  }
+
+  /// 遅らせた移行を始めるまでの残り時間を返します。
+  ///
+  /// 端末の時計を戻しても遅れないよう、鍵を生成してからの経過時間で求めます。
+  Duration get _deferredMigrationRemaining {
+    final delay = _storageTestHooks?.deferredMigrationDelay ??
+        _defaultDeferredMigrationDelay;
+    final remaining =
+        delay - (_encryptionKeyGeneratedStopwatch?.elapsed ?? delay);
+    return remaining.isNegative ? Duration.zero : remaining;
+  }
+
+  /// 移行を待っている旧平文 Box があれば、遅らせた移行を予約します。
+  void _scheduleDeferredMigration() {
+    _deferredMigrationTimer?.cancel();
+    _deferredMigrationTimer = null;
+    if (!_hasPendingLegacyMigration) {
+      return;
+    }
+
+    _deferredMigrationTimer = Timer(_deferredMigrationRemaining, () {
+      _deferredMigrationTimer = null;
+      if (_deferredMigrationRemaining > Duration.zero) {
+        // タイマーは計測した経過時間よりわずかに早く発火し得るため、残りを予約し直す
+        _scheduleDeferredMigration();
+        return;
+      }
+      // ignore: discarded_futures
+      _runDeferredMigration();
+    });
+  }
+
+  /// 待ち時間を過ぎていれば、遅らせた移行を実行します。
+  ///
+  /// 予約したタイマーと、5 秒ごとのキュー消化の定期処理から呼びます。失敗した
+  /// 場合は旧平文 Box を残し、次の定期処理で試み直します。定期処理はこの移行を
+  /// 待ってからキュー消化を始めるため、失敗し続けても再送は止まりません。移行した
+  /// 場合は、移した分が保持上限を超えていないかを続けて判定します。例外は
+  /// 送出しません。
+  Future<void> _runDeferredMigration() async {
+    if (!_hasPendingLegacyMigration ||
+        !_isRunning ||
+        _isStopping ||
+        _deferredMigrationFuture != null ||
+        _deferredMigrationRemaining > Duration.zero) {
+      return;
+    }
+
+    final migration = _migrateDeferredLegacyBoxes();
+    _deferredMigrationFuture = migration;
+    var migrated = false;
+    try {
+      migrated = await migration;
+    } finally {
+      if (identical(_deferredMigrationFuture, migration)) {
+        _deferredMigrationFuture = null;
+      }
+    }
+
+    // 次の追加や 1 時間ごとの判定を待たずに、移した分の保持上限を判定する
+    if (migrated && _isRunning && !_isStopping) {
+      await _enforceRetentionLimits();
+    }
+  }
+
+  /// 移行を待っている旧平文 Box を、キュー消化と同じ排他の中で移行します。
+  ///
+  /// 実行中のキュー消化が終わるのを待ち、旧 Box を空にするまで次の消化を
+  /// 始めません。隔離の移行は隔離のロック、ドロップ履歴の移行は履歴のロックを、
+  /// それぞれ旧 Box を空にするまで保持します。失敗した場合（ロックを取れなかった
+  /// 場合を含む）は何も変えず、次の定期処理で試み直します。
+  ///
+  /// Returns: 1 つ以上の旧平文 Box を移行した場合は `true`。
+  Future<bool> _migrateDeferredLegacyBoxes() async {
+    var migrated = false;
+    try {
+      await _queueDrainLock.synchronized(() async {
+        for (final kind in _legacyBoxNames.keys) {
+          if (!_isRunning || _isStopping) {
+            // 書き写しを始めていなければ、停止を待たせずに取り消す
+            return;
+          }
+          if (_legacyBoxFor(kind) == null) {
+            continue;
+          }
+
+          if (await _runWithStorageLock(
+            kind,
+            () => _migrateDeferredLegacyBox(kind),
+          )) {
+            migrated = true;
+          }
+        }
+      }, timeout: _storageLockTimeout);
+    } on TimeoutException {
+      // ロックを取れなかった場合は何も変えず、次の定期処理で試み直す
+    } catch (error) {
+      _emitEvent(ProxyEventType.errorOccurred, '', {
+        'operation': 'legacyStorageMigration',
+        'error': error.toString(),
+      });
+    }
+    return migrated;
+  }
+
+  /// 移行を待っている旧平文 Box を 1 つ移行します。対応するロックの中で呼びます。
+  ///
+  /// [kind] 移行する Box の種類。
+  ///
+  /// Returns: 移行した場合は `true`。停止中のため取り消した場合と、全削除などで
+  ///   既に片付いていた場合は `false`。
+  ///
+  /// Throws:
+  ///   * [StateError] 旧平文 Box か暗号化 Box が閉じていて移行できない場合。
+  Future<bool> _migrateDeferredLegacyBox(ProxyStorageBox kind) async {
+    if (!_isRunning || _isStopping) {
+      return false;
+    }
+
+    final legacyBox = _legacyBoxFor(kind);
+    if (legacyBox == null) {
+      return false;
+    }
+
+    final targetBox = _encryptedBoxFor(kind);
+    final directoryPath = _hiveDirectoryPath;
+    if (targetBox == null ||
+        directoryPath == null ||
+        !legacyBox.isOpen ||
+        !targetBox.isOpen) {
+      throw StateError('Storage for ${kind.name} is not open');
+    }
+
+    _deferredMigrationCopying = true;
+    try {
+      await _copyLegacyBox(kind, legacyBox, targetBox);
+      _setLegacyBox(kind, null);
+      _pendingLegacyKeys.remove(kind);
+      if (kind == ProxyStorageBox.droppedRequests) {
+        _unacknowledgedDroppedCount = null;
+      }
+      await _closeAndDeleteLegacyBox(
+        legacyBox,
+        _legacyBoxNames[kind]!,
+        directoryPath,
+      );
+      return true;
+    } finally {
+      _deferredMigrationCopying = false;
+    }
+  }
+
+  /// 移行を待っている旧平文 Box を空にして片付けます。
+  ///
+  /// 全削除の API から、対応するロックの中で呼びます。
+  ///
+  /// [kind] 片付ける Box の種類。
+  Future<void> _clearLegacyBox(ProxyStorageBox kind) async {
+    final legacyBox = _legacyBoxFor(kind);
+    if (legacyBox == null) {
+      return;
+    }
+
+    if (legacyBox.isOpen) {
+      await legacyBox.clear();
+    }
+    _setLegacyBox(kind, null);
+    _pendingLegacyKeys.remove(kind);
+    if (kind == ProxyStorageBox.droppedRequests) {
+      _unacknowledgedDroppedCount = null;
+    }
+
+    final directoryPath = _hiveDirectoryPath;
+    if (directoryPath != null) {
+      await _closeAndDeleteLegacyBox(
+        legacyBox,
+        _legacyBoxNames[kind]!,
+        directoryPath,
+      );
+    }
+  }
+
+  /// 暗号化 Box と、移行を待っている旧平文 Box の記録を保存順に並べて返します。
+  ///
+  /// 旧平文 Box にもある同じキーの記録は、暗号化 Box の側から外します。
+  /// 処理を譲る間に移行が終わっても一覧から抜けないよう、先に両方の Box の
+  /// キーと値を同期的に控えます。大量の記録で UI の isolate を止めないよう、
+  /// 控えた記録を読み解く間は一定件数ごとに処理を譲ります。
+  ///
+  /// [kind] Box の種類。
+  /// [timestampField] 保存時刻を持つ項目名。
+  ///
+  /// Returns: 保存順に並べた記録。
+  Future<List<StoredEntry>> _collectStoredEntries(
+    ProxyStorageBox kind,
+    String timestampField,
+  ) async {
+    final snapshot = <({String key, Object? data, bool pendingMigration})>[];
+    final excludedKeys = _excludedLegacyKeys(kind);
+
+    final box = _encryptedBoxFor(kind);
+    if (box != null && box.isOpen) {
+      for (final key in box.keys) {
+        final keyString = key.toString();
+        if (!excludedKeys.contains(keyString)) {
+          snapshot.add((
+            key: keyString,
+            data: box.get(key),
+            pendingMigration: false,
+          ));
+        }
+      }
+    }
+
+    final legacyBox = _legacyBoxFor(kind);
+    if (legacyBox != null && legacyBox.isOpen) {
+      for (final key in legacyBox.keys) {
+        snapshot.add((
+          key: key.toString(),
+          data: legacyBox.get(key),
+          pendingMigration: true,
+        ));
+      }
+    }
+
+    final entries = <StoredEntry>[];
+    for (var index = 0; index < snapshot.length; index++) {
+      final item = snapshot[index];
+      final data = item.data;
+      if (data is Map) {
+        entries.add(StoredEntry.fromData(
+          key: item.key,
+          data: data,
+          timestampField: timestampField,
+          pendingMigration: item.pendingMigration,
+        ));
+      }
+
+      if ((index + 1) % _storedEntryYieldInterval == 0) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
+    entries.sort(compareStoredEntries);
+    return entries;
+  }
+
+  /// 暗号化 Box の記録を保存順に並べて返します。
+  ///
+  /// 移行を待っている旧平文 Box と同じキーの記録は含めません。ロックの中で
+  /// 使うため、処理を譲りません。
+  ///
+  /// [kind] Box の種類。
+  /// [box] 対象の暗号化 Box。
+  /// [timestampField] 保存時刻を持つ項目名。
+  ///
+  /// Returns: 保存順に並べた記録。
+  List<StoredEntry> _sortedEncryptedEntries(
+    ProxyStorageBox kind,
+    Box box,
+    String timestampField,
+  ) {
+    final excludedKeys = _excludedLegacyKeys(kind);
+    final entries = <StoredEntry>[];
+    for (final key in box.keys) {
+      final keyString = key.toString();
+      if (excludedKeys.contains(keyString)) {
+        continue;
+      }
+
+      final data = box.get(key);
+      entries.add(StoredEntry.fromData(
+        key: keyString,
+        data: data is Map ? data : const {},
+        timestampField: timestampField,
+      ));
+    }
+
+    entries.sort(compareStoredEntries);
+    return entries;
+  }
+
+  /// 暗号化 Box と、移行を待っている旧平文 Box の記録の件数を返します。
+  ///
+  /// [kind] Box の種類。
+  ///
+  /// Returns: 同じキーを二重に数えない件数。開いていない Box は 0 件とします。
+  int _countStoredEntries(ProxyStorageBox kind) {
+    var count = 0;
+    final box = _encryptedBoxFor(kind);
+    if (box != null && box.isOpen) {
+      count += box.length;
+      final excludedKeys = _excludedLegacyKeys(kind);
+      if (excludedKeys.isNotEmpty) {
+        count -= excludedKeys.where(box.containsKey).length;
+      }
+    }
+
+    final legacyBox = _legacyBoxFor(kind);
+    if (legacyBox != null && legacyBox.isOpen) {
+      count += legacyBox.length;
+    }
+    return count;
+  }
+
+  /// 隔離とドロップ履歴の保持上限を判定し、超えた分を取り除いてから圧縮します。
+  ///
+  /// 起動時、遅らせた移行の後、1 時間ごとの定期処理から呼びます。ロックを
+  /// 上限時間内に取れない場合は何も変えず、次の定期処理で判定します。
+  /// 例外は送出しません。
+  Future<void> _enforceRetentionLimits() async {
+    try {
+      await _quarantineLock.synchronized(() async {
+        final box = _quarantinedRequestBox;
+        if (box != null && box.isOpen) {
+          await _enforceQuarantineLimits(box);
+        }
+      }, timeout: _storageLockTimeout);
+    } on TimeoutException {
+      // ロックを取れなかった場合は、次の定期処理で判定する
+    } catch (error) {
+      _emitRetentionError(error);
+    }
+
+    try {
+      await _droppedRequestLock.synchronized(() async {
+        final box = _droppedRequestBox;
+        if (box != null && box.isOpen) {
+          await _enforceDroppedRequestLimits(box);
+        }
+      }, timeout: _storageLockTimeout);
+    } on TimeoutException {
+      // ロックを取れなかった場合は、次の定期処理で判定する
+    } catch (error) {
+      _emitRetentionError(error);
+    }
+
+    // 削除した記録はファイルに論理削除のフレームとして残るため、ロックの外で圧縮する
+    for (final box in [_quarantinedRequestBox, _droppedRequestBox]) {
+      if (box == null || !box.isOpen) {
+        continue;
+      }
+      try {
+        await box.compact();
+      } catch (error) {
+        _emitRetentionError(error);
+      }
+    }
+  }
+
+  /// 保持上限の処理の失敗をイベントで知らせます。
+  ///
+  /// [error] 起きたエラー。
+  void _emitRetentionError(Object error) {
+    _emitEvent(ProxyEventType.errorOccurred, '', {
+      'operation': 'retentionLimit',
+      'error': error.toString(),
+    });
+  }
+
+  /// 隔離の保持上限（期間・件数・合計バイト数）を超えた分を、ドロップ履歴へ
+  /// 記録してから取り除きます。隔離のロックの中で呼びます。
+  ///
+  /// 取り除く記録を先にすべて決めてから、履歴へまとめて記録し、隔離からまとめて
+  /// 削除します。1 件ごとに履歴を読み直さないためです。
+  ///
+  /// [box] 隔離の暗号化 Box。
+  /// [protectedKey] 追い出さないキー。直前に隔離した記録を指定します。
+  Future<void> _enforceQuarantineLimits(Box box, {String? protectedKey}) async {
+    final config = _config;
+    if (config == null) {
+      return;
+    }
+
+    final entries = _sortedEncryptedEntries(
+      ProxyStorageBox.quarantine,
+      box,
+      'quarantinedAt',
+    );
+    final evictions = <_QuarantineEviction>[];
+    final retained = <StoredEntry>[];
+
+    final retention = config.quarantineRetention;
+    final threshold =
+        retention > Duration.zero ? DateTime.now().subtract(retention) : null;
+    for (final entry in entries) {
+      final savedAt = entry.savedAt;
+      final isExpired = threshold != null &&
+          entry.key != protectedKey &&
+          savedAt != null &&
+          savedAt.isBefore(threshold);
+      if (isExpired) {
+        evictions.add((entry: entry, dropReason: _quarantineExpiredDropReason));
+      } else {
+        retained.add(entry);
+      }
+    }
+
+    final maxCount = config.quarantineMaxCount;
+    final maxBytes = config.quarantineMaxBytes;
+    var remainingCount = retained.length;
+    var remainingBytes = maxBytes > 0
+        ? retained.fold<int>(
+            0,
+            (sum, entry) => sum + _estimateQuarantinedSize(entry.data),
+          )
+        : 0;
+    for (final entry in retained) {
+      final overCount = maxCount > 0 && remainingCount > maxCount;
+      final overBytes = maxBytes > 0 && remainingBytes > maxBytes;
+      if (!overCount && !overBytes) {
+        break;
+      }
+      if (entry.key == protectedKey) {
+        continue;
+      }
+
+      evictions.add((entry: entry, dropReason: _quarantineLimitDropReason));
+      remainingCount--;
+      if (maxBytes > 0) {
+        remainingBytes -= _estimateQuarantinedSize(entry.data);
+      }
+    }
+
+    if (evictions.isNotEmpty) {
+      await _evictQuarantinedRequests(box, evictions);
+    }
+  }
+
+  /// 隔離の記録をまとめてドロップ履歴へ記録してから取り除き、イベントで知らせます。
+  ///
+  /// 履歴のロックを 1 回だけ取ってまとめて記録し、履歴の保持上限の判定も
+  /// 1 回にします。
+  ///
+  /// [box] 隔離の暗号化 Box。
+  /// [evictions] 取り除く記録と、履歴に残す理由。
+  Future<void> _evictQuarantinedRequests(
+    Box box,
+    List<_QuarantineEviction> evictions,
+  ) async {
+    final recorded = await _recordDroppedRequests([
+      for (final eviction in evictions)
+        (
+          data: eviction.entry.data,
+          statusCode: eviction.entry.data['statusCode'] as int? ?? 0,
+          dropReason: eviction.dropReason,
+          errorMessage: eviction.entry.data['errorMessage'] as String? ?? '',
+        ),
+    ]);
+    if (!recorded) {
+      // 履歴へ記録できない場合は、記録の無い削除を避けるため取り除かない
+      return;
+    }
+
+    await box.deleteAll(evictions.map((eviction) => eviction.entry.key));
+    for (final eviction in evictions) {
+      final data = eviction.entry.data;
+      _emitEvent(ProxyEventType.requestDropped, data['url'] as String? ?? '', {
+        'statusCode': data['statusCode'] as int? ?? 0,
+        'dropReason': eviction.dropReason,
+        'quarantineId': eviction.entry.key,
+      });
+    }
+  }
+
+  /// ドロップ履歴の保持上限（期間・件数）を超えた分を取り除きます。
+  /// 履歴のロックの中で呼びます。
+  ///
+  /// 期間は確認済みかどうかを問わず適用し、件数は確認済みの古いものから
+  /// 取り除きます。未確認の履歴は件数では取り除きません。
+  ///
+  /// [box] ドロップ履歴の暗号化 Box。
+  Future<void> _enforceDroppedRequestLimits(Box box) async {
+    final config = _config;
+    if (config == null) {
+      return;
+    }
+
+    final entries = _sortedEncryptedEntries(
+      ProxyStorageBox.droppedRequests,
+      box,
+      'droppedAt',
+    );
+    final keysToDelete = <String>[];
+    final retained = <StoredEntry>[];
+
+    final retention = config.droppedRequestRetention;
+    final threshold =
+        retention > Duration.zero ? DateTime.now().subtract(retention) : null;
+    for (final entry in entries) {
+      final savedAt = entry.savedAt;
+      if (threshold != null && savedAt != null && savedAt.isBefore(threshold)) {
+        keysToDelete.add(entry.key);
+      } else {
+        retained.add(entry);
+      }
+    }
+
+    final maxCount = config.droppedRequestMaxCount;
+    var excess = maxCount > 0 ? retained.length - maxCount : 0;
+    for (final entry in retained) {
+      if (excess <= 0) {
+        break;
+      }
+      if (entry.data['acknowledged'] != true) {
+        continue;
+      }
+      keysToDelete.add(entry.key);
+      excess--;
+    }
+
+    if (keysToDelete.isEmpty) {
+      return;
+    }
+    await box.deleteAll(keysToDelete);
     _unacknowledgedDroppedCount = null;
+  }
+
+  /// 隔離する記録の大きさを、本文とヘッダの名前・値から概算します。
+  ///
+  /// [data] 隔離する記録。
+  ///
+  /// Returns: 概算のバイト数。
+  int _estimateQuarantinedSize(Map data) {
+    var size = 0;
+    final body = data['body'];
+    if (body is List) {
+      size += body.length;
+    }
+
+    final headers = data['headers'];
+    if (headers is Map) {
+      for (final header in headers.entries) {
+        size += header.key.toString().length + header.value.toString().length;
+      }
+    }
+    return size;
+  }
+
+  /// 一覧で返すヘッダのうち、機密情報を含み得るものの値をマスクします。
+  ///
+  /// 名前を小文字にして `_` を `-` とみなし、[_sensitiveHeaderNames] と一致するか、
+  /// [_sensitiveHeaderNameFragments] のいずれかを含む場合にマスクします。
+  /// 設定されたべき等性キーのヘッダはマスクしません。
+  ///
+  /// [headers] 保存されているヘッダ。
+  ///
+  /// Returns: マスクしたヘッダ。
+  Map<String, String> _maskSensitiveHeaders(Map<String, String> headers) {
+    final idempotencyHeaderName = _normalizeHeaderNameForMasking(
+      _config?.idempotencyHeaderName ?? _defaultIdempotencyHeaderName,
+    );
+
+    return headers.map((name, value) {
+      final normalizedName = _normalizeHeaderNameForMasking(name);
+      if (normalizedName == idempotencyHeaderName) {
+        return MapEntry(name, value);
+      }
+
+      final isSensitive = _sensitiveHeaderNames.contains(normalizedName) ||
+          _sensitiveHeaderNameFragments.any(normalizedName.contains);
+      return MapEntry(name, isSensitive ? _maskedHeaderValue : value);
+    });
+  }
+
+  /// マスクの判定に使うため、ヘッダ名を小文字にして `_` を `-` にそろえます。
+  ///
+  /// [name] ヘッダ名。
+  ///
+  /// Returns: 判定用の名前。
+  String _normalizeHeaderNameForMasking(String name) {
+    return name.toLowerCase().replaceAll('_', '-');
+  }
+
+  /// 復旧 API の本体です。初期化のロックを保持したまま実行します。
+  ///
+  /// ロックは再入できないため、ここから `_ensure` で始まる関数を呼んではいけません。
+  ///
+  /// Returns: 復旧の結果。
+  Future<EncryptedStorageRecoveryResult> _runStorageRecovery() async {
+    // ロックを待つ間に起動が始まった場合は、開いた Box を消さないよう何もしない
+    if (_activeInstances.isNotEmpty) {
+      return const EncryptedStorageRecoveryResult.rejected(
+        StorageRecoveryRejection.proxyActive,
+      );
+    }
+
+    if (!Hive.isAdapterRegistered(0)) {
+      await Hive.initFlutter();
+    }
+
+    final portPreferenceBox = await Hive.openBox(_portPreferenceBoxName);
+    _portPreferenceBox = portPreferenceBox;
+    final directoryPath = _resolveHiveDirectoryPath(portPreferenceBox);
+
+    // 起動時と同じ、時間の上限ありの照合で判定する
+    final inspection = await inspectEncryptedStorage(
+      directoryPath: directoryPath,
+      boxNames: _encryptedBoxNames,
+      keyReader: _encryptionKeyReader,
+      scanTimeLimit: _storageTestHooks?.verificationTimeLimit ??
+          _defaultStorageVerificationTimeLimit,
+    );
+
+    switch (inspection.keyRead.state) {
+      case EncryptionKeyState.temporarilyUnavailable:
+        return const EncryptedStorageRecoveryResult.rejected(
+          StorageRecoveryRejection.temporarilyUnavailable,
+        );
+      case EncryptionKeyState.present:
+        return _recoverEncryptedBoxesWithKey(directoryPath, inspection);
+      case EncryptionKeyState.missing:
+      case EncryptionKeyState.unreadable:
+      case EncryptionKeyState.invalid:
+        return _recoverEncryptedBoxesWithoutKey(directoryPath, inspection);
+    }
+  }
+
+  /// 鍵を読めた場合の復旧です。鍵を残し、問題のある Box を Box ごとに扱います。
+  ///
+  /// Box を閉じた後は、途中で失敗しても共有していた初期化の結果を捨てて保存領域の
+  /// 世代を進めます。ファイルが一部変わった状態を、他のインスタンスが古い状態の
+  /// まま使い続けないためです。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  /// [inspection] 暗号化 Box の照合結果。
+  ///
+  /// Returns: 復旧の結果。
+  Future<EncryptedStorageRecoveryResult> _recoverEncryptedBoxesWithKey(
+    String directoryPath,
+    StorageInspection inspection,
+  ) async {
+    final hasBusinessProblem = _encryptedBoxNames.keys.any((box) =>
+        box != ProxyStorageBox.cookies &&
+        failureForCheckResult(
+              inspection.results[box] ?? StorageBoxCheckResult.empty,
+            ) !=
+            null);
+    if (!hasBusinessProblem) {
+      return const EncryptedStorageRecoveryResult.rejected(
+        StorageRecoveryRejection.startWillSucceed,
+      );
+    }
+
+    // 照合の間に始まった起動は、段階 2 の結果を使う前にこのロックを通って Box と
+    // 保存領域の世代を確かめ直す（_ensureDataStage）。復旧の後に段階 1 から
+    // やり直すため、利用者が同意した復旧を無駄にしないよう拒否せずに進める
+
+    try {
+      await _closeAllProxyBoxes();
+
+      // Box を閉じた後のファイルで照合し直してから扱いを決める。照合を打ち切った
+      // Box は時間の上限を設けずに走査し、作り直す位置も閉じた後のファイルから求める
+      final keyCrc = hiveKeyCrc(inspection.keyRead.key!);
+      final results =
+          Map<ProxyStorageBox, StorageBoxCheckResult>.of(inspection.results);
+      final offsets = <ProxyStorageBox, int>{};
+      final rescannedBoxes = <ProxyStorageBox>{};
+      for (final entry in _encryptedBoxNames.entries) {
+        final initialResult = results[entry.key];
+        if (initialResult != StorageBoxCheckResult.aborted &&
+            initialResult != StorageBoxCheckResult.corrupted) {
+          continue;
+        }
+
+        final verification = await verifyEncryptedBox(
+          directoryPath: directoryPath,
+          box: entry.key,
+          boxName: entry.value,
+          keyCrc: keyCrc,
+          scanTimeLimit: null,
+        );
+        results[entry.key] = checkResultForVerification(verification.status);
+        final offset = verification.matchingFrameOffset;
+        if (offset != null) {
+          offsets[entry.key] = offset;
+        }
+        if (initialResult == StorageBoxCheckResult.aborted) {
+          rescannedBoxes.add(entry.key);
+        }
+      }
+
+      final deletedBoxes = <ProxyStorageBox>{};
+      final rebuiltBoxes = <ProxyStorageBox>{};
+      final keptBoxes = <ProxyStorageBox>{};
+      for (final entry in _encryptedBoxNames.entries) {
+        final box = entry.key;
+        final boxName = entry.value;
+        switch (results[box]) {
+          case StorageBoxCheckResult.mismatch:
+            await Hive.deleteBoxFromDisk(boxName, path: directoryPath);
+            deletedBoxes.add(box);
+          case StorageBoxCheckResult.corrupted:
+            await rebuildHiveBoxFromOffset(
+              directoryPath,
+              boxName,
+              offsets[box]!,
+            );
+            rebuiltBoxes.add(box);
+          case StorageBoxCheckResult.noMismatch
+              when rescannedBoxes.contains(box):
+            // 鍵と一致する記録が無く、開けば Hive も同じく切り詰めるため失うものは無い。
+            // 残すと、再試行した start() が再び照合打ち切りで失敗し続ける
+            await truncateHiveBox(directoryPath, boxName);
+            rebuiltBoxes.add(box);
+          default:
+            // 中身の無い Box は「残した」とは扱わない
+            if (inspection.contents[box] == true) {
+              keptBoxes.add(box);
+            }
+        }
+      }
+
+      await _deleteLeftoverCompactionFiles(directoryPath);
+      return EncryptedStorageRecoveryResult(
+        performed: true,
+        deletedBoxes: deletedBoxes,
+        rebuiltBoxes: rebuiltBoxes,
+        keptBoxes: keptBoxes,
+      );
+    } finally {
+      _resetStorageStateAfterRecovery();
+    }
+  }
+
+  /// 使える鍵が無い状態が続く場合の復旧です。暗号化 Box をすべて削除してから
+  /// 鍵を削除します。
+  ///
+  /// Box を閉じた後は、途中で失敗しても共有していた初期化の結果を捨てて保存領域の
+  /// 世代を進めます。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  /// [inspection] 暗号化 Box の照合結果。
+  ///
+  /// Returns: 復旧の結果。
+  Future<EncryptedStorageRecoveryResult> _recoverEncryptedBoxesWithoutKey(
+    String directoryPath,
+    StorageInspection inspection,
+  ) async {
+    // Cookie Box だけに中身がある場合は、start() が破棄して続けるため消さない
+    if (!inspection.hasBusinessContent) {
+      return const EncryptedStorageRecoveryResult.rejected(
+        StorageRecoveryRejection.startWillSucceed,
+      );
+    }
+
+    // 照合の間に始まった起動は、段階 2 の結果を使う前にこのロックを通って Box と
+    // 保存領域の世代を確かめ直す（_ensureDataStage）。復旧の後に段階 1 から
+    // やり直すため、利用者が同意した復旧を無駄にしないよう拒否せずに進める
+
+    try {
+      await _closeAllProxyBoxes();
+
+      final deletedBoxes = <ProxyStorageBox>{};
+      for (final entry in _encryptedBoxNames.entries) {
+        if (findHiveBoxFile(directoryPath, entry.value) != null) {
+          deletedBoxes.add(entry.key);
+        }
+        await Hive.deleteBoxFromDisk(entry.value, path: directoryPath);
+      }
+      // 暗号化 Box を消し終えてから鍵を消し、鍵だけが無い状態を作らない
+      await _keyStorage.delete(_cookieEncryptionKeyStorageKey);
+
+      await _deleteLeftoverCompactionFiles(directoryPath);
+      return EncryptedStorageRecoveryResult(
+        performed: true,
+        deletedBoxes: deletedBoxes,
+        keyDeleted: true,
+      );
+    } finally {
+      _resetStorageStateAfterRecovery();
+    }
+  }
+
+  /// 削除や作り直しの前に、proxy の Box をすべて閉じてフィールドを `null` に戻します。
+  ///
+  /// 別のインスタンスが開いている暗号化 Box も、ファイルを置き換える前に閉じます。
+  /// 閉じる処理は実行中の自動圧縮の終了を待ちます。
+  Future<void> _closeAllProxyBoxes() async {
+    final boxes = <Box?>[
+      _cacheBox,
+      _queueBox,
+      _cookieBox,
+      _portPreferenceBox,
+      _webStorageBox,
+      _idempotencyBox,
+      _droppedRequestBox,
+      _quarantinedRequestBox,
+      _legacyQueueBox,
+      _legacyQuarantineBox,
+      _legacyDroppedRequestBox,
+    ];
+    for (final box in boxes) {
+      if (box != null && box.isOpen) {
+        await box.close();
+      }
+    }
+
+    for (final boxName in _encryptedBoxNames.values) {
+      if (Hive.isBoxOpen(boxName)) {
+        await Hive.box(boxName).close();
+      }
+    }
+
+    _cacheBox = null;
+    _queueBox = null;
+    _cookieBox = null;
+    _portPreferenceBox = null;
+    _webStorageBox = null;
+    _idempotencyBox = null;
+    _droppedRequestBox = null;
+    _quarantinedRequestBox = null;
+    _legacyQueueBox = null;
+    _legacyQuarantineBox = null;
+    _legacyDroppedRequestBox = null;
+  }
+
+  /// `.hive` がある暗号化 Box に残った `.hivec` を削除します。
+  ///
+  /// 作り直しの置き換えの前に落ちた場合の残骸です。開いている Box の自動圧縮も
+  /// `.hivec` を使うため、Box をすべて閉じた後に呼びます。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  Future<void> _deleteLeftoverCompactionFiles(String directoryPath) async {
+    for (final boxName in _encryptedBoxNames.values) {
+      final hiveFile =
+          File('$directoryPath${Platform.pathSeparator}$boxName.hive');
+      final compactedFile =
+          File('$directoryPath${Platform.pathSeparator}$boxName.hivec');
+      if (await hiveFile.exists() && await compactedFile.exists()) {
+        await compactedFile.delete();
+      }
+    }
+  }
+
+  /// 復旧の後、プロセスを再起動せずに `start()` できるよう、共有していた
+  /// 初期化の結果を捨てます。
+  ///
+  /// ロックを待っている実行中の段階は、その実行で改めて照合するため残します。
+  void _resetStorageStateAfterRecovery() {
+    if (_keyStageCompleted) {
+      _keyStageFuture = null;
+      _keyStageCompleted = false;
+    }
+    if (_dataStageCompleted) {
+      _dataStageFuture = null;
+      _dataStageCompleted = false;
+    }
+    _storageEncryptionKey = null;
+    _hiveDirectoryPath = null;
+    _pendingLegacyKeys.clear();
+    // 復旧前の件数を返さないよう、未確認件数のキャッシュを捨てる
+    _unacknowledgedDroppedCount = null;
+    _keyStageGeneration = null;
+    // 別のインスタンスが古い鍵のまま段階 2 を進めないよう、保存領域の世代を進める
+    _storageGeneration++;
   }
 
   /// サーバ起動時に使用するポートを解決します。
@@ -3017,68 +4791,268 @@ class OfflineWebProxy {
 
   /// Cookie 用ストレージを必要時に初期化します。
   ///
-  /// 戻り値は利用可能な Cookie Box です。
+  /// 保存領域の初期化の段階 1 を待ちます。Cookie を読み書きする処理（Cookie API、
+  /// 上流への転送・キュー再送・ウォームアップ）から呼ばれます。`start()` も
+  /// 段階 2 の前に同じ段階 1 を待つため、同時に呼ばれても鍵の生成と Box の
+  /// オープンが重ならないようにします。失敗した場合は、次の呼び出しで再試行します。
+  ///
+  /// Returns: 利用可能な Cookie Box。
   Future<Box> _ensureCookieStorageInitialized() async {
+    final cookieBox = _cookieBox;
+    if (_keyStageCompleted &&
+        _keyStageGeneration == _storageGeneration &&
+        cookieBox != null &&
+        cookieBox.isOpen) {
+      return cookieBox;
+    }
+
+    return _ensureKeyStage();
+  }
+
+  /// 保存領域の初期化の段階 1（鍵と Cookie Box）を実行します。
+  ///
+  /// 実行中または完了済みの段階 1 があればその結果を共有します。完了後に
+  /// Cookie Box かポート設定 Box が閉じられていた場合と、復旧 API が保存領域を
+  /// 変えていた場合（別のインスタンスの復旧を含む）は、改めて実行します。
+  /// 失敗した場合は共有する結果を捨て、次の呼び出しで再試行できるようにします。
+  /// 失敗は、待っている呼び出しそれぞれの zone で投げ直します。
+  ///
+  /// Returns: 段階 1 で開いた Cookie Box。
+  Future<Box> _ensureKeyStage() async {
+    final current = _keyStageFuture;
+    final isStale = _keyStageCompleted &&
+        (_keyStageGeneration != _storageGeneration ||
+            [_cookieBox, _portPreferenceBox]
+                .any((box) => box == null || !box.isOpen));
+    if (current != null && !isStale) {
+      return (await current).unwrap();
+    }
+
+    late final Future<_StageOutcome<Box>> stage;
+    stage = _storageInitializationLock.synchronized(() async {
+      try {
+        final box = await _runKeyStage();
+        if (identical(_keyStageFuture, stage)) {
+          _keyStageCompleted = true;
+        }
+        return _StageOutcome<Box>.success(box);
+      } catch (error, stackTrace) {
+        if (identical(_keyStageFuture, stage)) {
+          _keyStageFuture = null;
+        }
+        return _StageOutcome<Box>.failure(error, stackTrace);
+      }
+    });
+    _keyStageFuture = stage;
+    _keyStageCompleted = false;
+    return (await stage).unwrap();
+  }
+
+  /// 段階 1 の本体です。
+  ///
+  /// ポート設定 Box を開いて Hive の保存先を特定し、暗号化 Box を開かずに
+  /// secure storage の鍵と照合して、判定表に従います（Hive は鍵が合わない Box を
+  /// 開くと中身を切り詰めるため）。そのうえで Cookie Box を開き、旧平文
+  /// Cookie Box を移行します。
+  ///
+  /// 失敗した場合は、この呼び出しで開いた Box を閉じ、フィールドを `null` に
+  /// 戻してから例外を送出します。
+  ///
+  /// 初期化のロックを保持したまま実行されます。ロックは再入できないため、
+  /// ここから `_ensure` で始まる関数や Cookie を保存する関数を呼んではいけません。
+  ///
+  /// Returns: 開いた Cookie Box。
+  ///
+  /// Throws:
+  ///   * [StorageIntegrityException] 判定表で起動失敗となった場合。
+  Future<Box> _runKeyStage() async {
     if (!Hive.isAdapterRegistered(0)) {
       await Hive.initFlutter();
     }
 
-    if (_cookieBox != null && _cookieBox!.isOpen) {
-      return _cookieBox!;
-    }
+    final openedBoxes = <Box>[];
+    try {
+      final portPreferenceBox =
+          await _openBoxTracked(_portPreferenceBoxName, openedBoxes);
+      _portPreferenceBox = portPreferenceBox;
+      final directoryPath = _resolveHiveDirectoryPath(portPreferenceBox);
 
-    if (Hive.isBoxOpen(_encryptedCookieBoxName)) {
-      _cookieBox = Hive.box(_encryptedCookieBoxName);
-      return _cookieBox!;
-    }
+      final inspection = await inspectEncryptedStorage(
+        directoryPath: directoryPath,
+        boxNames: _encryptedBoxNames,
+        keyReader: _encryptionKeyReader,
+        scanTimeLimit: _storageTestHooks?.verificationTimeLimit ??
+            _defaultStorageVerificationTimeLimit,
+      );
+      final decision = decideStorageIntegrity(inspection);
 
-    final encryptionKey = await _getOrCreateCookieEncryptionKey();
-    _cookieBox = await Hive.openBox(
-      _encryptedCookieBoxName,
-      encryptionCipher: HiveAesCipher(encryptionKey),
-    );
-    await _migrateLegacyCookieBoxIfNeeded(_cookieBox!);
-    return _cookieBox!;
+      final Uint8List encryptionKey;
+      switch (decision.action) {
+        case StorageIntegrityAction.fail:
+          throw _buildStorageIntegrityException(decision.failure!, inspection);
+        case StorageIntegrityAction.open:
+          encryptionKey = inspection.keyRead.key!;
+        case StorageIntegrityAction.regenerateKey:
+          encryptionKey = await _writeNewEncryptionKey(inspection);
+        case StorageIntegrityAction.discardCookies:
+          encryptionKey = inspection.keyRead.key!;
+          await _discardCookieStorage(directoryPath, decision.failure!);
+        case StorageIntegrityAction.discardCookiesAndRegenerateKey:
+          // 書き込みに失敗した場合に何も消さないよう、鍵を先に書く
+          encryptionKey = await _writeNewEncryptionKey(inspection);
+          await _discardCookieStorage(directoryPath, decision.failure!);
+      }
+
+      final cookieBox = await _openBoxTracked(
+        _encryptedCookieBoxName,
+        openedBoxes,
+        encryptionKey: encryptionKey,
+      );
+      await _migrateLegacyCookieBoxIfNeeded(cookieBox);
+
+      _hiveDirectoryPath = directoryPath;
+      _storageEncryptionKey = encryptionKey;
+      _keyStageGeneration = _storageGeneration;
+      _cookieBox = cookieBox;
+      return cookieBox;
+    } catch (_) {
+      await _closeBoxesQuietly(openedBoxes);
+      if (!(_portPreferenceBox?.isOpen ?? false)) {
+        _portPreferenceBox = null;
+      }
+      _cookieBox = null;
+      _storageEncryptionKey = null;
+      rethrow;
+    }
   }
 
-  /// Cookie Box 用の暗号化鍵を取得または生成します。
+  /// Box を開き、この呼び出しで新たに開いた場合は [openedBoxes] に加えます。
   ///
-  /// セキュアストレージの取得失敗時はフォールバックせず例外を送出します。
-  Future<Uint8List> _getOrCreateCookieEncryptionKey() async {
-    final storedKey = await _secureStorage.read(
-      key: _cookieEncryptionKeyStorageKey,
+  /// 失敗時に閉じるのは、この呼び出しで新たに開いた Box だけにします。
+  /// 他の処理やインスタンスが開いている Box を閉じないためです。
+  ///
+  /// [name] Box の名前。
+  /// [openedBoxes] 新たに開いた Box を記録する一覧。失敗時に閉じるために使います。
+  /// [encryptionKey] 暗号化 Box の場合の鍵。平文の Box では `null`。
+  ///
+  /// Returns: 開いた Box。既に開いている場合はその Box。
+  Future<Box> _openBoxTracked(
+    String name,
+    List<Box> openedBoxes, {
+    Uint8List? encryptionKey,
+  }) async {
+    final wasOpen = Hive.isBoxOpen(name);
+    final box = await Hive.openBox(
+      name,
+      encryptionCipher:
+          encryptionKey == null ? null : HiveAesCipher(encryptionKey),
     );
-    if (storedKey != null && storedKey.isNotEmpty) {
-      return _decodeCookieEncryptionKey(storedKey);
+    if (!wasOpen) {
+      openedBoxes.add(box);
     }
+    return box;
+  }
 
-    if (await Hive.boxExists(_encryptedCookieBoxName)) {
-      throw StateError(
-        'Cookie encryption key is missing. Existing encrypted cookies cannot be recovered.',
+  /// 開いている Box のファイルの場所から、Hive の保存先ディレクトリを求めます。
+  ///
+  /// Hive の保存先は公開されておらず、アダプタ 0 が登録済みの場合は
+  /// `initFlutter()` を呼ばないため、path_provider で求めた場所とずれ得ます。
+  ///
+  /// [box] 保存先にある、開いている Box。
+  ///
+  /// Returns: 保存先ディレクトリのパス。
+  ///
+  /// Throws:
+  ///   * [StateError] Box のファイルの場所を取得できない場合。
+  String _resolveHiveDirectoryPath(Box box) {
+    final boxPath = box.path;
+    if (boxPath == null) {
+      throw StateError('Hive storage directory is not available');
+    }
+    return File(boxPath).parent.path;
+  }
+
+  /// 暗号化鍵を読み取るクラスを返します。
+  EncryptionKeyReader get _encryptionKeyReader => EncryptionKeyReader(
+        storage: _keyStorage,
+        storageKey: _cookieEncryptionKeyStorageKey,
+        rereadInterval:
+            _storageTestHooks?.keyRereadInterval ?? _defaultKeyRereadInterval,
+        rereadAttempts:
+            _storageTestHooks?.keyRereadAttempts ?? _defaultKeyRereadAttempts,
+      );
+
+  /// 判定表で起動失敗となった場合の例外を組み立てます。
+  ///
+  /// [failure] 起動失敗の種別。
+  /// [inspection] 暗号化 Box の照合結果。
+  ///
+  /// Returns: 種別と Box ごとの照合結果を持つ例外。
+  StorageIntegrityException _buildStorageIntegrityException(
+    StorageIntegrityFailure failure,
+    StorageInspection inspection,
+  ) {
+    return StorageIntegrityException(
+      'Encrypted storage cannot be used (${failure.name})',
+      failure: failure,
+      boxResults: Map.unmodifiable(inspection.results),
+      error: inspection.keyRead.error,
+    );
+  }
+
+  /// 新しい暗号化鍵を生成し、secure storage へ書き込みます。
+  ///
+  /// [inspection] 暗号化 Box の照合結果。書き込みに失敗した場合の例外に含めます。
+  ///
+  /// Returns: 書き込んだ鍵。
+  ///
+  /// Throws:
+  ///   * [StorageIntegrityException] 書き込みに失敗した場合。
+  Future<Uint8List> _writeNewEncryptionKey(StorageInspection inspection) async {
+    final encryptionKey = _generateCookieEncryptionKey();
+    try {
+      await _keyStorage.write(
+        _cookieEncryptionKeyStorageKey,
+        base64Encode(encryptionKey),
+      );
+    } catch (error) {
+      throw StorageIntegrityException(
+        'Failed to write a new encryption key',
+        failure: StorageIntegrityFailure.keyWriteFailed,
+        boxResults: Map.unmodifiable(inspection.results),
+        error: error,
       );
     }
 
-    final generatedKey = _generateCookieEncryptionKey();
-    await _secureStorage.write(
-      key: _cookieEncryptionKeyStorageKey,
-      value: base64Encode(generatedKey),
+    _encryptionKeyGeneratedStopwatch = Stopwatch()..start();
+    // 別のインスタンスが古い鍵のまま段階 2 を進めないよう、保存領域の世代を進める
+    _storageGeneration++;
+    return encryptionKey;
+  }
+
+  /// 鍵と合わない Cookie の暗号化 Box を破棄し、イベントと診断情報で知らせます。
+  ///
+  /// イベントはブロードキャストのため、後から購読したアプリには届きません。
+  /// 起動後は [getDiagnostics] で確認できます。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  /// [reason] 破棄する理由。
+  Future<void> _discardCookieStorage(
+    String directoryPath,
+    StorageIntegrityFailure reason,
+  ) async {
+    await Hive.deleteBoxFromDisk(_encryptedCookieBoxName, path: directoryPath);
+    _cookieBox = null;
+    _lastCookieStorageDiscardedAt = DateTime.now();
+    _lastCookieStorageDiscardReason = reason;
+    _emitEvent(
+      ProxyEventType.cookieStorageDiscarded,
+      '',
+      {'reason': reason.name},
     );
-    return generatedKey;
   }
 
-  /// Base64 文字列として保存された Cookie 暗号化鍵を復元します。
-  Uint8List _decodeCookieEncryptionKey(String encodedKey) {
-    final decodedKey = base64Decode(encodedKey);
-    if (decodedKey.length != _cookieEncryptionKeyLength) {
-      throw StateError(
-        'Invalid cookie encryption key length: ${decodedKey.length}',
-      );
-    }
-
-    return Uint8List.fromList(decodedKey);
-  }
-
-  /// Cookie Box 用の新しい AES-256 鍵を生成します。
+  /// Cookie と業務データの暗号化に使う新しい AES-256 鍵を生成します。
   Uint8List _generateCookieEncryptionKey() {
     final random = Random.secure();
     return Uint8List.fromList(
@@ -3092,7 +5066,15 @@ class OfflineWebProxy {
 
   /// 既存の平文 Cookie Box を暗号化 Box へ一度だけ移行します。
   ///
-  /// 移行に失敗した場合は平文 Box を継続利用せず、例外を送出します。
+  /// 暗号化 Box に同じ Cookie が既にある場合は、新しいセッションを古い値で
+  /// 上書きしないよう書き写しません。移行に失敗した場合は平文 Box を継続利用せず、
+  /// 例外を送出します。
+  ///
+  /// [encryptedCookieBox] 書き写し先の暗号化 Cookie Box。
+  ///
+  /// Throws:
+  ///   * [CookieOperationException] 旧平文 Cookie Box を読めない、書き写せない、
+  ///     または削除できなかった場合。元の例外が [Exception] なら cause に持ちます。
   Future<void> _migrateLegacyCookieBoxIfNeeded(Box encryptedCookieBox) async {
     if (!await Hive.boxExists(_legacyCookieBoxName)) {
       return;
@@ -3119,20 +5101,35 @@ class OfflineWebProxy {
       }
 
       for (final cookieRecord in cookieRecords) {
+        if (encryptedCookieBox.containsKey(cookieRecord.storageKey)) {
+          continue;
+        }
         await encryptedCookieBox.put(
           cookieRecord.storageKey,
           cookieRecord.toMap(),
         );
       }
     } catch (e) {
-      throw StateError('Failed to migrate legacy cookie box: $e');
+      throw CookieOperationException(
+        'migrateLegacy',
+        'Failed to migrate legacy cookie box: $e',
+        e is Exception ? e : null,
+      );
     } finally {
       if (legacyCookieBox != null && legacyCookieBox.isOpen) {
         await legacyCookieBox.close();
       }
     }
 
-    await Hive.deleteBoxFromDisk(_legacyCookieBoxName);
+    try {
+      await Hive.deleteBoxFromDisk(_legacyCookieBoxName);
+    } catch (e) {
+      throw CookieOperationException(
+        'migrateLegacy',
+        'Failed to delete legacy cookie box: $e',
+        e is Exception ? e : null,
+      );
+    }
   }
 
   /// ネットワーク接続状態の監視を開始します。
@@ -5660,9 +7657,11 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// 再生成するため、処理は必ず終了します。
   ///
   /// [box] 重複を確認する保存領域。`null` の場合は確認を省略します。
+  /// [otherBox] あわせて重複を確認する保存領域。移行を待っている旧平文 Box を
+  ///   指定し、書き写しで同じキーが重ならないようにします。
   ///
   /// Returns: 生成された一意なキー。
-  String _generateUniqueStorageKey(Box? box) {
+  String _generateUniqueStorageKey(Box? box, [Box? otherBox]) {
     while (true) {
       final microseconds = DateTime.now().microsecondsSinceEpoch;
       if (microseconds == _lastStorageKeyMicroseconds) {
@@ -5679,7 +7678,10 @@ window.__offline_web_proxy_web_storage_bridge = {
           .padLeft(_storageKeySequenceDigits, '0');
       final key = '$timestampPart-$sequencePart';
 
-      if (box == null || !box.containsKey(key)) {
+      final usedInBox = box != null && box.containsKey(key);
+      final usedInOtherBox =
+          otherBox != null && otherBox.isOpen && otherBox.containsKey(key);
+      if (!usedInBox && !usedInOtherBox) {
         return key;
       }
     }
@@ -5746,7 +7748,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       queueData['idempotencyKey'] = resolved.value;
     }
 
-    final key = _generateUniqueStorageKey(box);
+    final key = _generateUniqueStorageKey(box, _legacyQueueBox);
     await box.put(key, queueData);
     return key;
   }
@@ -5783,15 +7785,23 @@ window.__offline_web_proxy_web_storage_bridge = {
 
   /// 同じべき等性キーを持つキュー項目のキーを探します。
   ///
+  /// 移行を待っている旧平文キューも探します。
+  ///
   /// [box] 対象のキュー保存領域。
   /// [idempotencyKey] 検索するべき等性キー。
   ///
   /// Returns: 見つかったキュー ID。無い場合は `null`。
   String? _findQueuedKeyByIdempotencyKey(Box box, String idempotencyKey) {
-    for (final key in box.keys) {
-      final data = box.get(key) as Map?;
-      if (data != null && data['idempotencyKey'] == idempotencyKey) {
-        return key.toString();
+    for (final candidate in [box, _legacyQueueBox]) {
+      if (candidate == null || !candidate.isOpen) {
+        continue;
+      }
+
+      for (final key in candidate.keys) {
+        final data = candidate.get(key) as Map?;
+        if (data != null && data['idempotencyKey'] == idempotencyKey) {
+          return key.toString();
+        }
       }
     }
 
@@ -5941,7 +7951,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     // キュー消化タイマーを開始（重複実行は _drainQueue 内でガード）
     _queueDrainTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       // ignore: discarded_futures
-      _drainQueue();
+      _runPeriodicQueueTasks();
     });
 
     // キャッシュパージタイマーを開始
@@ -5950,10 +7960,25 @@ window.__offline_web_proxy_web_storage_bridge = {
       _purgeExpiredCache();
       // ignore: discarded_futures
       _purgeExpiredIdempotencyKeys();
+      // ignore: discarded_futures
+      _enforceRetentionLimits();
     });
+
+    // 鍵を生成したインスタンスでは、待ち時間の後に旧平文 Box を移行する
+    _scheduleDeferredMigration();
 
     // 定期ヘルスチェックを設定（既定では無効）
     _startHealthCheckTimer();
+  }
+
+  /// 5 秒ごとの定期処理として、遅らせた移行とキュー消化を順に実行します。
+  ///
+  /// 移行はキュー消化と同じ排他を使うため、移行が終わるのを待ってから
+  /// キュー消化を始めます。移行が失敗し続けても、キュー消化がこの回を
+  /// 見送り続けないようにするためです。
+  Future<void> _runPeriodicQueueTasks() async {
+    await _runDeferredMigration();
+    await _drainQueue();
   }
 
   /// キューに保存されたリクエストを消化します。
@@ -5961,13 +7986,16 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// オンライン時にキュー内のリクエストを順次上流サーバに送信し、
   /// 成功時はキューから削除、失敗時はバックオフで再試行します。
   Future<void> _drainQueue() async {
-    // 停止直後にタイマーが発火した場合でも閉じたボックスへ触らない
+    // 停止直後にタイマーが発火した場合でも閉じたボックスへ触らない。
+    // 遅らせた移行が排他を持っている間は、この回を見送る。
     final queueBox = _queueBox;
     if (!_isRunning ||
+        _isStopping ||
         !_isUpstreamReachable ||
         queueBox == null ||
         !queueBox.isOpen ||
-        _isDrainingQueue) {
+        _isDrainingQueue ||
+        _queueDrainLock.isLocked) {
       return;
     }
 
@@ -5977,18 +8005,23 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     _isDrainingQueue = true;
     try {
-      final keys = _sortQueueKeysByQueuedAt(queueBox);
-      for (var i = 0; i < keys.length; i++) {
-        // 停止した場合や上流断を検知した場合は、残りを待たせずに打ち切る
-        if (!_isRunning || !queueBox.isOpen || !_isUpstreamReachable) {
-          break;
-        }
+      await _queueDrainLock.synchronized(() async {
+        final keys = _sortQueueKeysByQueuedAt(queueBox);
+        for (var i = 0; i < keys.length; i++) {
+          // 停止した場合や上流断を検知した場合は、残りを待たせずに打ち切る
+          if (!_isRunning ||
+              _isStopping ||
+              !queueBox.isOpen ||
+              !_isUpstreamReachable) {
+            break;
+          }
 
-        await _processQueuedItem(queueBox, keys[i]);
-        if (i % 10 == 0) {
-          await Future.delayed(Duration.zero); // UIフリーズ防止
+          await _processQueuedItem(queueBox, keys[i]);
+          if (i % 10 == 0) {
+            await Future.delayed(Duration.zero); // UIフリーズ防止
+          }
         }
-      }
+      });
     } finally {
       _isDrainingQueue = false;
     }
@@ -5999,34 +8032,16 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// Hive はキーの辞書順で列挙するため、旧バージョンで保存したキー形式が
   /// 残っている場合は辞書順と時系列順が一致しません。仕様【5】の FIFO 保証を
   /// キー形式に依存せず維持するため、保存日時を基準に並べ替えます。
-  /// 保存日時が同一の場合はキーの辞書順で解決します。
+  /// 保存日時が同一の場合は、キーを時刻として読み直した値で解決します。
+  /// 移行を待っている旧平文キューと同じキーは含めません。
   ///
   /// [box] 対象のキュー保存領域。
   ///
   /// Returns: 保存日時の昇順に並べ替えたキーの一覧。
   List<dynamic> _sortQueueKeysByQueuedAt(Box box) {
-    final entries = <({dynamic key, DateTime queuedAt})>[];
-
-    for (final key in box.keys) {
-      final data = box.get(key) as Map?;
-      final queuedAtValue = data?['queuedAt'] as String?;
-      entries.add((
-        key: key,
-        // 保存日時が読み取れない場合は最古として扱い、再送から取り残さない
-        queuedAt: DateTime.tryParse(queuedAtValue ?? '') ??
-            DateTime.fromMillisecondsSinceEpoch(0),
-      ));
-    }
-
-    entries.sort((a, b) {
-      final comparedAt = a.queuedAt.compareTo(b.queuedAt);
-      if (comparedAt != 0) {
-        return comparedAt;
-      }
-      return a.key.toString().compareTo(b.key.toString());
-    });
-
-    return entries.map((entry) => entry.key).toList();
+    return _sortedEncryptedEntries(ProxyStorageBox.queue, box, 'queuedAt')
+        .map((entry) => entry.key)
+        .toList();
   }
 
   /// キューの個別アイテムを処理します。
@@ -6049,96 +8064,141 @@ window.__offline_web_proxy_web_storage_bridge = {
     try {
       final result = await _sendQueuedRequest(data);
 
-      // 送信中に stop() が実行された場合は閉じた保存領域へ書き込まない
-      if (!box.isOpen) {
-        return;
-      }
+      // 送信の後の保存が終わるまで stop() が Box を閉じないよう、保存中であることを示す
+      final saving = Completer<void>();
+      _queuedItemSaving = saving.future;
+      try {
+        // 送信中に stop() が実行された場合は閉じた保存領域へ書き込まない。
+        // Box を閉じ始めた後は保存を始めず、キューに残して次の起動で再送する
+        if (!box.isOpen || _isClosingStorage) {
+          return;
+        }
 
-      if (result.success) {
-        await box.delete(key);
-        _recordResendResult(
-          data,
-          statusCode: result.statusCode,
-          success: true,
-          willRetry: false,
-        );
-        _emitEvent(ProxyEventType.queueDrained, itemUrl, {
-          'statusCode': result.statusCode,
-          'idempotencyKey': data['idempotencyKey'],
-        });
-      } else if (result.shouldDrop) {
-        final reason = result.dropReason ?? 'dropped';
-        final errorMessage = result.errorMessage ?? 'HTTP ${result.statusCode}';
-
-        if ((_config?.dropPolicy ?? DropPolicy.quarantine) ==
-            DropPolicy.quarantine) {
-          // 本文ごと隔離してから取り除き、退避に失敗した場合は消さない
-          final quarantineId = await _quarantineRequest(
+        if (result.success) {
+          await box.delete(key);
+          _recordResendResult(
             data,
             statusCode: result.statusCode,
-            reason: reason,
-            errorMessage: errorMessage,
+            success: true,
+            willRetry: false,
           );
-          if (quarantineId == null) {
-            // 退避できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
-            _updateRetrySchedule(data);
-            await box.put(key, data);
+          _emitEvent(ProxyEventType.queueDrained, itemUrl, {
+            'statusCode': result.statusCode,
+            'idempotencyKey': data['idempotencyKey'],
+          });
+        } else if (result.shouldDrop) {
+          final reason = result.dropReason ?? 'dropped';
+          final errorMessage =
+              result.errorMessage ?? 'HTTP ${result.statusCode}';
+
+          if ((_config?.dropPolicy ?? DropPolicy.quarantine) ==
+              DropPolicy.quarantine) {
+            // 本文ごと隔離してから取り除き、退避に失敗した場合は消さない
+            final quarantine = await _quarantineRequest(
+              data,
+              statusCode: result.statusCode,
+              reason: reason,
+              errorMessage: errorMessage,
+              queueBox: box,
+              queueKey: key,
+            );
+            if (quarantine.tooLarge) {
+              // 1 件で隔離の合計バイト数の上限を超えるため、本文を持たない履歴へ
+              // 記録し、同じ 4xx を再試行し続けないようキューから取り除いた
+              _recordResendResult(
+                data,
+                statusCode: result.statusCode,
+                success: false,
+                dropReason: reason,
+                willRetry: false,
+              );
+              _emitEvent(ProxyEventType.requestDropped, itemUrl, {
+                'statusCode': result.statusCode,
+                'dropReason': _quarantineTooLargeDropReason,
+              });
+              return;
+            }
+
+            final quarantineId = quarantine.quarantineId;
+            if (quarantineId == null) {
+              // 退避できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
+              _updateRetrySchedule(data);
+              await box.put(key, data);
+              _recordResendResult(
+                data,
+                statusCode: result.statusCode,
+                success: false,
+                dropReason: reason,
+                willRetry: true,
+              );
+              return;
+            }
+
+            // キューからは、隔離した直後に隔離のロックの中で取り除いている
             _recordResendResult(
               data,
               statusCode: result.statusCode,
               success: false,
               dropReason: reason,
-              willRetry: true,
+              willRetry: false,
             );
-            return;
+            _emitEvent(ProxyEventType.requestQuarantined, itemUrl, {
+              'quarantineId': quarantineId,
+              'statusCode': result.statusCode,
+              'reason': reason,
+            });
+          } else {
+            // 履歴を残してから取り除き、キューから消えたのに記録が無い状態を作らない
+            final recorded = await _recordDroppedRequest(
+              data,
+              statusCode: result.statusCode,
+              dropReason: reason,
+              errorMessage: errorMessage,
+            );
+            if (!recorded) {
+              // 記録できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
+              _updateRetrySchedule(data);
+              await box.put(key, data);
+              _recordResendResult(
+                data,
+                statusCode: result.statusCode,
+                success: false,
+                dropReason: reason,
+                willRetry: true,
+              );
+              return;
+            }
+            await box.delete(key);
+            _recordResendResult(
+              data,
+              statusCode: result.statusCode,
+              success: false,
+              dropReason: reason,
+              willRetry: false,
+            );
+            _emitEvent(ProxyEventType.requestDropped, itemUrl, {
+              'statusCode': result.statusCode,
+              'dropReason': result.dropReason,
+            });
           }
-
-          await box.delete(key);
-          _recordResendResult(
-            data,
-            statusCode: result.statusCode,
-            success: false,
-            dropReason: reason,
-            willRetry: false,
-          );
-          _emitEvent(ProxyEventType.requestQuarantined, itemUrl, {
-            'quarantineId': quarantineId,
-            'statusCode': result.statusCode,
-            'reason': reason,
-          });
         } else {
-          // 履歴を残してから取り除き、キューから消えたのに記録が無い状態を作らない
-          await _recordDroppedRequest(
-            data,
-            statusCode: result.statusCode,
-            dropReason: reason,
-            errorMessage: errorMessage,
-          );
-          await box.delete(key);
+          _updateRetrySchedule(data);
+          await box.put(key, data);
           _recordResendResult(
             data,
             statusCode: result.statusCode,
             success: false,
-            dropReason: reason,
-            willRetry: false,
+            willRetry: true,
           );
-          _emitEvent(ProxyEventType.requestDropped, itemUrl, {
-            'statusCode': result.statusCode,
-            'dropReason': result.dropReason,
-          });
         }
-      } else {
-        _updateRetrySchedule(data);
-        await box.put(key, data);
-        _recordResendResult(
-          data,
-          statusCode: result.statusCode,
-          success: false,
-          willRetry: true,
-        );
+      } finally {
+        saving.complete();
+        if (identical(_queuedItemSaving, saving.future)) {
+          _queuedItemSaving = null;
+        }
       }
     } catch (e) {
-      if (!box.isOpen) {
+      if (!box.isOpen || _isClosingStorage) {
         return;
       }
 
@@ -6535,15 +8595,20 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// HiveのマップデータをQueuedRequestオブジェクトに変換します。
   ///
   /// キューに保存されたリクエスト情報をオブジェクトに再構築します。
+  /// 機密情報を含み得るヘッダの値はマスクします。
   ///
   /// [data] Hiveから読み込んだキューデータ。
+  /// [pendingMigration] 移行を待っている旧平文キューの項目かどうか。
   ///
   /// Returns: 変換されたQueuedRequestオブジェクト。
-  QueuedRequest _mapToQueuedRequest(Map data) {
+  QueuedRequest _mapToQueuedRequest(Map data, {bool pendingMigration = false}) {
     return QueuedRequest(
       url: data['url'] as String? ?? '',
       method: data['method'] as String? ?? 'GET',
-      headers: Map<String, String>.from(data['headers'] as Map? ?? {}),
+      headers: _maskSensitiveHeaders(
+        Map<String, String>.from(data['headers'] as Map? ?? {}),
+      ),
+      pendingMigration: pendingMigration,
       queuedAt: DateTime.parse(
           data['queuedAt'] as String? ?? DateTime.now().toIso8601String()),
       acceptedAt: DateTime.tryParse(_resolveQueuedAcceptedAt(data) ?? '') ??
@@ -6557,9 +8622,14 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// Hive のマップデータを DroppedRequest オブジェクトに変換します。
   ///
   /// [data] Hive から読み込んだドロップ履歴データです。
+  /// [pendingMigration] 移行を待っている旧平文履歴の項目かどうかです。
   /// 戻り値は変換された [DroppedRequest] オブジェクトです。
-  DroppedRequest _mapToDroppedRequest(Map data) {
+  DroppedRequest _mapToDroppedRequest(
+    Map data, {
+    bool pendingMigration = false,
+  }) {
     return DroppedRequest(
+      pendingMigration: pendingMigration,
       url: data['url'] as String? ?? '',
       method: data['method'] as String? ?? 'GET',
       droppedAt: DateTime.parse(
@@ -7342,79 +9412,180 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// [statusCode] はドロップ時の HTTP ステータスです。
   /// [dropReason] はドロップ理由です。
   /// [errorMessage] は記録する詳細メッセージです。
-  Future<void> _recordDroppedRequest(
+  ///
+  /// 履歴のロックの中で記録し、保持上限を超えた分を取り除きます。上限の処理に
+  /// 失敗しても、記録した結果は変えずにイベントで知らせます。
+  ///
+  /// Returns: 記録した場合は `true`。保存領域が使えない場合は `false`。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 履歴のロックを上限時間内に取得できなかった場合。
+  Future<bool> _recordDroppedRequest(
     Map data, {
     required int statusCode,
     required String dropReason,
     required String errorMessage,
-  }) async {
-    final droppedAt = DateTime.now();
-    final droppedData = {
-      'url': data['url'] as String? ?? '',
-      'method': data['method'] as String? ?? 'GET',
-      'droppedAt': droppedAt.toIso8601String(),
-      'dropReason': dropReason,
-      'statusCode': statusCode,
-      'errorMessage': errorMessage,
-      'acknowledged': false,
-    };
-
-    final box = _droppedRequestBox;
-    // 停止処理と競合した場合は閉じた保存領域へ書き込まない
-    if (box == null || !box.isOpen) {
-      return;
-    }
-
-    final key = _generateUniqueStorageKey(box);
-    await box.put(key, droppedData);
-    _unacknowledgedDroppedCount = null;
+  }) {
+    return _recordDroppedRequests([
+      (
+        data: data,
+        statusCode: statusCode,
+        dropReason: dropReason,
+        errorMessage: errorMessage,
+      ),
+    ]);
   }
 
-  /// リクエストを隔離領域へ退避します。
+  /// ドロップされたリクエスト履歴をまとめて保存します。
+  ///
+  /// 履歴のロックを 1 回だけ取ってまとめて書き込み、保持上限の判定も 1 回に
+  /// します。上限の処理に失敗しても、記録した結果は変えずにイベントで知らせます。
+  ///
+  /// [records] 記録する内容（元のキューデータ、ドロップ時の HTTP ステータス、
+  ///   ドロップ理由、詳細メッセージ）。
+  ///
+  /// Returns: 記録した場合は `true`。保存領域が使えない場合は、何も記録せずに
+  ///   `false`。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 履歴のロックを上限時間内に取得できなかった場合。
+  Future<bool> _recordDroppedRequests(
+    List<_DroppedRequestRecord> records,
+  ) async {
+    if (records.isEmpty) {
+      return true;
+    }
+
+    final droppedAt = DateTime.now().toIso8601String();
+    return _droppedRequestLock.synchronized(() async {
+      final box = _droppedRequestBox;
+      // 停止処理と競合した場合は閉じた保存領域へ書き込まない
+      if (box == null || !box.isOpen) {
+        return false;
+      }
+
+      final droppedEntries = <String, Map<String, Object>>{};
+      for (final record in records) {
+        var key = _generateUniqueStorageKey(box, _legacyDroppedRequestBox);
+        while (droppedEntries.containsKey(key)) {
+          key = _generateUniqueStorageKey(box, _legacyDroppedRequestBox);
+        }
+        droppedEntries[key] = {
+          'url': record.data['url'] as String? ?? '',
+          'method': record.data['method'] as String? ?? 'GET',
+          'droppedAt': droppedAt,
+          'dropReason': record.dropReason,
+          'statusCode': record.statusCode,
+          'errorMessage': record.errorMessage,
+          'acknowledged': false,
+        };
+      }
+
+      await box.putAll(droppedEntries);
+      _unacknowledgedDroppedCount = null;
+
+      try {
+        await _enforceDroppedRequestLimits(box);
+      } catch (error) {
+        _emitRetentionError(error);
+      }
+      return true;
+    }, timeout: _storageLockTimeout);
+  }
+
+  /// リクエストを隔離領域へ退避し、キューから取り除きます。
   ///
   /// 本文を含むキューデータをそのまま保持するため、原因を解消したあとに
-  /// [retryQuarantinedRequest] で再送できます。
+  /// [retryQuarantinedRequest] で再送できます。隔離のロックの中で退避し、退避した
+  /// 直後（保持上限の判定より前）にキューから取り除きます。ロックを待つ間に停止して
+  /// キューが閉じていた場合は退避しません。キューに残したまま隔離すると、次の起動で
+  /// 同じ要求を二重に隔離するためです。保持上限を超えた分はドロップ履歴へ移します。
+  /// 上限の処理に失敗しても、退避した結果は変えずにイベントで知らせます。
+  ///
+  /// 1 件で [ProxyConfig.quarantineMaxBytes] を超える場合は、既存の隔離を
+  /// 追い出さず、隔離にも入れません。本文を持たないドロップ履歴へ
+  /// `quarantine_too_large` として記録してから、キューから取り除きます。
   ///
   /// [data] 退避するキューデータ。
   /// [statusCode] 上流から返されたステータスコード。
   /// [reason] 退避理由。
   /// [errorMessage] 詳細なエラーメッセージ。
+  /// [queueBox] 取り除く記録があるキューの保存領域。
+  /// [queueKey] 取り除く記録のキュー ID。
   ///
-  /// Returns: 退避に使用した ID。保存領域が使えない場合は `null`。
-  Future<String?> _quarantineRequest(
+  /// Returns: 退避に使用した ID と、大きすぎて履歴へ記録したかどうか。
+  ///   保存領域が使えない場合は、ID が `null` で記録もしていません。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 隔離または履歴のロックを上限時間内に取得できなかった場合。
+  Future<({String? quarantineId, bool tooLarge})> _quarantineRequest(
     Map data, {
     required int statusCode,
     required String reason,
     required String errorMessage,
-  }) async {
-    final box = _quarantinedRequestBox;
-    // 停止処理と競合した場合は閉じた保存領域へ書き込まない
-    if (box == null || !box.isOpen) {
-      return null;
-    }
+    required Box queueBox,
+    required Object queueKey,
+  }) {
+    return _quarantineLock.synchronized(() async {
+      final box = _quarantinedRequestBox;
+      // 停止処理と競合した場合は閉じた保存領域へ書き込まない
+      if (box == null || !box.isOpen || !queueBox.isOpen) {
+        return (quarantineId: null, tooLarge: false);
+      }
 
-    final quarantinedData = Map<String, dynamic>.from(data);
-    quarantinedData['quarantinedAt'] = DateTime.now().toIso8601String();
-    quarantinedData['statusCode'] = statusCode;
-    quarantinedData['reason'] = reason;
-    quarantinedData['errorMessage'] = errorMessage;
+      final quarantinedData = Map<String, dynamic>.from(data);
+      quarantinedData['quarantinedAt'] = DateTime.now().toIso8601String();
+      quarantinedData['statusCode'] = statusCode;
+      quarantinedData['reason'] = reason;
+      quarantinedData['errorMessage'] = errorMessage;
 
-    final key = _generateUniqueStorageKey(box);
-    await box.put(key, quarantinedData);
-    return key;
+      final maxBytes = _config?.quarantineMaxBytes ?? 0;
+      if (maxBytes > 0 &&
+          _estimateQuarantinedSize(quarantinedData) > maxBytes) {
+        final recorded = await _recordDroppedRequest(
+          data,
+          statusCode: statusCode,
+          dropReason: _quarantineTooLargeDropReason,
+          errorMessage: errorMessage,
+        );
+        if (recorded && queueBox.isOpen) {
+          await queueBox.delete(queueKey);
+        }
+        return (quarantineId: null, tooLarge: recorded);
+      }
+
+      final key = _generateUniqueStorageKey(box, _legacyQuarantineBox);
+      await box.put(key, quarantinedData);
+      if (queueBox.isOpen) {
+        await queueBox.delete(queueKey);
+      }
+
+      try {
+        await _enforceQuarantineLimits(box, protectedKey: key);
+      } catch (error) {
+        _emitRetentionError(error);
+      }
+      return (quarantineId: key, tooLarge: false);
+    }, timeout: _storageLockTimeout);
   }
 
   /// 隔離データを [QuarantinedRequest] へ変換します。
   ///
   /// [id] 隔離領域内での識別子。
   /// [data] 保存されている隔離データ。
+  /// [pendingMigration] 移行を待っている旧平文隔離の項目かどうか。
   ///
   /// Returns: 変換した隔離リクエスト情報。
-  QuarantinedRequest _mapToQuarantinedRequest(String id, Map data) {
+  QuarantinedRequest _mapToQuarantinedRequest(
+    String id,
+    Map data, {
+    bool pendingMigration = false,
+  }) {
     final now = DateTime.now();
 
     return QuarantinedRequest(
       id: id,
+      pendingMigration: pendingMigration,
       url: data['url'] as String? ?? '',
       method: data['method'] as String? ?? 'GET',
       quarantinedAt:
@@ -7520,3 +9691,70 @@ class Semaphore {
     }
   }
 }
+
+/// 保存領域の初期化の段階の結果です。
+///
+/// 共有する Future を失敗させると、別の error zone から待つ呼び出しに失敗が
+/// 伝わらず、待ったまま完了しません。そこで失敗も値として持ち、待つ側の zone で
+/// 投げ直します。
+class _StageOutcome<T> {
+  /// 成功した結果を生成します。
+  ///
+  /// [value] 段階の戻り値。
+  const _StageOutcome.success(this.value)
+      : error = null,
+        stackTrace = null;
+
+  /// 失敗した結果を生成します。
+  ///
+  /// [error] 段階で起きたエラー。
+  /// [stackTrace] エラーのスタックトレース。
+  const _StageOutcome.failure(Object this.error, StackTrace this.stackTrace)
+      : value = null;
+
+  /// 成功した場合の戻り値。
+  final T? value;
+
+  /// 失敗した場合のエラー。
+  final Object? error;
+
+  /// 失敗した場合のスタックトレース。
+  final StackTrace? stackTrace;
+
+  /// 成功した場合は戻り値を返し、失敗した場合はエラーを投げ直します。
+  ///
+  /// Returns: 段階の戻り値。
+  T unwrap() {
+    final failure = error;
+    if (failure != null) {
+      Error.throwWithStackTrace(failure, stackTrace!);
+    }
+    return value as T;
+  }
+}
+
+/// 隔離の記録を操作した結果です。
+enum _QuarantineOperationResult {
+  /// 操作しました。
+  done,
+
+  /// 該当する記録がありません。
+  notFound,
+
+  /// 移行を待っている旧平文 Box の記録のため、操作できません。
+  pendingMigration,
+}
+
+/// ドロップ履歴へ記録する内容です。
+///
+/// 元のキューデータ、ドロップ時の HTTP ステータス、ドロップ理由、詳細な
+/// メッセージの組です。
+typedef _DroppedRequestRecord = ({
+  Map data,
+  int statusCode,
+  String dropReason,
+  String errorMessage,
+});
+
+/// 隔離から取り除く記録と、ドロップ履歴に残す理由の組です。
+typedef _QuarantineEviction = ({StoredEntry entry, String dropReason});

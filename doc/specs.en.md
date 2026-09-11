@@ -13,7 +13,7 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 
 - **Base Technology**: shelf (Dart's lightweight HTTP server framework), shelf_router (routing), shelf_proxy (proxy functionality)
 - **Communication Path**: WebView → http://127.0.0.1:<port> → (proxy) → Upstream Server
-- **Data Persistence**: Local storage using Hive
+- **Data Persistence**: Local storage using Hive. Cookies, the queue, the quarantine store and the dropped history are encrypted with AES-256 (sections [4] and [5])
 - **Cache-Control Support**: Use response headers for storage eligibility and fallback eligibility
 
 ### Data Processing Strategy
@@ -22,6 +22,23 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 - **Queue**: Manage POST/PUT/DELETE requests in FIFO (First In First Out). Send sequentially when network recovers
 - **Offline Response**: Return cache when cache hit, display fallback page when uncached (the page reloads itself once the upstream is reachable again)
 - **Static Resources**: Index files under `assets/static/` that are declared in `pubspec.yaml` and listed in `AssetManifest.json`, and serve them as bundled assets
+
+### Data Stored on the Device
+
+The proxy stores data in Hive boxes and in secure storage. In an encrypted box only the values are encrypted, and the box keys stay in the clear (IDs derived from the stored time for the queue, the quarantine store and the dropped history; the domain, path, name and so on for cookies). **The queue and the quarantine store keep the request headers and body as they were sent.** The content, encryption and retention of each location are as follows.
+
+| Location | Content | Encryption | Retention |
+| --- | --- | --- | --- |
+| `proxy_cookies_secure` | Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on | Values only (AES-256) | An expired cookie is removed when the cookies to send are looked up. `clearCookies()` removes them |
+| `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
+| `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default (see "Retention Limits" in [5]) |
+| `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
+| `proxy_cache` | Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL | None | Entries past their stale period are removed every hour |
+| `proxy_web_storage` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on | None | Until the next snapshot overwrites it |
+| `proxy_idempotency` | Idempotency keys that reached the upstream, with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
+| `proxy_port_preferences` | The port last bound for each host | None | Until the next bind overwrites it |
+| `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store and the dropped history | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or a new key replaces it as the decision tables say (see "Decision Tables" in [4]) |
+| `proxy_queue`, `proxy_quarantined_requests`, `proxy_dropped_requests`, `proxy_cookies` | Content stored in the clear by 0.14.0 or earlier (cookies: before 0.4.0) | None | Deleted after migration to the encrypted boxes. The old queue, quarantine and dropped-history boxes are emptied before deletion |
 
 ### Proxy Target
 
@@ -293,10 +310,158 @@ Automatic Content-Type setting based on extensions:
 ### Storage Strategy
 
 - **Persistence Required**: Persist all cookies in file-based storage. Retain even after app restart
-- **Encryption**: Encrypt and save cookie data using AES-256
-- **Key Management**: Store the encryption key in secure storage and migrate the legacy plain `proxy_cookies` box once when possible
-- **Key Loss Handling**: If the secure storage key is lost, existing encrypted cookies cannot be decrypted and re-authentication is required
+- **Encryption**: Encrypt and save cookie data using AES-256 (box `proxy_cookies_secure`). Only the values are encrypted; the keys (domain, path, name and so on) stay in the clear
+- **Key Management**: Store the encryption key in secure storage (`offline_web_proxy.cookie_box_encryption_key`) and share it with the encrypted queue, quarantine and dropped-history boxes (section [5])
+- **Legacy Plain Box**: Migrate the legacy plain `proxy_cookies` box once, in stage 1 of storage initialization. A cookie whose key already exists in the encrypted box is not copied, so a newer session is never overwritten by an old value. When the legacy box cannot be read, copied or deleted, `CookieOperationException` (`operation: migrateLegacy`) is raised, which `start()` carries as the `cause` of a `ProxyStartException` and cookie APIs as the `cause` of a `CookieOperationException`
+- **Key Loss Handling**: The boxes are checked against the key before they are opened. When only the cookie box has a problem, the cookie box is discarded and startup continues, and the user must sign in again. When a queue, quarantine or dropped-history box has a problem, startup fails without deleting anything (see "Encryption Key Management and Verification")
 - **Memory Cache**: Cache cookies loaded from files in memory for fast access
+
+### Encryption Key Management and Verification
+
+Hive treats a CRC mismatch in the first frame of an encrypted box opened with the wrong key as corruption and truncates the file. The proxy therefore reads the files of the encrypted boxes (cookies, queue, quarantine, dropped history) without opening them, checks them against the key, and follows the decision tables to open them as they are, discard the cookie box, or fail startup.
+
+#### Serialized Initialization
+
+Storage initialization runs in two stages, inside one serialization shared by every proxy instance in the isolate, so that concurrent cookie API calls right after a fresh install never generate two keys or open a box twice. The work of each stage and the APIs that run it are as follows.
+
+| Stage | Work | Run by |
+| --- | --- | --- |
+| Stage 1 (key) | Locate the storage, read and verify the key, generate the key and discard the cookie box as the decision tables say, open the cookie box, migrate the legacy plain cookie box | `start()` and cookie APIs (callable before startup and after `stop()`) |
+| Stage 2 (business data) | Open the cache, web storage and idempotency boxes and the encrypted queue, quarantine and dropped-history boxes, migrate the legacy plain boxes (section [5]) | `start()` only |
+
+- A failed stage closes the boxes it opened, is not shared, and is retried by the next call. The result of stage 1 (the cookie box) stays usable after stage 2 fails
+- `stop()` discards the results of both stages, so a cookie API called after `stop()` and the next `start()` check again from stage 1
+- Cookie APIs report an initialization failure as a `CookieOperationException` whose `cause` is the original exception
+- Only calls within one isolate are serialized, and using several instances at the same time is not supported (see "Instances and Isolates" in [17])
+
+#### Storage Location and Content
+
+- **Location**: Open the plain port preference box (`proxy_port_preferences`) and use the parent directory of its file as Hive's storage directory. Hive does not expose that directory, and the proxy skips `Hive.initFlutter()` when adapter 0 is already registered, so the directory can differ from the one path_provider reports
+- **Box with content**: `<box name>.hive` in that directory (or `<box name>.hivec` when there is no `.hive`) larger than 0 bytes. A box with only a `.lock` file, or with an empty file, has no content
+
+#### Key States
+
+The result of reading the key from secure storage is classified as follows.
+
+| State | Condition | `StorageIntegrityFailure` |
+| --- | --- | --- |
+| Temporarily unavailable | `isCupertinoProtectedDataAvailable()` returns `false` on iOS / macOS, for example while the device is locked. Neither a `null` read nor a read error is used for the decision then. A `null` return (platforms other than iOS / macOS), or a failure to obtain the value, counts as available | `temporarilyUnavailable` |
+| Unreadable | The read throws | `keyUnreadable` |
+| Missing | The read returns `null` | `keyMissing` |
+| Invalid | Empty, not Base64, or not 32 bytes. The value itself is wrong, so it is not reread | `keyInvalid` |
+| Present | Anything else | — |
+
+#### Rereading the Key
+
+Only when an encrypted box has content and the first read is missing or unreadable, the key is reread up to three times, 500 milliseconds apart. Without content nothing can be lost, so the key is not reread.
+
+- A value read even once (including an invalid one) is used for the decision
+- Only when every read gives the same result (all `null`, or all errors) is the state considered persistent
+- When the results mix `null` and errors, or the state turns temporarily unavailable during the rereads, the key is treated as temporarily unavailable
+
+#### Checking an Encrypted Box
+
+With the key present, each encrypted box with content is checked as follows.
+
+1. **First frame**: Compute the CRC32 of the first frame starting from the value derived from the key (the same value as Hive's `HiveAesCipher.calculateKeyCrc()`) and compare it with the CRC stored in the frame. On a match the rest of the file is not scanned (a first frame larger than 1 MiB is checked in a separate isolate that reads the whole file)
+2. **Scan**: When the first frame does not match, or is incomplete (its length field exceeds the rest of the file), search the whole file for a frame that matches the key
+   - CRCs are computed only at positions that fit Hive's frame structure: a string key of 1 to 255 bytes, made of digits and `-` only for the queue, quarantine and dropped-history boxes, or of ASCII only for the cookie box. Migration keeps keys, so the 13-digit and 16-digit keys from before v0.11.0 are also candidates
+   - The scan runs in a separate isolate so the UI isolate is not blocked
+   - It is never cut off by byte count, so the result does not depend on device speed. As a safety net for abnormal cases there is only a time limit (10 seconds per box, excluding reading the file and starting the isolate). The four boxes are checked one after another
+3. **Result**: One of the following
+
+| Result | Condition | `StorageBoxCheckResult` |
+| --- | --- | --- |
+| No content | The file is missing or empty | `empty` |
+| Match | The first frame matches the key | `match` |
+| No mismatch | The first frame is incomplete and no frame matches the key. Treated as a box that stopped during its first write (Hive truncates it on open) | `noMismatch` |
+| Mismatch | The first frame does not match the key and no frame matches | `mismatch` |
+| Corrupted | The first frame does not match, but a later frame does. The key is right and the head of the box is damaged | `corrupted` |
+| Aborted | The scan exceeded the time limit | `aborted` |
+| Not verified | Not checked because no usable key exists (the box has content) | `notVerified` |
+
+"Fine" below means no content, match or no mismatch.
+
+#### Decision Tables
+
+When no encrypted box has content:
+
+| Key | Action |
+| --- | --- |
+| Temporarily unavailable | Fail startup (`temporarilyUnavailable`) |
+| Present | Open as is |
+| Missing, invalid or unreadable | Write a new key (no encrypted data exists, so nothing is lost). If the write fails, fail startup (`keyWriteFailed`) without creating any box |
+
+When an encrypted box has content:
+
+| Key | Queue, quarantine and dropped-history boxes | Cookie box | Action |
+| --- | --- | --- | --- |
+| Temporarily unavailable (including by the rereading rules) | Any | Any | Fail startup (`temporarilyUnavailable`). Delete nothing |
+| Present | All fine | Fine | Open as is (an ordinary update from 0.14.0 takes this row or the "Present" row of the table above) |
+| Present | All fine | Mismatch, corrupted or aborted | Discard the cookie box and continue. Notify |
+| Present | At least one mismatch, corrupted or aborted | Any | Fail startup (`keyMismatch`, `corrupted` or `verificationAborted`, preferred in that order). Delete nothing |
+| Invalid, or missing or unreadable after rereading | All without content | With content | Write a new key, then discard the cookie box and continue. Notify. If the write fails, fail startup (`keyWriteFailed`) without deleting anything |
+| Invalid, or missing or unreadable after rereading | At least one with content | Any | Fail startup (`keyInvalid`, `keyMissing` or `keyUnreadable`). Delete nothing |
+
+- A corrupted queue, quarantine or dropped-history box is not repaired at startup, because repairing it loses the records at its head. It is rebuilt by the recovery API after the user confirms
+- The cookie box alone is discarded and startup continues because losing cookies only costs a sign-in, and an app should not stop starting just because the package was upgraded. Up to 0.14.0, a missing key with a cookie box left behind failed startup
+
+#### Discarding the Cookie Box
+
+- Discarding the cookie box raises `ProxyEventType.cookieStorageDiscarded` with the `StorageIntegrityFailure` name in `data['reason']`
+- The discard happens inside `start()` or a cookie API called before `start()` or after `stop()`. Events are broadcast, so an app that subscribes later never receives it
+- After startup, `ProxyDiagnostics.lastCookieStorageDiscardedAt` and `lastCookieStorageDiscardReason` report it (per instance)
+- Deletion by the recovery API raises no `cookieStorageDiscarded` and leaves the diagnostics unchanged
+- Cookies restored by `restoreCookies()` before startup stay in the new box even when that call discarded the old one
+
+#### Startup Failure
+
+- `start()` throws `StorageIntegrityException`, a subclass of `ProxyStartException`, without wrapping it. Cookie APIs carry it as the `cause` of a `CookieOperationException`
+- `failure` holds the kind, `boxResults` the check result of every encrypted box (the cookie box included), and `error` the original error, such as the one thrown while reading the key (errors that are not `Exception`s included)
+- Nothing has been deleted. Retry `start()` later on `temporarilyUnavailable` and `keyWriteFailed`. For the other kinds, when retries keep failing, call the recovery API after the user confirms
+- The exception is thrown before the storage is opened, so after such a failed startup `getStats()` reports zero for the queue, quarantine and dropped-history counts
+
+#### Recovery API
+
+The app calls `recoverEncryptedStorage()` after the user confirms.
+
+- **Preconditions**: While any proxy in the isolate is running or starting, nothing is done and `proxyActive` is returned. The recovery runs inside the same serialization as initialization, so it never overlaps an initialization started by a cookie API
+- **Overlap with startup**: A `start()` called after the recovery has begun checking waits for the recovery to finish, then redoes storage initialization from stage 1
+- **Decision**: Right before deleting anything, the key is reread and the boxes are checked, with the same time limit as `start()`
+
+What the recovery does:
+
+| Situation | Action | Result |
+| --- | --- | --- |
+| The key is temporarily unavailable (including by the rereading rules) | Nothing | `rejection: temporarilyUnavailable` |
+| The key is present and no queue, quarantine or dropped-history box is mismatched, corrupted or aborted | Nothing (`start()` discards a problematic cookie box on its own) | `rejection: startWillSucceed` |
+| The key is present and a queue, quarantine or dropped-history box is mismatched, corrupted or aborted (the cookie box is handled by the same rules) | Keep the key and handle each box (table below) | `performed: true` |
+| The key is invalid, or missing or unreadable after rereading, and a queue, quarantine or dropped-history box has content | Delete every encrypted box (cookies, queue, quarantine, dropped history), then the key | `performed: true`, `keyDeleted: true` |
+| The key is invalid, or missing or unreadable, and no queue, quarantine or dropped-history box has content | Nothing | `rejection: startWillSucceed` |
+
+- A startup that failed because the key could not be written (`keyWriteFailed`) also gets `startWillSucceed`, since there is no box to delete. Retry `start()` later
+
+Each box is handled as follows when the key is present. Aborted and corrupted boxes are scanned again, without a time limit, in the files as they are after the boxes are closed, before deciding.
+
+| Check result | Handling | Reported in |
+| --- | --- | --- |
+| Mismatch | Delete | `deletedBoxes` |
+| Corrupted | Rebuild without the bytes before the first frame that matches the key. Only the records at the head are lost, and how many is unknown | `rebuiltBoxes` |
+| Aborted, and no mismatch on the second scan | Truncate to 0 bytes. No record matches the key and Hive would truncate the box on open anyway, so nothing is lost (left as is, the retried `start()` would abort again) | `rebuiltBoxes` |
+| Fine (with content) | Keep | `keptBoxes` |
+
+- An aborted box that turns out mismatched or corrupted on the second scan follows the corresponding row
+- **Rebuild procedure**: Write the part to keep to `<box name>.hivec`, flush it to disk, and rename it over `<box name>.hive`. The original `.hive` stays until it is replaced. Hive deletes the `.hivec` when it opens a box that has a `.hive`, so a rebuild interrupted before the rename leaves the original box in use
+- **Closing boxes**: All proxy boxes are closed before deleting or rebuilding, including an encrypted box opened by another instance. A leftover `.hivec` of an encrypted box that also has a `.hive` is deleted after closing
+- **Unexpected failures**: An unexpected failure, such as a box file or the key that cannot be deleted, throws `StorageRecoveryException`
+- **Rerunning**: Running an interrupted recovery again carries out the rest and leaves the files as a completed first run would. The result differs: boxes already deleted or rebuilt by an earlier run are not in `deletedBoxes` or `rebuiltBoxes`. When, on the path for an unusable key, only deleting the key failed after the encrypted boxes were deleted, the rerun returns `startWillSucceed` (the next `start()` replaces the unusable key)
+- **Legacy plain boxes**: Never deleted; they can be read without the key and are migrated by the next `start()`. After the key is deleted, the next `start()` generates a key, so that migration becomes the deferred migration of section [5]
+- **Afterwards**: The shared initialization results are discarded, so `start()` can be called without restarting the process
+- **Counts**: The number of encrypted records cannot be read and is not returned. After startup fails with `StorageIntegrityException`, `getStats()` reports zero, so it must not back a confirmation screen
+
+#### Dependency on Hive's Internal Format
+
+Checking the first frame, scanning, rebuilding and the stored-order rules rely on the internal format of Hive 2.2.3: the frame layout, the key encoding, `calculateKeyCrc`, the handling of `.hive` and `.hivec`, and the key order. Hive's CRC32 is not public, so the proxy carries its own implementation of the same computation. Check compatibility whenever Hive is upgraded. A scan finding a frame that matches by chance is extremely unlikely, but not impossible.
 
 ### Cookie Evaluation Criteria
 
@@ -322,10 +487,10 @@ Provides methods for cookie management. See [20] API Reference for details.
 
 - **Stored Order**: Resend in ascending order of the stored timestamp to preserve request order
 - **Unique Keys**: Derive keys from a microsecond timestamp plus a per-microsecond sequence number so that requests stored at the same moment are never overwritten
-- **Persistence**: Save queue state with Hive. Continue resending after app restart
+- **Persistence**: Save queue state in an encrypted Hive box (`proxy_queue_secure`). Continue resending after app restart (see "Encrypted Storage")
 - **Backoff Handling**: Skip requests that are still waiting for their backoff window and send the following requests whose window has already passed
 - **Connection Release**: A resend always reads the upstream response body to completion and releases the connection before moving on, so a queue larger than the concurrent connection limit still drains to the end
-- **When Quarantine Fails**: If the request cannot be moved to the quarantine store, it stays in the queue and is retried with backoff applied
+- **When Quarantine Fails**: If the request cannot be moved to the quarantine store, it stays in the queue and is retried with backoff applied (except a request that alone exceeds `quarantineMaxBytes`; see "Retention Limits")
 
 ### Retry Strategy
 
@@ -346,13 +511,13 @@ Network errors and 5xx errors are treated as temporary failures: they are kept i
 
 | Policy | Behavior | Use for |
 | ------ | -------- | ------- |
-| `quarantine` (default) | Move it, body included, to a quarantine store | Business data such as a sales record, where losing a request matters |
+| `quarantine` (default) | Move it, body included, to a quarantine store. A request that alone exceeds the total size limit (`quarantineMaxBytes`) keeps no body and is recorded in the dropped history as `quarantine_too_large` | Business data such as a sales record, where losing a request matters |
 | `drop` | Discard it and keep only a history entry | Requests that can be lost safely |
 
 - **Quarantine notification**: Emits `ProxyEventType.requestQuarantined`
 - **Drop notification**: Emits `ProxyEventType.requestDropped`
-- **No double bookkeeping**: A quarantined request is not also written to the dropped history
-- **Recording order**: Both the quarantine store and the dropped history are written before the request is removed from the queue. If the write fails the request stays queued, so it is never removed without a record
+- **No double bookkeeping**: A quarantined request is not also written to the dropped history. The exception is the retention limits: requests moved out of the quarantine store, and a request that alone exceeds the total size limit, are written to the dropped history (see "Retention Limits")
+- **Recording order**: Both the quarantine store and the dropped history are written before the request is removed from the queue. If the write fails the request stays queued, so it is never removed without a record. A request moved out of the quarantine store by a retention limit is likewise written to the dropped history before it is removed
 
 ### Update Requests That Are Never Queued (queueExcludePaths)
 
@@ -406,17 +571,107 @@ A resend happens in the background, so its response never reaches the page that 
 
 Provides methods for queue management. See [20] API Reference for details.
 
-- **`getQuarantinedRequests()`**: List quarantined requests. Bodies are not returned
-- **`retryQuarantinedRequest(id)`**: Put the request back in the queue after the cause is fixed. The retry count is reset and the stored timestamp is set to the moment it was accepted, so it is sent after requests already waiting. `acceptedAt`, which carries the business time, is left untouched
-- **`discardQuarantinedRequest(id)`**: Discard a request after reviewing it
+- **`getQuarantinedRequests()`**: List quarantined requests. Bodies are not returned. Ordered by quarantine time, oldest first
+- **`retryQuarantinedRequest(id)`**: Put the request back in the queue after the cause is fixed. The retry count is reset and the stored timestamp is set to the moment it was accepted, so it is sent after requests already waiting. `acceptedAt`, which carries the business time, is left untouched. An item waiting for migration cannot be resent
+- **`discardQuarantinedRequest(id)`**: Discard a request after reviewing it. An item waiting for migration cannot be discarded
 - **`clearQuarantinedRequests()`**: Discard every quarantined request
-- **`getDroppedRequests()`**: Get history of dropped requests. Useful for debugging and troubleshooting
+- **`getDroppedRequests()`**: Get history of dropped requests. Useful for debugging and troubleshooting. Ordered by drop time, oldest first
 - **`acknowledgeDroppedRequests()`**: Mark the history as seen. The entries themselves are kept
 
 ### Noticing Unhandled Requests
 
 - **`ProxyStats.quarantinedCount`**: Number of quarantined requests. Anything above zero needs a decision
 - **`ProxyStats.unacknowledgedDroppedCount`**: Number of dropped history entries not acknowledged yet. Check it at startup to notice requests discarded while nobody was watching
+- **Entries waiting for migration**: Both counts include entries still waiting in a legacy plain box
+
+### Encrypted Storage
+
+- **Scope**: The queue (`proxy_queue_secure`), the quarantine store (`proxy_quarantined_requests_secure`) and the dropped history (`proxy_dropped_requests_secure`) are AES-256 encrypted Hive boxes. The dropped history is included because moving requests out of the quarantine store copies their URLs, query included, into it
+- **Key**: Shared with cookies. Verification and the decision tables follow "Encryption Key Management and Verification" in section [4]
+- **What is encrypted**: Only the values. The box keys (IDs derived from the time an entry was stored) stay in the clear
+- **What is kept**: The queue and the quarantine store keep the URL (query included), the method, the headers the client sent and the body. The dropped history keeps no headers or body
+
+### Migration from Legacy Plain Boxes
+
+The plain boxes of 0.14.0 or earlier (`proxy_queue`, `proxy_quarantined_requests`, `proxy_dropped_requests`) are migrated to the encrypted boxes automatically.
+
+- **Procedure**: Open the legacy box in the clear → copy the entries to the encrypted box keeping their keys → `flush()` the encrypted box → `clear()` the legacy box → close it → delete its file
+- **IDs**: Keys are kept, so `X-Offline-Queue-Id` and quarantine IDs do not change
+- **Failed deletion**: If the file cannot be deleted after `clear()`, the box is already empty, so processing continues and `errorOccurred` is raised with `operation: legacyStorageDelete`
+  - When a legacy box is deleted inside `start()` (the migration when the key already exists, and the deletion of a legacy box left empty), an app that subscribes after `start()` does not receive the event
+  - A legacy box left empty is deleted again by the next `start()`
+- **Interruption**: Resending does not run during a migration, so if the process dies between copying and `clear()`, copying again with the same keys next time gives the same result
+- **Caveats**: Whether `flush()` guarantees that the data reaches the disk (as fsync does) is not verified, so a power loss may still lose both copies. Deleting the old file does not guarantee erasure from flash storage
+- **Rolling back**: Rolling back to 0.14.0 or earlier hides the migrated data. While rolled back, the migrated unsent queue is not sent. Upgrading again migrates the requests stored while rolled back as well
+- **Retention limits**: The retention limits also apply to the migrated quarantine store and dropped history (within the same `start()` when migrated in stage 2, after the migration when it is deferred). With the defaults, quarantined requests beyond the limits move to the dropped history without their body and headers, and dropped history entries older than 30 days are removed even when unacknowledged. Acknowledged dropped history entries beyond the count limit are removed as well, oldest first. To keep them, set the corresponding settings to `0` (`Duration.zero` for the periods)
+
+#### When the Migration Runs
+
+- **Normally**: In stage 2 (section [4]), before resending starts. An ordinary update from 0.14.0 already has the key, so it takes this path
+  - On failure (including a lock that cannot be acquired within 30 seconds), any copied entries are removed from the encrypted box, the boxes opened in stage 2 are closed, and `start()` fails with `ProxyStartException`. The legacy box remains, so the next `start()` migrates it again
+- **Deferred migration**: When this proxy instance generated the encryption key itself (including in a cookie API called before `start()`; the decision is per instance, not per process), the migration is not run in stage 2 on any platform; it waits until 30 seconds after the key was generated
+  - Android secure storage updates the in-memory value first and writes to disk asynchronously. Reading the key back in the same process does not prove it was written
+  - With no way to confirm that the write was committed, the proxy waits instead (the wait does not guarantee the commit; not verified on devices)
+  - Whether the iOS / macOS Keychain and other platforms commit the write immediately has not been verified on devices, so every platform takes the safe side
+- **Running the deferred migration**
+  - It runs only while the proxy is running. When `start()` is called again on the same instance and a legacy box is still there, the migration is scheduled again
+  - It runs inside the same exclusion as queue draining: it waits for a drain in progress, and no drain starts until the legacy box has been cleared. The quarantine lock (for the quarantine store) or the history lock (for the dropped history) is held until `clear()`
+  - If it fails before `clear()`, the copied keys are removed from the encrypted box before the exclusion is released, and the next 5-second periodic task tries again. The periodic task waits for the deferred migration to finish before draining the queue, so queue draining keeps running even if the migration keeps failing. The failure is reported with `errorOccurred` (`operation: legacyStorageMigration`), except when a lock could not be acquired
+  - In case the copied keys cannot be removed, the keys of the legacy box are kept in memory. Until the legacy box is empty, entries with the same keys in the encrypted box are left out of resending, quarantine changes, dropped-history removal, counts and lists
+  - After migrating, the retention limits are checked right away
+
+#### While the Migration Waits
+
+- **Resending**: Resending from the encrypted queue does not stop (online updates bypass the queue and go straight upstream, so stopping could not preserve order anyway). Items in the legacy queue are not sent until migrated, so they go after the others. Once migrated, they are sent in stored-time order
+- **Counts**: `queueLength`, `quarantinedCount`, `droppedRequestsCount` and `unacknowledgedDroppedCount` of `getStats()`, and `queueLength`, `quarantinedCount` and `unacknowledgedDroppedCount` of the status endpoint, include the legacy boxes, so a web app that blocks settlement while something is unsent does not miss the legacy queue
+- **Lists**: `getQueuedRequests()`, `getQuarantinedRequests()` and `getDroppedRequests()` include the legacy boxes with `pendingMigration` set to `true`. Entries from both boxes are merged in stored order, the `limit` of `getQuarantinedRequests()` and `getDroppedRequests()` counts from the head after merging, and header masking applies the same way
+- **Quarantine operations**: A quarantined request in the legacy box can be neither resent nor discarded. `retryQuarantinedRequest()` and `discardQuarantinedRequest()` return `false`, and the administrative endpoints answer `409`
+- **Acknowledgement**: `acknowledgeDroppedRequests()` also acknowledges the legacy history, so those entries do not turn unacknowledged again after migration
+- **Clearing**: `clearQuarantinedRequests()` clears the legacy box inside the quarantine lock, and `clearDroppedRequests()` inside the history lock. Sharing the lock with the migration keeps cleared entries from being copied into the encrypted box
+- **Retention limits**: Entries in a legacy box are not subject to the retention limits until they are migrated
+
+#### Relation to `stop()`
+
+- `stop()` first raises a stopping flag. Queue draining checks it before moving on to the next item and exits
+- A deferred migration that has not started copying is cancelled without waiting. One that has started copying is awaited
+- If a queued item whose send has finished is being saved (recorded in the quarantine store or the dropped history and removed from the queue), the boxes are closed only after that finishes. Closing midway would leave the item both recorded and still queued, duplicating it at the next startup
+- An item that tries to start saving after the boxes began closing is not saved; it stays queued and is resent at the next startup. A request still being sent is not awaited
+
+#### Cookies
+
+- The legacy plain cookie box (`proxy_cookies`) is migrated immediately in stage 1, as before, because lost cookies only cost a sign-in
+- A cookie whose key already exists in the encrypted box is not copied, so a newer session is never overwritten by an old value
+
+### Retention Limits
+
+The following `ProxyConfig` settings limit what the quarantine store and the dropped history keep. The queue itself has no limit, so unsent business data is never thrown away.
+
+| Setting | Default | Counted on | When exceeded |
+| --- | --- | --- | --- |
+| `quarantineMaxCount` | 1000 | Number of quarantined requests | Move the oldest to the dropped history (`quarantine_limit`) |
+| `quarantineRetention` | 30 days | Time since `quarantinedAt` | Move to the dropped history (`quarantine_expired`) |
+| `quarantineMaxBytes` | 20 MB | Estimated total of bodies plus header names and values | Move the oldest to the dropped history (`quarantine_limit`) |
+| `droppedRequestMaxCount` | 1000 | Number of dropped history entries | Remove the oldest acknowledged entries. Unacknowledged entries are never removed by count |
+| `droppedRequestRetention` | 30 days | Time since `droppedAt` | Remove, acknowledged or not |
+
+- **Zero and negative values**: `0` (`Duration.zero`) disables that limit. A negative value makes `start()` throw `ProxyStartException`
+- **Order of moving out**: A request is written to the dropped history before it is removed from the quarantine store, and is not removed if the write fails. `statusCode` and `errorMessage` keep the values from the quarantine, and `requestDropped` carries `quarantineId` in its `data`
+- **A single request over the total size limit**: It neither pushes existing requests out nor enters the quarantine store. Its body is dropped, it is recorded in the dropped history as `quarantine_too_large`, and it is then removed from the queue. "A request that cannot be quarantined stays queued" does not apply, so the same 4xx is not retried forever
+- **A newly quarantined request**: The check that runs when a request is quarantined never moves out that request
+- **When the limits are checked**: At startup (inside `start()`, after storage initialization), whenever a request is quarantined or a history entry is added, in the hourly periodic task, and after a deferred migration
+- **Locks**: Changes to the quarantine store run under the quarantine lock and changes to the dropped history under the history lock. When several are needed they are taken in the order queue-drain exclusion → quarantine lock → history lock. When a lock cannot be acquired within 30 seconds, the startup and periodic checks and the deferred migration wait for the next periodic task, while mutating APIs (resend, discard, clear, acknowledge) throw `QueueOperationException`
+- **Compaction**: Hive deletes logically, leaving deletion frames in the file. The checks at startup, every hour and after a deferred migration compact the boxes (`compact()`) outside the locks. Neither guarantees erasure from flash storage
+- **Memory**: Hive loads every value of an open box into memory, so the quarantine store is bounded by total size as well as count. Opening it may briefly use about twice the size limit
+- **Events**: Events raised by the check at startup do not reach an app that subscribes after `start()`. `ProxyStats.unacknowledgedDroppedCount` still reveals them
+
+### Order of Lists and Limit-Based Removal
+
+- The lists (`getQueuedRequests()`, `getQuarantinedRequests()`, `getDroppedRequests()`), the `limit` of `getQuarantinedRequests()` and `getDroppedRequests()`, the resend order of the queue, and "oldest first" removal by the retention limits all follow the stored time (`queuedAt` / `quarantinedAt` / `droppedAt`)
+- Equal times are ordered by the key read as a time in a common unit (19 digits plus a sequence number as microseconds and sequence, 16 digits as microseconds, 13 digits as milliseconds), and then by the key string
+- An entry whose stored time cannot be read counts as the oldest
+- Among entries with the same stored time, an entry whose key cannot be read as a time goes after those whose keys can
+- Hive orders keys lexicographically, and the 19-digit keys used since v0.11.0 sort before the older 13-digit and 16-digit keys, so key order is not stored order
+- Stored times are local times without a UTC offset, so a time zone change or the end of daylight saving time can shift the order and the retention decisions
 
 ### Status Endpoint
 
@@ -426,6 +681,7 @@ The unsent count and the online state were reachable only from the Dart API, so 
 - **Disabling**: An empty value leaves the route unregistered, and the fallback and 504 pages no longer receive the auto-reload script (see Auto-reload of the Fallback Page in [10])
 - **Validation**: Same rules as `healthCheckPath`; a value equal to `healthCheckPath` is rejected at startup
 - **Response header**: `Cache-Control: no-store`
+- **Counts**: `queueLength`, `quarantinedCount` and `unacknowledgedDroppedCount` are the values of `getStats()` and include entries still waiting for migration from a legacy plain box
 
 ```json
 {
@@ -451,6 +707,10 @@ Setting `ProxyConfig.enableAdminApi` to `true` exposes the quarantine store over
 | `GET` | `/__offline_web_proxy/admin/quarantine` | List quarantined requests (never the body) |
 | `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | Put one back on the queue |
 | `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | Discard one |
+
+- **List items**: `id`, `url`, `method`, `quarantinedAt`, `queuedAt`, `acceptedAt` (all ISO 8601 in UTC), `reason`, `statusCode`, `errorMessage` and `pendingMigration`, ordered by quarantine time, oldest first
+- **Responses**: `200` with `{"retried": true}` for a resend and `{"discarded": true}` for a discard
+- **Failure responses**: `404` when no item matches, and `409` when the item is still waiting for migration from a legacy plain box. Both set `retried` or `discarded` to `false` and carry the reason in `error`. `500` (`text/plain`) when the quarantine lock cannot be acquired within 30 seconds
 
 ### Origin Control for Internal Endpoints
 
@@ -1233,6 +1493,14 @@ Cache operations (put/get/purge) implement exclusive control through serializati
 - **Write Exclusion**: Completely exclusive control for write operations
 - **Deadlock Avoidance**: Unify lock acquisition order to prevent deadlock
 
+### Instances and Isolates
+
+Using several `OfflineWebProxy` instances at the same time in one app is not supported.
+
+- Storage initialization (stages 1 and 2 in [4]) and the recovery API are serialized across instances within one isolate
+- The queue-drain exclusion, the quarantine lock and the history lock (retention limits and migration included) belong to each instance and are not serialized across instances
+- When the proxy is used from several isolates at once, even storage initialization and recovery are not serialized
+
 ## [18] Logging and Personal Information Protection
 
 ### Log Level
@@ -1285,6 +1553,12 @@ INFO: GET /api/user → 200 OK (Authorization: ***, Cookie: ***)
 </network-security-config>
 ```
 
+### Android Auto Backup
+
+- **Scope**: Android Auto Backup may include Hive's storage directory and the secure storage data (not verified on a device)
+- **After restore**: On a device restored from such a backup, the key for the restored encrypted boxes may be unreadable (`keyUnreadable`) or missing (`keyMissing`) (neither verified on a device). When a queue, quarantine or dropped-history box has content, startup fails and the recovery API applies (see [4])
+- **Recommendation**: Exclude Hive's storage directory and the secure storage data from backup in the app
+
 ### Recommendations
 
 - **Use IP Address**: Recommend using `127.0.0.1` over `localhost`
@@ -1302,8 +1576,10 @@ Starts the proxy server.
   - `config`: Configuration object (uses default or file configuration when omitted)
 - **Return Value**: Actually used port number
 - **Exceptions**:
-  - `ProxyStartException`: When server startup fails
+  - `ProxyStartException`: When server startup fails, including when the server is already running or still starting, or when a retention limit is negative
+  - `StorageIntegrityException`: When the encrypted storage cannot be used (see the decision tables in [4]). A subclass of `ProxyStartException`, thrown without wrapping. Nothing has been deleted
   - `PortBindException`: When port binding fails
+- **Storage**: After storage initialization, the retention limits of the quarantine store and the dropped history are checked (see [5])
 
 ```dart
 final proxy = OfflineWebProxy();
@@ -1317,7 +1593,9 @@ Stops the proxy server.
 
 - **Return Value**: None
 - **Exceptions**:
-  - `ProxyStopException`: When server stop fails
+  - `ProxyStopException`: When server stop fails, including when the exclusion with rebind recovery (such as `ensureRunning()`) cannot be acquired within the time limit (30 seconds; `cause` is the `TimeoutException`, and the server is not stopped)
+- **Queue draining**: A drain in progress exits instead of moving on to the next item. A deferred migration that has not started copying is cancelled; one that is copying is awaited
+- **Item being saved**: The save of a queued item whose send has finished is awaited before the boxes are closed. An item that tries to start saving after closing has begun stays queued and is resent at the next startup
 
 ```dart
 await proxy.stop();
@@ -1400,6 +1678,7 @@ Returns diagnostics about health monitoring and recovery.
 
 - **Return Value**: Diagnostics (`ProxyDiagnostics`)
 - **Purpose**: Root cause analysis and logging when a failure occurs
+- **Cookie storage**: `lastCookieStorageDiscardedAt` and `lastCookieStorageDiscardReason` show when and why this instance discarded the cookie box (see [4])
 
 #### `ProxyLifecycleGuard`
 
@@ -1542,6 +1821,8 @@ print('Success: ${result.successCount}, Failed: ${result.failureCount}');
 ```
 
 ### Cookie Management
+
+Cookie APIs wait for stage 1 of storage initialization (see [4]), even before startup or after `stop()`. When the encrypted storage cannot be used, the `CookieOperationException` they throw carries a `StorageIntegrityException` as its `cause`. The failure is not kept; the next call or `start()` checks again.
 
 #### `Future<List<CookieInfo>> getCookies({String? domain})`
 
@@ -1716,9 +1997,16 @@ await proxy.clearCookies(domain: 'example.com'); // Delete only specific domain
 
 Gets list of requests currently stored in queue.
 
-- **Return Value**: List of queued requests
+- **Return Value**: List of queued requests, ordered by `queuedAt`, oldest first (see "Order of Lists and Limit-Based Removal" in [5])
 - **Exceptions**:
   - `QueueOperationException`: When queue retrieval fails
+- **Waiting for migration**: Items still in a legacy plain box are included with `pendingMigration` set to `true`
+- **Header masking**: The value of any header that may carry secrets is replaced with `***`. Names are compared lower-cased, with `_` read as `-`
+  - Masked on an exact name: `cookie`, `authorization`, `proxy-authorization`
+  - Masked on a name fragment: `auth`, `token`, `secret`, `session`, `csrf`, `xsrf`, `key`, `pass`, `credential`, `signature`, `jwt`, `cookie`
+  - Never masked: the header named by `ProxyConfig.idempotencyHeaderName`
+  - Only the headers the client sent are stored; the headers the proxy adds are attached when sending
+  - The query of the URL is not masked. Resends use the stored values
 
 ```dart
 final queued = await proxy.getQueuedRequests();
@@ -1744,8 +2032,9 @@ for (final result in proxy.recentResendResults) {
 Gets history of dropped requests.
 
 - **Parameters**:
-  - `limit`: Upper limit of items to retrieve (default: 100)
-- **Return Value**: List of dropped requests
+  - `limit`: Upper limit of items to retrieve (every item when omitted, an empty list when 0 or less). Counted from the head after sorting
+- **Return Value**: List of dropped requests, ordered by `droppedAt`, oldest first
+- **Waiting for migration**: Entries still in a legacy plain box are included with `pendingMigration` set to `true`
 - **Exceptions**:
   - `QueueOperationException`: When history retrieval fails
 
@@ -1762,7 +2051,8 @@ Clears history of dropped requests.
 
 - **Return Value**: None
 - **Exceptions**:
-  - `QueueOperationException`: When history deletion fails
+  - `QueueOperationException`: When history deletion fails, including when the history lock cannot be acquired within 30 seconds
+- **Note**: Also clears the entries waiting in a legacy plain box
 
 ```dart
 await proxy.clearDroppedRequests();
@@ -1774,8 +2064,9 @@ Marks the dropped request history as reviewed.
 
 - **Return Value**: Number of entries changed to acknowledged
 - **Exceptions**:
-  - `QueueOperationException`: When the update fails
+  - `QueueOperationException`: When the update fails, including when the history lock cannot be acquired within 30 seconds
 - **Usage**: Detect unreviewed entries at startup with `ProxyStats.unacknowledgedDroppedCount`, then call this once they have been shown to the operator. The history itself is kept, so the content stays available afterwards
+- **Note**: Also acknowledges the entries waiting in a legacy plain box, so they do not turn unacknowledged after migration
 
 ```dart
 final stats = await proxy.getStats();
@@ -1794,8 +2085,9 @@ When `ProxyConfig.dropPolicy` is `DropPolicy.quarantine` (the default), a reques
 Gets the list of quarantined requests.
 
 - **Parameters**:
-  - `limit`: Upper limit of items to retrieve (default: 100)
-- **Return Value**: List of quarantined requests, in quarantine order
+  - `limit`: Upper limit of items to retrieve (every item when omitted, an empty list when 0 or less). Counted from the head after sorting
+- **Return Value**: List of quarantined requests, ordered by `quarantinedAt`, oldest first
+- **Waiting for migration**: Items still in a legacy plain box are included with `pendingMigration` set to `true`
 - **Exceptions**:
   - `QueueOperationException`: When retrieval fails
 - **Note**: The body is not returned. Use `retryQuarantinedRequest()` to resend it
@@ -1813,9 +2105,9 @@ Moves a quarantined request back to the queue and resends it.
 
 - **Parameters**:
   - `id`: Identifier returned by `getQuarantinedRequests()`
-- **Return Value**: `true` when moved back to the queue, `false` when no entry matches
+- **Return Value**: `true` when moved back to the queue, `false` when no entry matches or the entry is waiting for migration from a legacy plain box
 - **Exceptions**:
-  - `QueueOperationException`: When the operation fails
+  - `QueueOperationException`: When the operation fails, including when the quarantine lock cannot be acquired within 30 seconds
 - **Note**: The retry count is reset. Call it after the cause of the rejection has been fixed
 
 ```dart
@@ -1829,9 +2121,9 @@ Discards a quarantined request.
 
 - **Parameters**:
   - `id`: Identifier returned by `getQuarantinedRequests()`
-- **Return Value**: `true` when discarded, `false` when no entry matches
+- **Return Value**: `true` when discarded, `false` when no entry matches or the entry is waiting for migration from a legacy plain box
 - **Exceptions**:
-  - `QueueOperationException`: When the operation fails
+  - `QueueOperationException`: When the operation fails, including when the quarantine lock cannot be acquired within 30 seconds
 
 ```dart
 await proxy.discardQuarantinedRequest(quarantined.first.id);
@@ -1843,10 +2135,53 @@ Discards every quarantined request.
 
 - **Return Value**: None
 - **Exceptions**:
-  - `QueueOperationException`: When deletion fails
+  - `QueueOperationException`: When deletion fails, including when the quarantine lock cannot be acquired within 30 seconds
+- **Note**: Also discards the requests waiting in a legacy plain box
 
 ```dart
 await proxy.clearQuarantinedRequests();
+```
+
+### Encrypted Storage Recovery
+
+#### `Future<EncryptedStorageRecoveryResult> recoverEncryptedStorage()`
+
+Call it when `start()` or a cookie API fails with `StorageIntegrityException` and retries do not help, after explaining to the user what will be lost and obtaining consent. See "Recovery API" in [4] for the decisions and handling.
+
+- **Return Value**: `EncryptedStorageRecoveryResult`: whether anything was done, why not, which boxes were deleted, rebuilt or kept, and whether the key was deleted
+- **Exceptions**:
+  - `StorageRecoveryException`: When deleting a box file or the key fails, for example. Running the recovery again is safe
+- **Notes**:
+  - While a proxy in the isolate is running or starting, nothing is done and `proxyActive` is returned
+  - Rebuilding a box damaged at its head loses the records at its head, and how many is unknown (`rebuiltBoxes`)
+  - A box whose check exceeded the time limit is checked again without a time limit after the boxes are closed, and handled by that result: deleted when it does not match the key (`deletedBoxes`), rebuilt when it is damaged at its head (`rebuiltBoxes`). When its first record is only partly written and no record matches the key, it is truncated to 0 bytes, losing nothing (`rebuiltBoxes`)
+  - Deleting the key also removes cookies, and with them the sign-in state
+  - After startup fails with `StorageIntegrityException`, `getStats()` returns zero, so do not base a confirmation screen on it
+
+```dart
+// Example for when StorageIntegrityException persists after retrying start()
+try {
+  await proxy.start(config: config);
+} on StorageIntegrityException catch (error) {
+  if (error.failure == StorageIntegrityFailure.temporarilyUnavailable ||
+      error.failure == StorageIntegrityFailure.keyWriteFailed) {
+    // The recovery API cannot fix these. Retry start() later.
+    rethrow;
+  }
+
+  // Recover only after explaining what will be lost and obtaining consent.
+  // askUserToConfirm is a placeholder for a function the app provides.
+  if (!await askUserToConfirm(error.failure)) {
+    rethrow;
+  }
+  final result = await proxy.recoverEncryptedStorage();
+  if (!result.performed &&
+      result.rejection != StorageRecoveryRejection.startWillSucceed) {
+    // temporarilyUnavailable / proxyActive: retry later
+    rethrow;
+  }
+  await proxy.start(config: config);
+}
 ```
 
 ### Statistics and Monitoring
@@ -1858,6 +2193,7 @@ Gets proxy server statistics.
 - **Return Value**: Proxy statistics
 - **Exceptions**:
   - `StatsOperationException`: When statistics retrieval fails
+- **Counts**: The queue, quarantine and dropped-history counts include entries waiting in a legacy plain box. They are zero when startup failed before the storage was opened (for example with `StorageIntegrityException`) and after `stop()`
 
 ```dart
 final stats = await proxy.getStats();
@@ -1939,6 +2275,7 @@ class QueuedRequest {
   final DateTime acceptedAt; // First accepted (never changes across a retry)
   final int retryCount; // Current retry count
   final DateTime nextRetryAt; // Next retry scheduled date/time
+  final bool pendingMigration; // Waiting for migration from a legacy plain box (default: false)
 }
 ```
 
@@ -1951,10 +2288,11 @@ class DroppedRequest {
   final String url; // URL of dropped request
   final String method; // HTTP method
   final DateTime droppedAt; // Date/time dropped
-  final String dropReason; // Drop reason ("4xx_error", "5xx_error", "network_timeout", etc.)
+  final String dropReason; // Drop reason ("4xx_error" and so on; "quarantine_limit", "quarantine_expired" or "quarantine_too_large" for the quarantine retention limits)
   final int statusCode; // HTTP status code at error
   final String errorMessage; // Detailed error message
   final bool acknowledged; // Whether it has been shown to the operator (default: false)
+  final bool pendingMigration; // Waiting for migration from a legacy plain box (default: false)
 }
 ```
 
@@ -1973,6 +2311,7 @@ class QuarantinedRequest {
   final String reason; // Quarantine reason ("4xx_error", etc.)
   final int statusCode; // HTTP status code returned by the upstream
   final String errorMessage; // Detailed error message
+  final bool pendingMigration; // Waiting for migration from a legacy plain box; cannot be resent or discarded (default: false)
 }
 ```
 
@@ -2099,6 +2438,11 @@ class ProxyConfig {
   final bool enableAcceptedAtHeader; // Report the acceptance time (default: true)
   final String acceptedAtHeaderName; // Acceptance time header (default: "X-Offline-Accepted-At")
   final DropPolicy dropPolicy; // How a request that stopped retrying is handled (default: quarantine)
+  final int quarantineMaxCount; // Maximum number of quarantined requests (default: 1000, 0 = no limit)
+  final Duration quarantineRetention; // Retention of quarantined requests (default: 30 days, Duration.zero = no limit)
+  final int quarantineMaxBytes; // Total size limit of quarantined requests (default: 20 MB, 0 = no limit)
+  final int droppedRequestMaxCount; // Maximum number of dropped history entries (default: 1000, 0 = no limit)
+  final Duration droppedRequestRetention; // Retention of dropped history entries (default: 30 days, Duration.zero = no limit)
   final ProxyResponseConfig queuedResponse; // Response for a queued request (default: 202 / JSON)
   final ProxyResponseConfig offlineMissResponse; // Response when nothing can be served (default: 504 / JSON)
   final bool enableAdminApi; // Enable admin API (development only)
@@ -2122,13 +2466,15 @@ class ProxyConfig {
 }
 ```
 
+A negative value for any of the five retention settings makes `start()` throw `ProxyStartException` (see "Retention Limits" in [5]).
+
 #### `DropPolicy`
 
 Enum representing how a mutating request that stopped retrying is handled.
 
 ```dart
 enum DropPolicy {
-  quarantine, // Move it to the quarantine store with its body (default)
+  quarantine, // Move it to the quarantine store with its body (default). A request that alone exceeds quarantineMaxBytes keeps no body and is recorded in the dropped history as quarantine_too_large ([5])
   drop // Keep only a history entry and discard it (the body is not retained)
 }
 ```
@@ -2182,7 +2528,8 @@ enum ProxyEventType {
   cacheCleared, // Cache cleared
   errorOccurred, // Error occurred
   serverUnavailable, // Responsiveness check failed and recovery was not possible
-  serverRecovered // Recovered by rebinding
+  serverRecovered, // Recovered by rebinding
+  cookieStorageDiscarded // Discarded a cookie box that did not match the key
 }
 ```
 
@@ -2207,6 +2554,18 @@ The `data` of `requestQuarantined` carries the following metadata.
 - `quarantineId`: Identifier inside the quarantine store (used by `retryQuarantinedRequest` and friends)
 - `statusCode`: Status code returned by the upstream
 - `reason`: Quarantine reason (`"4xx_error"`, etc.)
+
+The `data` of `requestDropped` carries the following metadata.
+
+- `statusCode`: Status code returned by the upstream (for a request moved out of the quarantine store, the value from the quarantine)
+- `dropReason`: Why the request was removed (`"4xx_error"` and so on; `quarantine_limit`, `quarantine_expired` or `quarantine_too_large` for the quarantine retention limits)
+- `quarantineId`: Identifier inside the quarantine store, when a count, age or total size limit moved the request out of it
+
+The `data` of `cookieStorageDiscarded` carries the following metadata.
+
+- `reason`: Why the cookie box was discarded (name of the `StorageIntegrityFailure`)
+
+For `errorOccurred` raised by the legacy plain box migration and the retention limits, `data` carries `operation` (`legacyStorageDelete` or `legacyStorageMigration` for the migration, `retentionLimit` for the retention limits) and `error`. With `legacyStorageDelete`, `box` holds the name of the legacy plain box.
 
 The `data` of `upstreamCircuitOpened` carries the following metadata.
 
@@ -2302,10 +2661,12 @@ class ProxyDiagnostics {
   final UpstreamCircuitState upstreamCircuitState; // Circuit breaker state
   final int consecutiveUpstreamFailures; // Consecutive attempts that could not reach the upstream
   final DateTime? lastUpstreamSuccessAt; // Date/time the upstream was last reached
+  final DateTime? lastCookieStorageDiscardedAt; // When this instance last discarded the cookie box (null when it has not)
+  final StorageIntegrityFailure? lastCookieStorageDiscardReason; // Why it was discarded (null when it has not)
 }
 ```
 
-`isOnline` through `lastUpstreamSuccessAt` are required arguments. Code that constructs `ProxyDiagnostics` directly has to supply them.
+`isOnline` through `lastUpstreamSuccessAt` are required arguments. Code that constructs `ProxyDiagnostics` directly has to supply them. `lastCookieStorageDiscardedAt` and `lastCookieStorageDiscardReason` are optional arguments.
 
 #### `UpstreamCircuitState`
 
@@ -2327,6 +2688,79 @@ Enum representing what `ProxyDiagnostics.isOnline` is based on.
 enum OnlineDecisionSource {
   initial, // Connectivity read during start() (including the fallback when it cannot be read)
   linkLayer // A connectivity change event received after startup
+}
+```
+
+#### `ProxyStorageBox`
+
+Enum representing the boxes the proxy stores encrypted.
+
+```dart
+enum ProxyStorageBox {
+  cookies, // Cookies (proxy_cookies_secure)
+  queue, // Queue (proxy_queue_secure)
+  quarantine, // Quarantine store (proxy_quarantined_requests_secure)
+  droppedRequests // Dropped history (proxy_dropped_requests_secure)
+}
+```
+
+#### `StorageBoxCheckResult`
+
+Enum representing the result of checking an encrypted box file against the key (see "Checking an Encrypted Box" in [4]).
+
+```dart
+enum StorageBoxCheckResult {
+  empty, // The file is missing or has no content
+  match, // The first record matches the key
+  noMismatch, // The first record is partly written and no record matches the key (opened as is)
+  mismatch, // The first record does not match the key and no record matches
+  corrupted, // The head is damaged, but a later record matches the key
+  aborted, // The check exceeded the time limit
+  notVerified // Not checked because no usable key exists (the box has content)
+}
+```
+
+#### `StorageIntegrityFailure`
+
+Enum representing why the encrypted storage cannot be used, or why the cookie box was discarded.
+
+```dart
+enum StorageIntegrityFailure {
+  temporarilyUnavailable, // The key cannot be read for now, for example while the device is locked
+  keyUnreadable, // Reading the key keeps failing
+  keyMissing, // There is no key
+  keyInvalid, // The key is malformed (empty, not Base64, or not 32 bytes)
+  keyMismatch, // An encrypted box does not match the key
+  corrupted, // An encrypted box is damaged at its head
+  verificationAborted, // Checking an encrypted box exceeded the time limit
+  keyWriteFailed // A new key could not be written to secure storage
+}
+```
+
+#### `StorageRecoveryRejection`
+
+Enum representing why the recovery API did nothing.
+
+```dart
+enum StorageRecoveryRejection {
+  proxyActive, // A proxy is running or starting
+  temporarilyUnavailable, // The key cannot be read for now, for example while the device is locked
+  startWillSucceed // No box needs deleting; retry start() (also after keyWriteFailed)
+}
+```
+
+#### `EncryptedStorageRecoveryResult`
+
+Class representing the result of the recovery API.
+
+```dart
+class EncryptedStorageRecoveryResult {
+  final bool performed; // Whether anything was deleted or rebuilt
+  final StorageRecoveryRejection? rejection; // Why nothing was done (null when performed is true)
+  final Set<ProxyStorageBox> deletedBoxes; // Deleted boxes
+  final Set<ProxyStorageBox> rebuiltBoxes; // Rebuilt boxes (a corrupted box loses the records at its head, count unknown; an aborted box truncated to 0 bytes loses nothing)
+  final Set<ProxyStorageBox> keptBoxes; // Boxes with content kept as they were
+  final bool keyDeleted; // Whether the key in secure storage was deleted
 }
 ```
 
@@ -2359,6 +2793,19 @@ Exception classes that may occur during proxy operations.
 class ProxyStartException implements Exception {
   final String message;
   final Exception? cause;
+}
+
+// Encrypted storage cannot be used (thrown by start() as is, carried as the cause by cookie APIs)
+class StorageIntegrityException extends ProxyStartException {
+  final StorageIntegrityFailure failure; // Why the storage cannot be used
+  final Map<ProxyStorageBox, StorageBoxCheckResult> boxResults; // Check result of every encrypted box, cookies included
+  final Object? error; // Original error, including errors that are not Exceptions
+}
+
+// Unexpected failure while recovering encrypted storage
+class StorageRecoveryException implements Exception {
+  final String message;
+  final Object? error;
 }
 
 // Proxy server stop failure
