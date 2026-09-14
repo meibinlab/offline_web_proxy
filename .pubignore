@@ -1,11 +1,27 @@
+# pub は `.pubignore` があるディレクトリの `.gitignore` を読まないため、ルートの
+# `.gitignore` で除外しているもののうち、配布物に入れてはならないものをここにも
+# 書く。
+
+# 開発環境・ビルドの生成物
 *.iml
 **/build/
 **/.gradle/
 **/local.properties
+**/GeneratedPluginRegistrant.java
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/pubspec.lock
+.dart_tool/
 doc/api/
 coverage/
+*.log
+
+# 開発用（配布しない）
+CLAUDE.md
+codecov.yml
+doc/cookie-native-session-plan.ja.md
+tool/offline_recovery_harness/
 adb_crash.log
 adb_crash_tail.log
 emulator_capture.png
 temp_dep.yml
-tool/offline_recovery_harness/

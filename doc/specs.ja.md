@@ -1754,8 +1754,8 @@ await proxy.clearCacheForUrl('https://example.com/api/data');
 キャッシュエントリの一覧を取得します。
 
 - **パラメータ**:
-  - `limit`: 取得件数の上限（デフォルト: 100）
-  - `offset`: 取得開始位置（デフォルト: 0）
+  - `limit`: 取得件数の上限（省略時は上限なし。`offset` 以降をすべて返します）
+  - `offset`: 取得開始位置（省略時は 0）
 - **戻り値**: キャッシュエントリのリスト
 - **例外**:
   - `CacheOperationException`: キャッシュ取得に失敗した場合

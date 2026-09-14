@@ -1,3 +1,18 @@
+## Unreleased
+
+### 修正
+
+- **pub.dev の配布物に開発用のファイルが入っていた問題を修正**: pub は `.pubignore` があるディレクトリの `.gitignore` を読まないため、`.pubignore` を追加した 0.6.0 以降、ルートの `.gitignore` による除外が配布物に効いていませんでした。`CLAUDE.md`、`codecov.yml`、`doc/cookie-native-session-plan.ja.md`（内部の検討メモ）、`example` の生成物 `GeneratedPluginRegistrant.java` が含まれていたため、`.gitignore` の除外規則を `.pubignore` にも書いて除外します。ライブラリの動作は変わりません
+
+### ドキュメント
+
+- **仕様書の `getCacheList` の `limit` の説明を実装に合わせた**: 「デフォルト: 100」と書いていましたが、実装は `limit` を省略すると上限を設けず、`offset` 以降をすべて返します。dartdoc にも省略時の挙動を追記しました
+- **仕様書の英語版に、日本語版だけにあった `acceptedAt` の項目を追加**: クライアントが同名のヘッダを送っていた場合も proxy の値で上書きする、という説明です
+
+### テスト
+
+- **`getCacheList()` の `limit` を省略したときの挙動のテストを追加**: 100 件を超えるキャッシュを用意し、省略時は全件を返すこと、`limit` と `offset` で範囲を絞れることを確認します
+
 ## 0.15.0
 
 ### 機能追加

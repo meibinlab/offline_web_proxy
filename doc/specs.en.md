@@ -551,6 +551,7 @@ The proxy keeps the moment it first accepted the request and sends the same valu
 - **Enabled**: `ProxyConfig.enableAcceptedAtHeader` (default `true`)
 - **Value**: An ISO 8601 timestamp in UTC (for example `2026-09-09T08:03:41.474467Z`), so the timezone cannot be misread
 - **Scope**: Update requests only; read requests never carry it
+- **Overwrite**: The value is what the proxy itself observed, so it replaces a header of the same name sent by the client
 - **Stability**: Stored as `acceptedAt` on the queue entry and preserved across a quarantine retry. `queuedAt` cannot be reused because a retry updates it
 - **Older data**: A queue entry saved without `acceptedAt` falls back to its `queuedAt`, converted to UTC
 
@@ -1753,8 +1754,8 @@ await proxy.clearCacheForUrl('https://example.com/api/data');
 Gets list of cache entries.
 
 - **Parameters**:
-  - `limit`: Upper limit of items to retrieve (default: 100)
-  - `offset`: Starting position for retrieval (default: 0)
+  - `limit`: Upper limit of items to retrieve (no limit when omitted; every entry from `offset` on is returned)
+  - `offset`: Starting position for retrieval (0 when omitted)
 - **Return Value**: List of cache entries
 - **Exceptions**:
   - `CacheOperationException`: When cache retrieval fails
