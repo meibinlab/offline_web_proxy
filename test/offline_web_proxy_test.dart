@@ -1966,6 +1966,36 @@ void main() {
       expect(cacheList, isEmpty);
     });
 
+    /// limit を省略すると全件を返し、limit と offset で範囲を絞れること
+    /// （doc/specs.ja.md 【20】API リファレンス / キャッシュ管理）
+    test('returns every cache entry when limit is omitted', () async {
+      await proxy.start(
+        config: const ProxyConfig(origin: 'https://example.com'),
+      );
+
+      // 「省略時は 100 件」のような上限が入っていないことを確かめるため、
+      // 100 件を超える件数を用意する。
+      final cacheBox = Hive.box('proxy_cache');
+      final now = DateTime.now();
+      for (var i = 0; i < 120; i++) {
+        await cacheBox.put('list-entry-$i', {
+          'url': 'https://example.com/list/$i',
+          'statusCode': HttpStatus.ok,
+          'headers': {'content-type': 'application/json'},
+          'body': Uint8List.fromList(utf8.encode('{"index":$i}')),
+          'createdAt': now.toIso8601String(),
+          'expiresAt': now.add(const Duration(hours: 1)).toIso8601String(),
+          'contentType': 'application/json',
+          'sizeBytes': 11,
+        });
+      }
+
+      expect(await proxy.getCacheList(), hasLength(120));
+      expect(await proxy.getCacheList(limit: 50), hasLength(50));
+      expect(await proxy.getCacheList(offset: 100), hasLength(20));
+      expect(await proxy.getCacheList(limit: 10, offset: 115), hasLength(5));
+    });
+
     /// キャッシュクリア操作を呼び出せること
     test('clears cache without error', () async {
       await expectLater(proxy.clearCache(), completes);
