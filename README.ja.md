@@ -36,7 +36,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.15.1
+  offline_web_proxy: ^0.16.0
   # example アプリと CI ではこの WebView 系を使用しています。
   webview_flutter: ^4.8.0
 ```
