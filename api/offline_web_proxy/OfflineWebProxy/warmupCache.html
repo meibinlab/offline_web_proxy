@@ -78,13 +78,19 @@
     
 <section class="desc markdown">
   <p>指定したパス一覧でキャッシュの事前ウォームアップを実行します。</p>
-<p><code>paths</code> ウォームアップ対象の相対パス一覧。
+<p><a href="../../offline_web_proxy/OfflineWebProxy/start.html">start</a> はこのメソッドを自動では呼びません。認証が必要な資源も
+取得できるよう、利用側が必要な時点で呼び出します。</p>
+<p><code>paths</code> ウォームアップ対象の相対パス一覧。省略した場合は
+  <a href="../../offline_web_proxy/ProxyConfig/startupPaths.html">ProxyConfig.startupPaths</a> を使用します。
 <code>timeout</code> 各リクエストの締め切り秒数。省略時は
   <a href="../../offline_web_proxy/ProxyConfig/requestTimeout.html">ProxyConfig.requestTimeout</a> を使用します。
 <code>maxConcurrency</code> 同時実行する最大リクエスト数。
-<code>followReferences</code> 取得した HTML が参照する同一 origin の資源も続けて
-  取得する場合は <code>true</code>。<code>&lt;script src&gt;</code>、<code>&lt;link href&gt;</code>、<code>&lt;img src&gt;</code> を
-  対象とし、1 段だけ辿ります。既定は <code>false</code> で従来の挙動です。
+<code>followReferences</code> 取得した HTML や CSS が参照する資源も続けて取得する
+  場合は <code>true</code>。HTML からは <code>&lt;script src&gt;</code>、<code>&lt;link href&gt;</code>、<code>&lt;img src&gt;</code>
+  と <code>&lt;style&gt;</code> 要素内の <code>url()</code> / <code>@import</code> を 1 段だけ辿り、CSS からは
+  <code>url()</code> / <code>@import</code> を続けて辿ります（最大 4 段）。対象は同一 origin と
+  <a href="../../offline_web_proxy/ProxyConfig/mirroredOrigins.html">ProxyConfig.mirroredOrigins</a> に列挙した origin です。既定は <code>false</code> で
+  指定したパスだけを取得します。
 <code>onProgress</code> 進捗状態を通知するコールバック関数。
 <code>onError</code> エラー発生時に呼ばれるコールバック関数。</p>
 <p>Returns: ウォームアップ結果の一覧。</p>
@@ -137,6 +143,8 @@
           path: path,
           timeout: timeout,
           followReferences: followReferences,
+          &#47;&#47; HTML は直接指定したものだけを辿り、参照先の別ページへ広げない
+          followHtmlReferences: referencedFrom == null,
           referencedFrom: referencedFrom,
           onError: onError,
         );
@@ -158,26 +166,38 @@
     entries.addAll(results.map((result) =&gt; result.entry));
 
     if (followReferences) {
-      &#47;&#47; 参照元ごとに、まだ取得していないパスだけを集める
-      final referenceTargets = &lt;({String path, String referencedFrom})&gt;[];
-      for (var index = 0; index &lt; results.length; index++) {
-        for (final reference in results[index].references) {
-          if (requestedPaths.add(_normalizeWarmupPath(reference))) {
-            referenceTargets.add((
-              path: reference,
-              referencedFrom: targetPaths[index],
-            ));
+      &#47;&#47; 直前の段で取得した資源を参照元として、次の段を取得する
+      var sourcePaths = targetPaths;
+      var sourceResults = results;
+      for (var depth = 1; depth &lt;= _maxWarmupReferenceDepth; depth++) {
+        &#47;&#47; 参照元ごとに、まだ取得していないパスだけを集める
+        final referenceTargets = &lt;({String path, String referencedFrom})&gt;[];
+        for (var index = 0; index &lt; sourceResults.length; index++) {
+          for (final reference in sourceResults[index].references) {
+            if (requestedPaths.add(_normalizeWarmupPath(reference))) {
+              referenceTargets.add((
+                path: reference,
+                referencedFrom: sourcePaths[index],
+              ));
+            }
           }
         }
-      }
 
-      if (referenceTargets.isNotEmpty) {
+        if (referenceTargets.isEmpty) {
+          break;
+        }
+
         total += referenceTargets.length;
         final referenceResults = await Future.wait(
           referenceTargets
               .map((target) =&gt; run(target.path, target.referencedFrom)),
         );
         entries.addAll(referenceResults.map((result) =&gt; result.entry));
+
+        sourcePaths = referenceTargets
+            .map((target) =&gt; target.path)
+            .toList(growable: false);
+        sourceResults = referenceResults;
       }
     }
 

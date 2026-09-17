@@ -275,10 +275,16 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li>Settings that name paths (such as <code>forceCachePaths</code>) share one glob notation: <code>*</code> matches within a single path segment, <code>**</code> matches across segments, and a pattern without either is matched exactly. Query strings are not part of the comparison.</li>
 <li><code>port: 0</code> lets the OS assign a free local port.</li>
 <li><code>preferredPort</code> tries that port first and automatically falls back to an ephemeral port if it is unavailable. The last successfully bound port is also reused on the next startup, which helps keep the WebView origin stable.</li>
-<li><code>startupPaths</code> is used by <code>warmupCache()</code> for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.
+<li><code>startupPaths</code> is what <code>warmupCache()</code> fetches when called without <code>paths</code>. Use it for paths whose fallback responses should be prepared in advance for offline or unreachable-upstream scenarios.
 <ul>
+<li><strong><code>start()</code> does not fetch <code>startupPaths</code> by itself.</strong> Call <code>warmupCache()</code> whenever it suits the app after the proxy has started.</li>
 <li>Warmup sends the cookie jar exactly as the forwarding path does, so calling it after sign-in also warms up the APIs that require authentication.</li>
-<li><code>warmupCache(followReferences: true)</code> also fetches the resources referenced by the warmed HTML (<code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code>), both same-origin ones and those on an origin listed in <code>mirroredOrigins</code>. Only one level is followed, and a URL assembled by JavaScript at runtime is out of reach. A <code>&lt;link&gt;</code> counts only when its <code>rel</code> names a resource, such as <code>stylesheet</code>.</li>
+<li><code>warmupCache(followReferences: true)</code> also fetches the resources referenced by the warmed HTML and CSS, both same-origin ones and those on an origin listed in <code>mirroredOrigins</code>. A URL assembled by JavaScript at runtime is out of reach.
+<ul>
+<li>HTML listed in <code>paths</code> is followed one level: <code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code> and the <code>url()</code> / <code>@import</code> references inside <code>&lt;style&gt;</code> elements. A <code>&lt;link&gt;</code> counts only when its <code>rel</code> names a resource, such as <code>stylesheet</code>.</li>
+<li>A stylesheet's <code>url()</code> and <code>@import</code> references are followed further (up to 4 levels counted from the listed path, as in HTML → CSS → font).</li>
+</ul>
+</li>
 </ul>
 </li>
 <li><code>healthCheckPath</code> is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics, and <code>GET</code> and <code>HEAD</code> requests to it are omitted from the request log. Change it when it collides with a route of your web application.</li>
@@ -310,9 +316,11 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 </li>
 <li><code>mirroredOrigins</code> lists other origins fetched through the proxy. On a screen that loads its UI library from a CDN, the absolute URL in the HTML never passes through 127.0.0.1, so caching, fallback and warmup all miss it. A listed origin is relayed by the proxy and joins the ordinary cache and offline fallback. Empty by default.
 <ul>
-<li>In a <code>text/html</code> response the proxy serves, a matching absolute URL in <code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code> or <code>&lt;img src&gt;</code> is rewritten to <code>/__offline_web_proxy/ext/&lt;scheme&gt;/&lt;host&gt;[:port]/&lt;original path&gt;</code>. A <code>&lt;link&gt;</code> counts only when its <code>rel</code> names a resource, such as <code>stylesheet</code>.</li>
+<li>A matching absolute URL is rewritten to <code>/__offline_web_proxy/ext/&lt;scheme&gt;/&lt;host&gt;[:port]/&lt;original path&gt;</code> in <code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code> and <code>&lt;style&gt;</code> elements of a <code>text/html</code> response, and in the <code>url()</code> and <code>@import</code> references of a <code>text/css</code> response. A <code>&lt;link&gt;</code> counts only when its <code>rel</code> names a resource, such as <code>stylesheet</code>.</li>
+<li>When a stylesheet loads its font files from another origin, as Google Fonts does, list both origins (for example <code>https://fonts.googleapis.com</code> and <code>https://fonts.gstatic.com</code>).</li>
+<li>A stylesheet holding an absolute URL on a listed origin, or a relayed stylesheet holding a root-relative URL such as <code>/img/x.png</code>, is rewritten and its bytes change, so a <code>&lt;link&gt;</code> carrying an <code>integrity</code> attribute fails its check. A path-relative URL such as <code>../x</code> is left alone.</li>
 <li>The rewrite reuses the warmup reference scan, so <strong>a rewritten resource is always collected by <code>warmupCache(followReferences: true)</code></strong>.</li>
-<li>Rewriting happens on the way out rather than on the way in, so HTML served from cache while offline goes through the same transformation. Removing an origin from the configuration restores the original URLs.</li>
+<li>Rewriting happens on the way out rather than on the way in, so HTML and CSS served from cache while offline go through the same transformation. Removing an origin from the configuration restores the original URLs.</li>
 <li>Only <code>GET</code> and <code>HEAD</code> are relayed. Any other method answers <code>405</code> and is never queued. A path naming an origin that is not listed answers <code>404</code> and is never passed through to the configured origin.</li>
 <li>Matching is exact on scheme, host and port. A value carrying a path or query raises <code>ProxyStartException</code> at startup.</li>
 <li><strong><code>Authorization</code>, <code>Origin</code>, <code>Referer</code> and the client's <code>Cookie</code> are never sent to a relayed origin.</strong> Only jar entries matching the relayed domain are sent.</li>

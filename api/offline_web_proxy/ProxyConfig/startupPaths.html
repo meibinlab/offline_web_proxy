@@ -69,12 +69,16 @@
       </section>
       
 <section class="desc markdown">
-  <p>List of paths to warm up (pre-cache) during server startup.</p>
-<p>These paths will be requested from the upstream server when the proxy
-starts, ensuring they are available immediately for offline use.
-Useful for critical app resources like configuration or user profiles.</p>
+  <p>Default list of paths that <code>warmupCache()</code> pre-caches.</p>
+<p><code>warmupCache()</code> requests these paths from the upstream server when it is
+called without <code>paths</code>, so that fallback responses are ready for offline
+use. Useful for critical app resources like configuration or user
+profiles.</p>
+<p><code>start()</code> does <strong>not</strong> warm these paths up by itself. Call
+<code>warmupCache()</code> once the proxy is running, typically after the user has
+signed in so that resources requiring authentication can be fetched too.</p>
 <p><strong>Example</strong>: <code>['/config', '/user/profile', '/app/version']</code>
-<strong>Default</strong>: <code>[]</code> (no warmup)</p>
+<strong>Default</strong>: <code>[]</code> (<code>warmupCache()</code> without <code>paths</code> fetches nothing)</p>
 </section>
 
       

@@ -84,7 +84,7 @@ final advancedConfig = ProxyConfig(
     'default': 3600,             // 1 hour default
   },
   logLevel: 'debug',             // Verbose logging
-  startupPaths: ['/config', '/health'], // Warmup these paths
+  startupPaths: ['/config', '/health'], // Default paths of warmupCache()
 );
 </code></pre>
 </section>
@@ -627,7 +627,7 @@ proxy.
 
 </dt>
 <dd>
-  List of paths to warm up (pre-cache) during server startup.
+  Default list of paths that <code>warmupCache()</code> pre-caches.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>

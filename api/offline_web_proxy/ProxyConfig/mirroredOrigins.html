@@ -77,18 +77,26 @@ it is neither cached nor available offline. A screen whose rendering
 depends on a CDN-hosted library therefore stays broken offline even when
 its own HTML and API responses are cached.</p>
 <p>Listing an origin here makes the proxy rewrite matching absolute URLs in
-the HTML it serves to a local path and relay those requests to that
-origin, which puts the resource on the ordinary cache, offline fallback
-and warmup paths.</p>
+the HTML and CSS it serves to a local path and relay those requests to
+that origin, which puts the resource on the ordinary cache, offline
+fallback and warmup paths.</p>
 <ul>
 <li>Matching is exact on scheme, host and port. <code>'https://cdn.example.com'</code>
 covers neither <code>http://cdn.example.com</code> nor another host</li>
 <li>Only <code>GET</code> and <code>HEAD</code> are relayed. Any other method answers <code>405</code>,
 because a listed origin is meant to serve static resources</li>
-<li>Rewriting covers <code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code> and <code>&lt;img src&gt;</code> in
-<code>text/html</code> responses, which is exactly what
-<code>warmupCache(followReferences: true)</code> collects. A URL that JavaScript
+<li>Rewriting covers <code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code> and the
+<code>url()</code> / <code>@import</code> references inside <code>&lt;style&gt;</code> elements of <code>text/html</code>
+responses, and the <code>url()</code> / <code>@import</code> references of <code>text/css</code>
+responses. This is exactly what <code>warmupCache(followReferences: true)</code>
+collects, so a web font that a CDN stylesheet loads from another listed
+origin can be made available offline too. A URL that JavaScript
 assembles at runtime is out of reach</li>
+<li>Rewriting a stylesheet changes its bytes, so a <code>&lt;link&gt;</code> carrying an
+<code>integrity</code> attribute fails its check when the stylesheet refers to a
+listed origin by an absolute URL, or when a relayed stylesheet holds a
+root-relative URL such as <code>/img/x.png</code>. A path-relative URL such as
+<code>../img/x.png</code> is left alone</li>
 <li>The client's <code>Cookie</code>, <code>Authorization</code>, <code>Origin</code> and <code>Referer</code> headers
 are not relayed to a listed origin, so credentials held for the upstream
 origin never reach a third party. Cookies a listed origin sets are kept
