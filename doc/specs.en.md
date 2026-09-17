@@ -61,13 +61,16 @@ e.g. https://cdn.example.com/npm/lib@1.0.0/dist/lib.js
 
 Keeping the original origin inside the path means a relative URL held by that resource — `url(../fonts/x.woff)` inside a stylesheet, say — still resolves under the same origin.
 
-#### HTML Rewriting
+#### HTML and CSS Rewriting
 
-In a `text/html` response the proxy serves, an absolute URL matching `mirroredOrigins` is rewritten to the relay path.
+In a `text/html` or `text/css` response the proxy serves, an absolute URL matching `mirroredOrigins` is rewritten to the relay path.
 
-- The targets are `<script src>`, `<link href>` and `<img src>`. A `<link>` counts only when its `rel` names a resource, such as `stylesheet`. The decision reuses the warmup reference scan, so **a rewritten resource is always collected by `warmupCache(followReferences: true)`**. Matching is on the attribute names `src` and `href`, so a prefixed attribute such as `data-src` is treated the same way
+- In HTML, the targets are `<script src>`, `<link href>`, `<img src>` and the `url()` / `@import` references inside `<style>` elements. A `<link>` counts only when its `rel` names a resource, such as `stylesheet`. Matching is on the attribute names `src` and `href`, so a prefixed attribute such as `data-src` is treated the same way
+- In CSS, the targets are `url()` (unquoted, `"` or `'`) and `@import "..."` / `@import url(...)`. The whitespace between `@import` and the quote may be omitted. A URL inside a comment (`/* */`) is left alone, and a string such as `content: "/*"` is not taken for the start of a comment. When a stylesheet loads its font files from another origin through `@font-face { src: url(...) }`, as Google Fonts does, listing both origins makes the fonts available offline too
+- The decision reuses the warmup reference scan, so **a rewritten resource is always collected by `warmupCache(followReferences: true)`**
+- A relative URL is resolved against the response URL before the decision. Inside HTML or CSS returned from the configured origin it is left alone. Inside a relayed stylesheet, a root-relative URL such as `/img/x.png` is rewritten to the relay path, because left as is it would make the browser ask the configured origin through the proxy. A path-relative URL such as `../img/x.png` already resolves correctly under the relay path and is left alone, which keeps the body, and therefore `integrity`, intact
 - Rewriting happens on the way out, not on the way in. The cache keeps the bytes the upstream returned, so the online path and the offline path go through the same transformation, and removing an origin from the configuration restores the original URLs even in stored responses
-- The body is read and written as `latin1`. The target tags and URLs stay within ASCII, so the bytes are preserved whatever the document's character encoding is
+- The body is read and written as `latin1`. The target syntax and URLs stay within ASCII, so the bytes are preserved whatever the document's character encoding is
 - Only a 200 response without a `Content-Encoding` is rewritten. A body an upstream compressed despite the `identity` request cannot be interpreted
 
 #### Relay Behaviour
@@ -98,9 +101,9 @@ The relay path is written by the caller, so these shapes are refused as well.
 
 - A URL that JavaScript assembles at runtime cannot be rewritten
 - A rewritten URL becomes same-origin with the proxy, so a page that returns a `Content-Security-Policy` has to allow `'self'`
-- Subresource integrity is expected to survive because the bytes are not altered, though this has not been measured in a browser
-- Anything outside `<script>`, `<link>` and `<img>` — `srcset`, `<source>`, `url()` inside CSS — is out of scope
-- The scope is any 200 `text/html` response the proxy returns: responses obtained from the upstream and their cached copies, plus the offline response replaced through `offlineFallbackHtml`. `gatewayTimeoutHtml` is answered with 504 and is therefore out of scope, and so is HTML served from `assets/static/`, which is returned earlier as a static resource. A bundled document referencing another origin has to spell out the relay path itself
+- Subresource integrity is expected to survive for a resource whose body the rewrite leaves unchanged (JavaScript, images, and stylesheets without a URL the rewrite targets), though this has not been measured in a browser. **A stylesheet containing an absolute URL on a listed origin, or a relayed stylesheet containing a root-relative URL, is rewritten, so its bytes change and a `<link>` carrying `integrity` fails the check**
+- `srcset`, `<source>`, `url()` inside a `style` attribute and a URL inside a CSS string (such as `content: "url(...)"`) are out of scope, and so is a URL written as a bare string without `url()`, as in CSS `image-set()`
+- The scope is any 200 `text/html` or `text/css` response the proxy returns: responses obtained from the upstream and their cached copies, plus the offline response replaced through `offlineFallbackHtml`. `gatewayTimeoutHtml` is answered with 504 and is therefore out of scope, and so is HTML served from `assets/static/`, which is returned earlier as a static resource. A bundled document referencing another origin has to spell out the relay path itself
 - `/__offline_web_proxy/ext/` is a namespace the proxy reserves. It is never forwarded upstream, even when `mirroredOrigins` is empty
 
 ### Path Pattern Notation Used by Configuration
@@ -823,14 +826,16 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
 
 - **Cookies**: The cookie jar is sent, exactly as on the forwarding path. Without it, a resource that requires authentication cannot be warmed up
 - **Accept-Encoding**: `identity` is sent, exactly as on the forwarding path, so that the stored response cannot differ between the two routes
-- **Following references**: `warmupCache(followReferences: true)` also fetches the same-origin resources referenced by the warmed HTML
-  - `<script src>`, `<link href>` and `<img src>` are covered
+- **Following references**: `warmupCache(followReferences: true)` also fetches the resources referenced by the warmed HTML and CSS
+  - In HTML, `<script src>`, `<link href>`, `<img src>` and the `url()` / `@import` references inside `<style>` elements are covered
+  - In CSS (`text/css`), `url()` and `@import` are covered. A URL inside a comment is not fetched
   - A `<link>` counts only when its `rel` names a resource (`stylesheet`, `preload`, `prefetch`, `icon`, `apple-touch-icon`, `manifest` and the like). `canonical` and `alternate` point at another page and are skipped
-  - Only one level is followed; what those resources reference in turn is not
-  - Another origin, `data:`, `javascript:`, `mailto:` and `blob:` are skipped
+  - HTML is followed one level only, and only for HTML listed in `paths`. What an HTML page fetched as a reference refers to in turn is not followed
+  - A stylesheet is followed further, whether HTML referenced it or it was listed in `paths`. Chains such as HTML → CSS → font are followed up to 4 levels counted from the listed path. The limit keeps deep `@import` nesting, or a server that answers every reference with a new URL, from making the warmup endless
+  - Same-origin resources and resources on an origin listed in `mirroredOrigins` are covered; a listed origin's resource is fetched through the relay path. Any other origin, `data:`, `javascript:`, `mailto:` and `blob:` are skipped
   - A shared resource is requested only once
   - Extraction is a best-effort regular expression scan. **A URL assembled by JavaScript at runtime is out of reach**, and nothing is extracted from a body an upstream compressed despite the `identity` request (the entry itself is still stored intact)
-  - `WarmupEntry.referencedFrom` names the HTML that referenced each entry
+  - `WarmupEntry.referencedFrom` names the HTML or CSS that referenced each entry
 - **Default**: `followReferences` is `false`, keeping the previous behaviour of fetching only the listed paths
 
 #### Cache Expiration Calculation Priority
@@ -1411,7 +1416,7 @@ proxy:
     maxSizeBytes: 209715200 # 200MB
     purgeIntervalSeconds: 3600 # Every 1 hour
 
-    # Startup warmup settings
+    # Warmup settings (defaults of warmupCache(); start() does not fetch them by itself)
     startup:
       enabled: false # Prepare substitute responses for offline or unreachable upstream
       paths: [] # Path list to fetch in advance (default is empty)
@@ -1784,11 +1789,12 @@ print('Cache size: ${stats.totalSize} bytes');
 
 Pre-fetch fallback cache for the specified path list.
 
+- **Invocation**: `start()` never calls it. Setting `ProxyConfig.startupPaths` does not pre-fetch anything at startup. Call it when the app is ready, for example after sign-in, so that resources requiring authentication can be fetched too
 - **Parameters**:
-  - `paths`: Path list to pre-fetch (uses the configured startup paths when omitted)
+  - `paths`: Path list to pre-fetch (uses `ProxyConfig.startupPaths` when omitted)
   - `timeout`: Timeout seconds for each path (uses configuration value when omitted)
   - `maxConcurrency`: Number of concurrent executions (uses configuration value when omitted)
-  - `followReferences`: Also fetch the same-origin resources referenced by the warmed HTML (default `false`)
+  - `followReferences`: Also fetch the resources referenced by the warmed HTML and CSS (default `false`). Same-origin resources and those on an origin listed in `mirroredOrigins` are covered
   - `onProgress`: Progress callback function
   - `onError`: Error callback function
 - **Return Value**: Detailed information of pre-fetch results
@@ -2449,7 +2455,7 @@ class ProxyConfig {
   final bool enableAdminApi; // Enable admin API (development only)
   final bool enableWebStorageInheritance; // WebStorage inheritance bridge (default: false)
   final String logLevel; // Log level ("debug", "info", "warn", "error")
-  final List<String> startupPaths; // Startup cache update paths
+  final List<String> startupPaths; // Default paths of warmupCache() when paths is omitted (start() does not fetch them)
   final int preferredPort; // Port to use when available (0=unspecified)
   final String healthCheckPath; // Health check path (default: "/__offline_web_proxy/health")
   final String statusPath; // Status path (default: "/__offline_web_proxy/status", empty = disabled)

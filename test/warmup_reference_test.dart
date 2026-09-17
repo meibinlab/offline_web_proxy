@@ -397,5 +397,179 @@ void main() {
         expect(upstream!.receivedPaths, equals(['/api/config.json']));
       });
     });
+
+    /// CSS が参照するフォントや画像も続けて取得すること
+    test('follows references found in a stylesheet', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.bodies['/app/register'] = (
+          content: '<html><head>'
+              '<link rel="stylesheet" href="/css/app.css">'
+              '</head><body></body></html>',
+          contentType: ContentType('text', 'html', charset: 'utf-8'),
+        );
+        upstream!.bodies['/css/app.css'] = (
+          content: '@font-face { src: url("../fonts/a.woff2") format("woff2"),'
+              ' url(/fonts/b.woff) format("woff"); }\n'
+              '/* .old { background: url(/img/commented.png); } */\n'
+              ".bg { background: url( '/img/bg.png' ); }\n"
+              '.dot { background: url(data:image/png;base64,AAAA); }\n',
+          contentType: ContentType('text', 'css', charset: 'utf-8'),
+        );
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+        expect(port, greaterThan(0));
+
+        final result = await proxy.warmupCache(
+          paths: ['/app/register'],
+          followReferences: true,
+        );
+
+        expect(
+          upstream!.receivedPaths,
+          containsAll(
+              <String>['/fonts/a.woff2', '/fonts/b.woff', '/img/bg.png']),
+        );
+        // コメント内の URL と data: は取得しないこと
+        expect(upstream!.receivedPaths, isNot(contains('/img/commented.png')));
+        expect(result.entries, hasLength(5));
+        // CSS から辿った資源の参照元は CSS であること
+        final fromStylesheet = result.entries
+            .where((entry) => entry.referencedFrom == '/css/app.css')
+            .map((entry) => entry.path);
+        expect(
+          fromStylesheet,
+          unorderedEquals(
+              <String>['/fonts/a.woff2', '/fonts/b.woff', '/img/bg.png']),
+        );
+      });
+    });
+
+    /// style 要素内の @import も取得すること
+    test('follows an import inside a style element', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.bodies['/app/register'] = (
+          content: '<html><head><style>'
+              '@import url("/css/imported.css");'
+              "@import '/css/quoted.css';"
+              '</style></head><body></body></html>',
+          contentType: ContentType('text', 'html', charset: 'utf-8'),
+        );
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+        expect(port, greaterThan(0));
+
+        await proxy.warmupCache(
+          paths: ['/app/register'],
+          followReferences: true,
+        );
+
+        expect(
+          upstream!.receivedPaths,
+          containsAll(<String>['/css/imported.css', '/css/quoted.css']),
+        );
+      });
+    });
+
+    /// @import の入れ子は上限の段数までだけ辿ること
+    test('stops following nested imports at the depth limit', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        for (var index = 0; index <= 5; index++) {
+          upstream!.bodies['/css/$index.css'] = (
+            content: '@import "${index + 1}.css";',
+            contentType: ContentType('text', 'css', charset: 'utf-8'),
+          );
+        }
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+        expect(port, greaterThan(0));
+
+        final result = await proxy.warmupCache(
+          paths: ['/css/0.css'],
+          followReferences: true,
+        );
+
+        // 直接指定した CSS から 4 段までを取得すること
+        expect(
+          upstream!.receivedPaths,
+          equals(<String>[
+            '/css/0.css',
+            '/css/1.css',
+            '/css/2.css',
+            '/css/3.css',
+            '/css/4.css',
+          ]),
+        );
+        expect(result.entries, hasLength(5));
+        expect(result.entries.last.referencedFrom, equals('/css/3.css'));
+      });
+    });
+
+    /// 参照として辿った HTML からは更に辿らないこと
+    test('does not follow a page reached through a reference', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.bodies['/app/register'] = (
+          content: '<html><head>'
+              '<link rel="prefetch" href="/app/next">'
+              '</head><body></body></html>',
+          contentType: ContentType('text', 'html', charset: 'utf-8'),
+        );
+        upstream!.bodies['/app/next'] = (
+          content:
+              '<html><body><script src="/js/next.js"></script></body></html>',
+          contentType: ContentType('text', 'html', charset: 'utf-8'),
+        );
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+        expect(port, greaterThan(0));
+
+        await proxy.warmupCache(
+          paths: ['/app/register'],
+          followReferences: true,
+        );
+
+        expect(
+          upstream!.receivedPaths,
+          equals(<String>['/app/register', '/app/next']),
+        );
+      });
+    });
+  });
+
+  group('startupPaths（doc/specs.ja.md 【20】API リファレンス）', () {
+    /// start() は startupPaths を自動では取得せず、warmupCache() の既定値に
+    /// なること
+    test('is fetched by warmupCache but not by start', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        upstream!.bodies['/app/config'] = (
+          content: '{}',
+          contentType: ContentType('application', 'json', charset: 'utf-8'),
+        );
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            startupPaths: const <String>['/app/config'],
+          ),
+        );
+        expect(port, greaterThan(0));
+
+        // 起動直後の非同期処理が上流へ要求を出す余地を与える
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(upstream!.receivedPaths, isEmpty);
+
+        final result = await proxy.warmupCache();
+
+        expect(result.successCount, equals(1));
+        expect(upstream!.receivedPaths, equals(<String>['/app/config']));
+      });
+    });
   });
 }

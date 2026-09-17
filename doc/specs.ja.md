@@ -61,13 +61,16 @@ CDN から UI ライブラリを読み込む画面では、HTML 内の絶対 URL
 
 元の origin をパスの一部として保つため、その資源が持つ相対 URL（CSS 内の `url(../fonts/x.woff)` など）は同じ origin 配下へ解決されます。
 
-#### HTML の書き換え
+#### HTML と CSS の書き換え
 
-proxy が返す `text/html` の応答について、`mirroredOrigins` に一致する絶対 URL を中継用のパスへ書き換えます。
+proxy が返す `text/html` と `text/css` の応答について、`mirroredOrigins` に一致する絶対 URL を中継用のパスへ書き換えます。
 
-- 対象は `<script src>`、`<link href>`、`<img src>` です。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。ウォームアップの参照抽出と同じ判定を使うため、**書き換えた資源は必ず `warmupCache(followReferences: true)` の対象になります**。照合は属性名 `src` と `href` で行うため、`data-src` のような接頭辞付きの属性も同じ扱いになります
+- HTML の対象は `<script src>`、`<link href>`、`<img src>` と、`<style>` 要素内の `url()` / `@import` です。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。照合は属性名 `src` と `href` で行うため、`data-src` のような接頭辞付きの属性も同じ扱いになります
+- CSS の対象は `url()`（引用符なし、`"`、`'` のいずれも）と `@import "..."` / `@import url(...)` です。`@import` と引用符の間の空白は省略できます。コメント（`/* */`）内の URL は書き換えません。`content: "/*"` のような文字列はコメントの開始とみなしません。Google Fonts のように、CSS が別 origin のフォント本体を `@font-face { src: url(...) }` で参照する構成では、CSS とフォント本体の両方の origin を列挙するとフォントもオフラインで使えます
+- ウォームアップの参照抽出と同じ判定を使うため、**書き換えた資源は必ず `warmupCache(followReferences: true)` の対象になります**
+- 相対 URL は応答の URL を基準に解決してから判定します。設定済み origin から返した HTML / CSS 内の相対 URL は書き換えません。中継した CSS 内では、`/img/x.png` のように `/` で始まるルート相対 URL を中継用のパスへ書き換えます。そのまま残すと、ブラウザが proxy 経由で設定済み origin へ要求してしまうためです。`../img/x.png` のようなパス相対 URL は、中継用のパスの下でブラウザが正しく解決するため書き換えません（本文を変えず `integrity` を保つため）
 - 書き換えは保存時ではなく応答時に行います。キャッシュには上流が返したバイト列をそのまま保持するため、オンラインとオフラインのどちらの経路でも同じ変換を通せます。設定から origin を外せば、保存済みの応答も元の URL に戻ります
-- 本文は `latin1` で読み書きします。対象タグと URL は ASCII の範囲に収まるため、文字コードが何であってもバイト列を保てます
+- 本文は `latin1` で読み書きします。対象の構文と URL は ASCII の範囲に収まるため、文字コードが何であってもバイト列を保てます
 - 対象は 200 応答かつ `Content-Encoding` を持たない場合に限ります。上流が `identity` を無視して圧縮した本文は解釈できません
 
 #### 中継の扱い
@@ -98,9 +101,9 @@ proxy が返す `text/html` の応答について、`mirroredOrigins` に一致�
 
 - 実行時に JavaScript が組み立てる URL は書き換えられません
 - `Content-Security-Policy` を返す画面では、書き換え後の URL が proxy と same-origin になるため `'self'` の許可が必要です
-- サブリソース完全性（`integrity`）はバイト列を改変しないため維持される想定ですが、ブラウザでの実測は行っていません
-- `<script>`、`<link>`、`<img>` 以外（`srcset`、`<source>`、CSS 内の `url()`）は対象外です
-- 対象は proxy が返す 200 の `text/html` 応答です。上流から取得した応答とそのキャッシュに加え、`offlineFallbackHtml` で差し替えたオフライン応答も含みます。`gatewayTimeoutHtml` は 504 のため対象外です。`assets/static/` から配信する同梱 HTML も、静的リソースとして先に返すため対象外です。同梱 HTML から別 origin を参照する場合は中継用のパスを直接書きます
+- サブリソース完全性（`integrity`）は、書き換えで本文が変わらない資源（JavaScript、画像、書き換え対象の URL を含まない CSS）では維持される想定ですが、ブラウザでの実測は行っていません。**ミラー対象 origin を指す絶対 URL、または中継した CSS 内のルート相対 URL を含む CSS は本文が変わるため、`integrity` を付けた `<link>` では検証に失敗します**
+- `srcset`、`<source>`、`style` 属性内の `url()`、CSS の文字列（`content: "url(...)"` など）の中の URL は対象外です。CSS の `image-set()` のように `url()` を使わず文字列で書いた URL も対象外です
+- 対象は proxy が返す 200 の `text/html` と `text/css` の応答です。上流から取得した応答とそのキャッシュに加え、`offlineFallbackHtml` で差し替えたオフライン応答も含みます。`gatewayTimeoutHtml` は 504 のため対象外です。`assets/static/` から配信する同梱 HTML も、静的リソースとして先に返すため対象外です。同梱 HTML から別 origin を参照する場合は中継用のパスを直接書きます
 - `/__offline_web_proxy/ext/` は proxy が予約する名前空間です。`mirroredOrigins` が空でも上流へは転送しません
 
 ### 設定のパスパターン記法
@@ -823,14 +826,16 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 
 - **Cookie の付与**: 転送経路と同じく Cookie Jar の内容を送ります。認証が必要な資源をウォームアップで取得するために必要です
 - **Accept-Encoding**: 転送経路と同じく `identity` を送ります。経路によって保存する応答が割れないようにするためです
-- **参照資源の連鎖取得**: `warmupCache(followReferences: true)` を指定すると、取得した HTML が参照する同一 origin の資源も続けて取得します
-  - 対象は `<script src>`、`<link href>`、`<img src>` です
+- **参照資源の連鎖取得**: `warmupCache(followReferences: true)` を指定すると、取得した HTML と CSS が参照する資源も続けて取得します
+  - HTML の対象は `<script src>`、`<link href>`、`<img src>` と、`<style>` 要素内の `url()` / `@import` です
+  - CSS（`text/css`）の対象は `url()` と `@import` です。コメント内の URL は取得しません
   - `<link>` は資源を指す `rel`（`stylesheet`、`preload`、`prefetch`、`icon`、`apple-touch-icon`、`manifest` 等）だけを対象とします。`canonical` や `alternate` は別ページを指すため取得しません
-  - 辿るのは 1 段だけです。取得した資源が更に参照する URL は追いません
-  - 別 origin、`data:`、`javascript:`、`mailto:`、`blob:` は対象外です
+  - HTML から辿るのは、`paths` に指定した HTML の 1 段だけです。参照として取得した HTML が更に参照する URL は追いません
+  - CSS は、HTML から参照されたものも `paths` に指定したものも、`url()` と `@import` を続けて辿ります。HTML → CSS → フォントのように、指定したパスから数えて最大 4 段まで辿ります。`@import` の入れ子が深い場合や、参照ごとに異なる URL を返すサーバで取得が終わらなくならないよう上限を設けています
+  - 対象は同一 origin と `mirroredOrigins` に列挙した origin です。ミラー対象の資源は中継用のパスで取得します。それ以外の別 origin、`data:`、`javascript:`、`mailto:`、`blob:` は対象外です
   - 同じ資源は一度だけ取得します
   - 抽出は正規表現による最善努力です。**実行時に JavaScript が組み立てる URL には届きません**。上流が `identity` を無視して圧縮した本文からも抽出できません（保存自体は正しく行われます）
-  - 結果は `WarmupEntry.referencedFrom` で参照元を辿れます
+  - 結果は `WarmupEntry.referencedFrom` で参照元を辿れます。CSS から辿った資源では、参照元は CSS のパスです
 - **既定**: `followReferences` は `false` で、従来どおり指定したパスだけを取得します
 
 #### キャッシュ有効期限の計算優先順位
@@ -1411,7 +1416,7 @@ proxy:
     maxSizeBytes: 209715200 # 200MB
     purgeIntervalSeconds: 3600 # 1時間ごと
 
-    # 起動時ウォームアップ設定
+    # ウォームアップ設定（warmupCache() の既定値。start() では自動取得しない）
     startup:
       enabled: false # オフライン時または上流到達不能時の代替応答を準備するか
       paths: [] # 事前取得対象のパスリスト（デフォルトは空）
@@ -1784,11 +1789,12 @@ print('Cache size: ${stats.totalSize} bytes');
 
 指定されたパスリストのフォールバック用キャッシュを事前取得します。
 
+- **呼び出し**: `start()` は自動では呼びません。`ProxyConfig.startupPaths` を設定しても、起動時に先読みは行いません。認証が必要な資源も取得できるよう、利用側が認証後など必要な時点で呼び出します
 - **パラメータ**:
-  - `paths`: 事前取得対象のパスリスト（省略時は設定済みの startup paths を使用）
+  - `paths`: 事前取得対象のパスリスト（省略時は `ProxyConfig.startupPaths` を使用）
   - `timeout`: 各パスのタイムアウト秒数（省略時は設定値を使用）
   - `maxConcurrency`: 同時実行数（省略時は設定値を使用）
-  - `followReferences`: 取得した HTML が参照する同一 origin の資源も続けて取得する場合は `true`（既定 `false`）
+  - `followReferences`: 取得した HTML と CSS が参照する資源も続けて取得する場合は `true`（既定 `false`）。対象は同一 origin と `mirroredOrigins` に列挙した origin です
   - `onProgress`: 進捗コールバック関数
   - `onError`: エラーコールバック関数
 - **戻り値**: 事前取得結果の詳細情報
@@ -2449,7 +2455,7 @@ class ProxyConfig {
   final bool enableAdminApi; // 管理API有効化（開発時のみ）
   final bool enableWebStorageInheritance; // WebStorage 引き継ぎ（既定: false）
   final String logLevel; // ログレベル（"debug", "info", "warn", "error"）
-  final List<String> startupPaths; // 起動時キャッシュ更新パス
+  final List<String> startupPaths; // warmupCache() で paths を省略した場合の既定パス（start() では自動取得しない）
   final int preferredPort; // 優先して利用するポート（0=指定なし）
   final String healthCheckPath; // ヘルスチェックパス（デフォルト: "/__offline_web_proxy/health"）
   final String statusPath; // 状態通知パス（デフォルト: "/__offline_web_proxy/status"、空=無効）

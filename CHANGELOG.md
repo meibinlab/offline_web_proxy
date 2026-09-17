@@ -1,3 +1,26 @@
+## Unreleased
+
+### 機能追加
+
+- **`mirroredOrigins` が CSS 内の参照も中継用のパスへ書き換えるようにした**: これまでは `text/html` の `<script src>`、`<link href>`、`<img src>` だけが対象で、Google Fonts のように CSS（`fonts.googleapis.com`）が別 origin のフォント本体（`fonts.gstatic.com`）を `@font-face { src: url(...) }` で参照する構成では、フォント本体の取得が proxy を通らず、Web フォントをオフライン化できませんでした
+  - `text/css` の応答の `url()`（引用符なし、`"`、`'` のいずれも）と `@import "..."` / `@import url(...)` を書き換えます。HTML の `<style>` 要素内も同じく書き換えます。コメント内の URL には触れません
+  - 相対 URL は応答の URL を基準に解決してから判定します。設定済み origin から返した CSS 内の相対 URL は書き換えません。中継した CSS 内では `/` で始まるルート相対 URL だけを中継元 origin の中継用パスへ書き換え、`../x` のようなパス相対 URL は書き換えません
+  - CSS とフォント本体の両方の origin を `mirroredOrigins` に列挙すると、フォントもキャッシュとオフライン代替の対象になります
+  - **既存の利用者への影響**: `mirroredOrigins` を設定している場合、列挙した origin を指す絶対 URL、または中継した CSS 内のルート相対 URL を含む CSS は本文が変わります。そうした CSS を `integrity` 属性付きの `<link>` で読み込んでいると、検証に失敗します
+  - `style` 属性内の `url()`、`url()` を使わず文字列で書いた URL（`image-set()` など）は対象外です
+- **`warmupCache(followReferences: true)` が CSS の参照も辿るようにした**: HTML からは従来どおり `paths` に指定した HTML の 1 段だけを辿り、新たに `<style>` 要素内の `url()` / `@import` も対象にします。取得したものが CSS なら、その `url()` と `@import` も続けて取得します。HTML → CSS → フォントのように、指定したパスから数えて最大 4 段まで辿ります
+  - 同一 origin の CSS が参照するフォントや画像も取得するようになるため、`followReferences: true` を指定している場合は取得件数が増えることがあります
+  - `WarmupEntry.referencedFrom` には、CSS から辿った資源では CSS のパスが入ります
+
+### ドキュメント
+
+- **`ProxyConfig.startupPaths` の説明を実装に合わせた**: dartdoc と仕様書に「proxy の起動時に上流から取得する」と書いていましたが、`start()` は `startupPaths` を取得しません。実際は `warmupCache()` で `paths` を省略したときの既定値です。起動時の先読みが必要な場合は、利用側が必要な時点で `warmupCache()` を呼ぶ旨を dartdoc、仕様書、README に明記しました
+
+### テスト
+
+- **CSS の書き換えとウォームアップの連鎖取得のテストを追加**: 引用符の書き方、空白を挟まない `@import`、コメント、文字列内の `/*`、設定済み origin と中継した CSS の相対 URL（ルート相対だけを書き換えること）、`data:`、`<style>` 要素、中継した CSS からのフォントのウォームアップとオフライン配信、`@import` の入れ子の段数上限、参照として取得した HTML を辿らないことを確認します
+- **`start()` が `startupPaths` を取得しないことのテストを追加**
+
 ## 0.15.1
 
 ### 修正

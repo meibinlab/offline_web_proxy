@@ -28,7 +28,7 @@ import 'queue_exclude_rule.dart';
 ///     'default': 3600,             // 1 hour default
 ///   },
 ///   logLevel: 'debug',             // Verbose logging
-///   startupPaths: ['/config', '/health'], // Warmup these paths
+///   startupPaths: ['/config', '/health'], // Default paths of warmupCache()
 /// );
 /// ```
 class ProxyConfig {
@@ -167,18 +167,26 @@ class ProxyConfig {
   /// its own HTML and API responses are cached.
   ///
   /// Listing an origin here makes the proxy rewrite matching absolute URLs in
-  /// the HTML it serves to a local path and relay those requests to that
-  /// origin, which puts the resource on the ordinary cache, offline fallback
-  /// and warmup paths.
+  /// the HTML and CSS it serves to a local path and relay those requests to
+  /// that origin, which puts the resource on the ordinary cache, offline
+  /// fallback and warmup paths.
   ///
   /// * Matching is exact on scheme, host and port. `'https://cdn.example.com'`
   ///   covers neither `http://cdn.example.com` nor another host
   /// * Only `GET` and `HEAD` are relayed. Any other method answers `405`,
   ///   because a listed origin is meant to serve static resources
-  /// * Rewriting covers `<script src>`, `<link href>` and `<img src>` in
-  ///   `text/html` responses, which is exactly what
-  ///   `warmupCache(followReferences: true)` collects. A URL that JavaScript
+  /// * Rewriting covers `<script src>`, `<link href>`, `<img src>` and the
+  ///   `url()` / `@import` references inside `<style>` elements of `text/html`
+  ///   responses, and the `url()` / `@import` references of `text/css`
+  ///   responses. This is exactly what `warmupCache(followReferences: true)`
+  ///   collects, so a web font that a CDN stylesheet loads from another listed
+  ///   origin can be made available offline too. A URL that JavaScript
   ///   assembles at runtime is out of reach
+  /// * Rewriting a stylesheet changes its bytes, so a `<link>` carrying an
+  ///   `integrity` attribute fails its check when the stylesheet refers to a
+  ///   listed origin by an absolute URL, or when a relayed stylesheet holds a
+  ///   root-relative URL such as `/img/x.png`. A path-relative URL such as
+  ///   `../img/x.png` is left alone
   /// * The client's `Cookie`, `Authorization`, `Origin` and `Referer` headers
   ///   are not relayed to a listed origin, so credentials held for the upstream
   ///   origin never reach a third party. Cookies a listed origin sets are kept
@@ -316,14 +324,19 @@ class ProxyConfig {
   /// **Default**: `'info'`
   final String logLevel;
 
-  /// List of paths to warm up (pre-cache) during server startup.
+  /// Default list of paths that `warmupCache()` pre-caches.
   ///
-  /// These paths will be requested from the upstream server when the proxy
-  /// starts, ensuring they are available immediately for offline use.
-  /// Useful for critical app resources like configuration or user profiles.
+  /// `warmupCache()` requests these paths from the upstream server when it is
+  /// called without `paths`, so that fallback responses are ready for offline
+  /// use. Useful for critical app resources like configuration or user
+  /// profiles.
+  ///
+  /// `start()` does **not** warm these paths up by itself. Call
+  /// `warmupCache()` once the proxy is running, typically after the user has
+  /// signed in so that resources requiring authentication can be fetched too.
   ///
   /// **Example**: `['/config', '/user/profile', '/app/version']`
-  /// **Default**: `[]` (no warmup)
+  /// **Default**: `[]` (`warmupCache()` without `paths` fetches nothing)
   final List<String> startupPaths;
 
   /// Path used to check whether the proxy actually responds.
