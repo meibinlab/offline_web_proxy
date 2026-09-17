@@ -361,6 +361,38 @@ final RegExp _referenceUrlPattern = RegExp(
   caseSensitive: false,
 );
 
+/// CSS 内の参照 URL を取り出す正規表現。
+///
+/// `url()` の値を 1〜3 番目、`@import` の文字列を 4〜5 番目のグループで
+/// 捕捉します。コメントとそれ以外の文字列リテラルも同じ正規表現で照合し、
+/// URL のグループを持たない一致として読み飛ばします。コメント内の URL を
+/// 対象から外し、`content: "/*"` のような文字列をコメントの開始と
+/// 誤らないようにするためです。
+final RegExp _cssReferencePattern = RegExp(
+  r'''/\*[\s\S]*?\*/'''
+  r'''|\burl\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)'''
+  r'''|@import\s*(?:"([^"]*)"|'([^']*)')'''
+  r'''|"(?:\\[\s\S]|[^"\\\n])*"'''
+  r"""|'(?:\\[\s\S]|[^'\\\n])*'""",
+  caseSensitive: false,
+);
+
+/// URL の先頭のスキーム（`https:` など）に一致する正規表現。
+final RegExp _urlSchemePattern = RegExp(r'^[a-zA-Z][a-zA-Z0-9+.\-]*:');
+
+/// HTML の `<style>` 要素を開始タグ、本文、終了タグに分けて取り出す正規表現。
+final RegExp _styleElementPattern = RegExp(
+  r'(<\s*style\b[^>]*>)([\s\S]*?)(<\s*/\s*style\s*>)',
+  caseSensitive: false,
+);
+
+/// ウォームアップで参照を辿る最大の段数。
+///
+/// HTML → CSS → `@import` した CSS → フォントのように CSS は入れ子になり得る
+/// ため複数段を辿ります。参照ごとに異なる URL を返すサーバで取得が
+/// 終わらなくならないよう、段数に上限を設けます。
+const int _maxWarmupReferenceDepth = 4;
+
 const List<String> _staticResourceAssetPrefixes = [
   'assets/static/',
   'packages/offline_web_proxy/assets/static/',
@@ -2326,13 +2358,20 @@ class OfflineWebProxy {
 
   /// 指定したパス一覧でキャッシュの事前ウォームアップを実行します。
   ///
-  /// [paths] ウォームアップ対象の相対パス一覧。
+  /// [start] はこのメソッドを自動では呼びません。認証が必要な資源も
+  /// 取得できるよう、利用側が必要な時点で呼び出します。
+  ///
+  /// [paths] ウォームアップ対象の相対パス一覧。省略した場合は
+  ///   [ProxyConfig.startupPaths] を使用します。
   /// [timeout] 各リクエストの締め切り秒数。省略時は
   ///   [ProxyConfig.requestTimeout] を使用します。
   /// [maxConcurrency] 同時実行する最大リクエスト数。
-  /// [followReferences] 取得した HTML が参照する同一 origin の資源も続けて
-  ///   取得する場合は `true`。`<script src>`、`<link href>`、`<img src>` を
-  ///   対象とし、1 段だけ辿ります。既定は `false` で従来の挙動です。
+  /// [followReferences] 取得した HTML や CSS が参照する資源も続けて取得する
+  ///   場合は `true`。HTML からは `<script src>`、`<link href>`、`<img src>`
+  ///   と `<style>` 要素内の `url()` / `@import` を 1 段だけ辿り、CSS からは
+  ///   `url()` / `@import` を続けて辿ります（最大 4 段）。対象は同一 origin と
+  ///   [ProxyConfig.mirroredOrigins] に列挙した origin です。既定は `false` で
+  ///   指定したパスだけを取得します。
   /// [onProgress] 進捗状態を通知するコールバック関数。
   /// [onError] エラー発生時に呼ばれるコールバック関数。
   ///
@@ -2379,6 +2418,8 @@ class OfflineWebProxy {
             path: path,
             timeout: timeout,
             followReferences: followReferences,
+            // HTML は直接指定したものだけを辿り、参照先の別ページへ広げない
+            followHtmlReferences: referencedFrom == null,
             referencedFrom: referencedFrom,
             onError: onError,
           );
@@ -2400,26 +2441,38 @@ class OfflineWebProxy {
       entries.addAll(results.map((result) => result.entry));
 
       if (followReferences) {
-        // 参照元ごとに、まだ取得していないパスだけを集める
-        final referenceTargets = <({String path, String referencedFrom})>[];
-        for (var index = 0; index < results.length; index++) {
-          for (final reference in results[index].references) {
-            if (requestedPaths.add(_normalizeWarmupPath(reference))) {
-              referenceTargets.add((
-                path: reference,
-                referencedFrom: targetPaths[index],
-              ));
+        // 直前の段で取得した資源を参照元として、次の段を取得する
+        var sourcePaths = targetPaths;
+        var sourceResults = results;
+        for (var depth = 1; depth <= _maxWarmupReferenceDepth; depth++) {
+          // 参照元ごとに、まだ取得していないパスだけを集める
+          final referenceTargets = <({String path, String referencedFrom})>[];
+          for (var index = 0; index < sourceResults.length; index++) {
+            for (final reference in sourceResults[index].references) {
+              if (requestedPaths.add(_normalizeWarmupPath(reference))) {
+                referenceTargets.add((
+                  path: reference,
+                  referencedFrom: sourcePaths[index],
+                ));
+              }
             }
           }
-        }
 
-        if (referenceTargets.isNotEmpty) {
+          if (referenceTargets.isEmpty) {
+            break;
+          }
+
           total += referenceTargets.length;
           final referenceResults = await Future.wait(
             referenceTargets
                 .map((target) => run(target.path, target.referencedFrom)),
           );
           entries.addAll(referenceResults.map((result) => result.entry));
+
+          sourcePaths = referenceTargets
+              .map((target) => target.path)
+              .toList(growable: false);
+          sourceResults = referenceResults;
         }
       }
 
@@ -2442,14 +2495,17 @@ class OfflineWebProxy {
   /// [path] 取得するパス。
   /// [timeout] 締め切り秒数。
   /// [followReferences] 参照資源を抽出する場合は `true`。
+  /// [followHtmlReferences] HTML からも参照資源を抽出する場合は `true`。
+  ///   `false` の場合は CSS からだけ抽出します。
   /// [referencedFrom] 参照元のパス。直接指定した場合は `null`。
   /// [onError] エラー発生時に呼ばれるコールバック関数。
   ///
-  /// Returns: 結果と、続けて取得すべき同一 origin の参照パス一覧。
+  /// Returns: 結果と、続けて取得すべき参照パス一覧。
   Future<({WarmupEntry entry, List<String> references})> _warmupSinglePath({
     required String path,
     required int? timeout,
     required bool followReferences,
+    required bool followHtmlReferences,
     required String? referencedFrom,
     WarmupErrorCallback? onError,
   }) async {
@@ -2501,6 +2557,7 @@ class OfflineWebProxy {
           references = _extractWarmupReferences(
             response: response,
             baseUri: upstreamUri,
+            includeHtml: followHtmlReferences,
           );
         }
       }
@@ -2551,35 +2608,63 @@ class OfflineWebProxy {
     return trimmedPath.startsWith('/') ? trimmedPath : '/$trimmedPath';
   }
 
-  /// ウォームアップした HTML から取得対象の参照資源を抽出します。
+  /// ウォームアップした HTML または CSS から取得対象の参照資源を抽出します。
   ///
-  /// `<script src>`、`<link href>`、`<img src>` を対象とします。実行時に
+  /// HTML は `<script src>`、`<link href>`、`<img src>` と `<style>` 要素内の
+  /// `url()` / `@import` を、CSS は `url()` / `@import` を対象とします。実行時に
   /// JavaScript が組み立てる URL には届かないため、最善努力の抽出です。
   /// ミラー対象 origin の資源は中継用のパスとして返します。
   ///
   /// [response] 取得した応答。
   /// [baseUri] 相対 URL の解決に使う上流 URI。
+  /// [includeHtml] HTML からも抽出する場合は `true`。
   ///
-  /// Returns: 取得すべきパスの一覧。HTML でない場合は空。
+  /// Returns: 取得すべきパスの一覧。対象の種類でない場合は空。
   List<String> _extractWarmupReferences({
     required http.Response response,
     required Uri baseUri,
+    required bool includeHtml,
   }) {
     final contentType =
         (_getHeaderValueIgnoreCase(response.headers, 'content-type') ?? '')
             .toLowerCase();
-    if (!contentType.contains('text/html')) {
+    final isHtml = includeHtml && contentType.contains('text/html');
+    final isCss = contentType.contains('text/css');
+    if (!isHtml && !isCss) {
       return const <String>[];
     }
 
-    final String html;
+    final String body;
     try {
-      html = utf8.decode(response.bodyBytes, allowMalformed: true);
+      body = utf8.decode(response.bodyBytes, allowMalformed: true);
     } catch (_) {
       return const <String>[];
     }
 
     final references = <String>{};
+
+    /// 抽出した URL を取得用のパスへ変換して加えます。
+    void addReference(String? rawUrl) {
+      if (rawUrl == null || rawUrl.trim().isEmpty) {
+        return;
+      }
+
+      final resolved = _resolveWarmupReference(rawUrl.trim(), baseUri);
+      if (resolved != null) {
+        references.add(resolved);
+      }
+    }
+
+    if (isCss) {
+      _extractCssReferenceUrls(body).forEach(addReference);
+      return references.toList(growable: false);
+    }
+
+    final html = body;
+    for (final styleMatch in _styleElementPattern.allMatches(html)) {
+      _extractCssReferenceUrls(styleMatch.group(2) ?? '').forEach(addReference);
+    }
+
     for (final tagMatch in _referenceTagPattern.allMatches(html)) {
       final tagName = (tagMatch.group(1) ?? '').toLowerCase();
       final attributes = tagMatch.group(2) ?? '';
@@ -2590,20 +2675,42 @@ class OfflineWebProxy {
       }
 
       for (final urlMatch in _referenceUrlPattern.allMatches(attributes)) {
-        final rawUrl =
-            urlMatch.group(1) ?? urlMatch.group(2) ?? urlMatch.group(3);
-        if (rawUrl == null || rawUrl.trim().isEmpty) {
-          continue;
-        }
-
-        final resolved = _resolveWarmupReference(rawUrl.trim(), baseUri);
-        if (resolved != null) {
-          references.add(resolved);
-        }
+        addReference(
+          urlMatch.group(1) ?? urlMatch.group(2) ?? urlMatch.group(3),
+        );
       }
     }
 
     return references.toList(growable: false);
+  }
+
+  /// CSS 本文から参照 URL を抽出します。
+  ///
+  /// `url()` と `@import` を対象とし、コメント内の URL は含めません。
+  /// 書き換えと同じ正規表現を使い、書き換えた資源をウォームアップの対象から
+  /// 漏らさないようにします。
+  ///
+  /// [css] CSS 本文。
+  ///
+  /// Returns: 書かれていた URL の一覧。前後の空白は取り除いていません。
+  Iterable<String> _extractCssReferenceUrls(String css) {
+    return _cssReferencePattern
+        .allMatches(css)
+        .map(_cssReferenceUrlOf)
+        .whereType<String>();
+  }
+
+  /// CSS の参照照合の一致から URL を取り出します。
+  ///
+  /// [match] [_cssReferencePattern] の一致。
+  ///
+  /// Returns: 書かれていた URL。コメントに一致した場合は `null`。
+  String? _cssReferenceUrlOf(Match match) {
+    return match.group(1) ??
+        match.group(2) ??
+        match.group(3) ??
+        match.group(4) ??
+        match.group(5);
   }
 
   /// `<link>` が資源を指しているかどうかを返します。
@@ -5816,14 +5923,14 @@ class OfflineWebProxy {
         .any((value) => value == entityTag || value == '*');
   }
 
-  /// 応答 HTML 内のミラー対象 origin の URL を proxy 経路へ書き換えます。
+  /// 応答 HTML / CSS 内のミラー対象 origin の URL を proxy 経路へ書き換えます。
   ///
   /// 保存時ではなく応答時に書き換えます。キャッシュには上流が返したバイト列を
   /// そのまま残せるため、オンラインとオフラインのどちらの経路でも同じ変換を
   /// 通せます。設定から origin を外せば、保存済みの応答も元の URL に戻ります。
   ///
-  /// 本文は `latin1` で読み書きします。URL と対象タグは ASCII の範囲に収まる
-  /// ため、文字コードが何であってもバイト列をそのまま保てます。
+  /// 本文は `latin1` で読み書きします。URL と対象の構文は ASCII の範囲に
+  /// 収まるため、文字コードが何であってもバイト列をそのまま保てます。
   ///
   /// [request] 受信した要求。
   /// [response] 返却しようとしている応答。
@@ -5843,8 +5950,10 @@ class OfflineWebProxy {
       return response;
     }
 
-    final contentType = response.headers['content-type'] ?? '';
-    if (!contentType.toLowerCase().contains('text/html')) {
+    final contentType = (response.headers['content-type'] ?? '').toLowerCase();
+    final isHtml = contentType.contains('text/html');
+    final isCss = contentType.contains('text/css');
+    if (!isHtml && !isCss) {
       return response;
     }
 
@@ -5872,10 +5981,9 @@ class OfflineWebProxy {
     }
 
     final originalBody = latin1.decode(bodyBytes, allowInvalid: true);
-    final rewrittenBody = _rewriteMirroredOriginReferences(
-      originalBody,
-      baseUri,
-    );
+    final rewrittenBody = isHtml
+        ? _rewriteMirroredOriginReferences(originalBody, baseUri)
+        : _rewriteMirroredOriginCss(originalBody, baseUri);
 
     // 本文は既に読み終えているため、変換が無くても組み立て直す
     var responseBytes = bodyBytes;
@@ -5898,7 +6006,8 @@ class OfflineWebProxy {
 
   /// HTML 内のミラー対象 origin の参照 URL を proxy 経路へ書き換えます。
   ///
-  /// 対象タグはウォームアップの参照抽出と同じです。書き換えた資源が
+  /// 対象はウォームアップの参照抽出と同じで、資源を指すタグの属性と
+  /// `<style>` 要素内の CSS です。書き換えた資源が
   /// `warmupCache(followReferences: true)` の対象から漏れないようにするため、
   /// 判定は共通の正規表現に寄せています。
   ///
@@ -5907,6 +6016,127 @@ class OfflineWebProxy {
   ///
   /// Returns: 書き換え後の HTML。対象が無い場合は [html] をそのまま返します。
   String _rewriteMirroredOriginReferences(String html, Uri baseUri) {
+    final tagRewrittenHtml = _rewriteMirroredOriginTags(html, baseUri);
+    return _rewriteMirroredOriginStyleElements(tagRewrittenHtml, baseUri);
+  }
+
+  /// HTML の `<style>` 要素内のミラー対象 origin の参照 URL を書き換えます。
+  ///
+  /// [html] 応答本文。
+  /// [baseUri] 相対 URL の解決に使う upstream URI。
+  ///
+  /// Returns: 書き換え後の HTML。対象が無い場合は [html] をそのまま返します。
+  String _rewriteMirroredOriginStyleElements(String html, Uri baseUri) {
+    var changed = false;
+    final rewrittenHtml = html.replaceAllMapped(_styleElementPattern, (match) {
+      final css = match.group(2) ?? '';
+      final rewrittenCss = _rewriteMirroredOriginCss(css, baseUri);
+      if (identical(rewrittenCss, css)) {
+        return match[0]!;
+      }
+
+      changed = true;
+      return '${match.group(1)}$rewrittenCss${match.group(3)}';
+    });
+
+    return changed ? rewrittenHtml : html;
+  }
+
+  /// CSS 内のミラー対象 origin の参照 URL を proxy 経路へ書き換えます。
+  ///
+  /// `url()` と `@import` を対象とし、コメント内の URL には触れません。
+  /// 対象は絶対 URL（`//` で始まるものを含む）と `/` で始まるルート相対 URL
+  /// で、[baseUri] で解決してミラー対象 origin を指す場合だけ書き換えます。
+  /// 中継した CSS 内のルート相対 URL は、そのままではブラウザが proxy 経由で
+  /// 設定済み origin へ要求してしまうため書き換えます。`../x` のような
+  /// パス相対 URL は、中継用のパスが元の origin を保つためブラウザが正しく
+  /// 解決します。書き換えると本文が変わり `integrity` の検証に失敗するため、
+  /// 触れません。
+  ///
+  /// [css] CSS 本文。
+  /// [baseUri] 相対 URL の解決に使う upstream URI。
+  ///
+  /// Returns: 書き換え後の CSS。対象が無い場合は [css] をそのまま返します。
+  String _rewriteMirroredOriginCss(String css, Uri baseUri) {
+    var changed = false;
+    final rewrittenCss = css.replaceAllMapped(_cssReferencePattern, (match) {
+      final matchedText = match[0]!;
+      final rawUrl = _cssReferenceUrlOf(match);
+      if (rawUrl == null || _isPathRelativeReference(rawUrl.trim())) {
+        return matchedText;
+      }
+
+      final rewrittenText = _replaceReferenceValue(
+        matchedText,
+        rawUrl,
+        baseUri,
+      );
+      if (!identical(rewrittenText, matchedText)) {
+        changed = true;
+      }
+      return rewrittenText;
+    });
+
+    return changed ? rewrittenCss : css;
+  }
+
+  /// パス相対の参照 URL かどうかを返します。
+  ///
+  /// [url] 前後の空白を取り除いた URL。
+  ///
+  /// Returns: スキームを持たず `/` でも始まらない場合は `true`。
+  bool _isPathRelativeReference(String url) {
+    return !url.startsWith('/') && !_urlSchemePattern.hasMatch(url);
+  }
+
+  /// 照合した参照の値がミラー対象 origin を指す場合に値だけを差し替えます。
+  ///
+  /// [matchedText] 照合した文字列全体。値は末尾の引用符や括弧の直前にあります。
+  /// [rawUrl] 照合から取り出した URL。無い場合は `null`。
+  /// [baseUri] 相対 URL の解決に使う upstream URI。
+  ///
+  /// Returns: 差し替え後の文字列。対象外の場合は [matchedText] をそのまま
+  ///   返します。
+  String _replaceReferenceValue(
+    String matchedText,
+    String? rawUrl,
+    Uri baseUri,
+  ) {
+    if (rawUrl == null) {
+      return matchedText;
+    }
+
+    final trimmedUrl = rawUrl.trim();
+    if (trimmedUrl.isEmpty) {
+      return matchedText;
+    }
+
+    final proxyPath = _tryBuildMirroredProxyPathForReference(
+      trimmedUrl,
+      baseUri,
+    );
+    if (proxyPath == null) {
+      return matchedText;
+    }
+
+    // 引用符や空白の書き方を保つため、値の部分だけを差し替える
+    final valueStart = matchedText.lastIndexOf(trimmedUrl);
+    if (valueStart < 0) {
+      return matchedText;
+    }
+
+    return matchedText.substring(0, valueStart) +
+        proxyPath +
+        matchedText.substring(valueStart + trimmedUrl.length);
+  }
+
+  /// HTML の資源を指すタグの属性にある参照 URL を proxy 経路へ書き換えます。
+  ///
+  /// [html] 応答本文。
+  /// [baseUri] 相対 URL の解決に使う upstream URI。
+  ///
+  /// Returns: 書き換え後の HTML。対象が無い場合は [html] をそのまま返します。
+  String _rewriteMirroredOriginTags(String html, Uri baseUri) {
     final buffer = StringBuffer();
     var copiedUpTo = 0;
 
@@ -5949,34 +6179,11 @@ class OfflineWebProxy {
   /// Returns: 書き換え後の属性部。
   String _rewriteMirroredOriginAttributes(String attributes, Uri baseUri) {
     return attributes.replaceAllMapped(_referenceUrlPattern, (match) {
-      final matchedText = match[0]!;
-      final rawUrl = match.group(1) ?? match.group(2) ?? match.group(3);
-      if (rawUrl == null) {
-        return matchedText;
-      }
-
-      final trimmedUrl = rawUrl.trim();
-      if (trimmedUrl.isEmpty) {
-        return matchedText;
-      }
-
-      final proxyPath = _tryBuildMirroredProxyPathForReference(
-        trimmedUrl,
+      return _replaceReferenceValue(
+        match[0]!,
+        match.group(1) ?? match.group(2) ?? match.group(3),
         baseUri,
       );
-      if (proxyPath == null) {
-        return matchedText;
-      }
-
-      // 引用符や空白の書き方を保つため、値の部分だけを差し替える
-      final valueStart = matchedText.lastIndexOf(trimmedUrl);
-      if (valueStart < 0) {
-        return matchedText;
-      }
-
-      return matchedText.substring(0, valueStart) +
-          proxyPath +
-          matchedText.substring(valueStart + trimmedUrl.length);
     });
   }
 

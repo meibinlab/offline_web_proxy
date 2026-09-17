@@ -1140,5 +1140,287 @@ void main() {
         );
       });
     });
+
+    /// CSS 内の url() と @import の絶対 URL を書き換えること
+    test('rewrites listed origin urls inside a stylesheet', () async {
+      await withRealHttpClient(() async {
+        await startServers();
+        upstream!.routes = <String, _MockRoute>{
+          '/css/app.css': _route(
+            '@import "${cdn!.origin}/css/base.css";\n'
+            '@import url(${cdn!.origin}/css/theme.css);\n'
+            '@font-face { src: url("${cdn!.origin}/fonts/a.woff2"); }\n'
+            ".bg { background: url( '${cdn!.origin}/img/bg.png' ); }\n"
+            '/* url(${cdn!.origin}/img/commented.png) */\n'
+            '.local { background: url(/img/local.png); }\n'
+            '.dot { background: url(data:image/png;base64,AAAA); }\n'
+            '@import"${cdn!.origin}/css/minified.css";\n'
+            '.quote::before { content: "/*"; }\n'
+            '.after { background: url(${cdn!.origin}/img/after.png); }\n'
+            '.close::after { content: "*/"; }\n',
+            contentType: 'text/css; charset=utf-8',
+          ),
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            mirroredOrigins: <String>[cdn!.origin],
+          ),
+        );
+
+        final response =
+            await _performGet(Uri.parse('http://127.0.0.1:$port/css/app.css'));
+
+        expect(response.statusCode, equals(HttpStatus.ok));
+        expect(
+          response.body,
+          contains('@import "${mirroredPath('/css/base.css')}";'),
+        );
+        expect(
+          response.body,
+          contains('@import url(${mirroredPath('/css/theme.css')});'),
+        );
+        expect(
+          response.body,
+          contains('src: url("${mirroredPath('/fonts/a.woff2')}");'),
+        );
+        // 引用符と空白の書き方を保ったまま値だけを差し替えること
+        expect(
+          response.body,
+          contains("url( '${mirroredPath('/img/bg.png')}' )"),
+        );
+        // コメント内、相対 URL、data: には触れないこと
+        expect(
+          response.body,
+          contains('/* url(${cdn!.origin}/img/commented.png) */'),
+        );
+        expect(response.body, contains('url(/img/local.png)'));
+        expect(response.body, contains('url(data:image/png;base64,AAAA)'));
+        // 圧縮済み CSS のように空白を挟まない @import も書き換えること
+        expect(
+          response.body,
+          contains('@import"${mirroredPath('/css/minified.css')}";'),
+        );
+        // 文字列内の "/*" をコメントの開始と誤らないこと
+        expect(
+          response.body,
+          contains('url(${mirroredPath('/img/after.png')})'),
+        );
+      });
+    });
+
+    /// 中継した CSS 内のルート相対 URL だけを中継用パスへ書き換え、パス相対
+    /// URL には触れないこと
+    test('rewrites only a root relative url inside a relayed stylesheet',
+        () async {
+      await withRealHttpClient(() async {
+        await startServers();
+        cdn!.routes = <String, _MockRoute>{
+          '/lib/css/app.css': _route(
+            '.a { background: url(../img/a.png); }\n'
+            '.b { background: url("/img/b.png"); }\n',
+            contentType: 'text/css; charset=utf-8',
+          ),
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            mirroredOrigins: <String>[cdn!.origin],
+          ),
+        );
+
+        final response = await _performGet(
+          Uri.parse(
+            'http://127.0.0.1:$port${mirroredPath('/lib/css/app.css')}',
+          ),
+        );
+
+        expect(response.statusCode, equals(HttpStatus.ok));
+        // 中継用のパスの下でブラウザが正しく解決するため、書き換えないこと
+        expect(response.body, contains('url(../img/a.png)'));
+        // ルート相対のまま残すと設定済み origin へ届くため、書き換えること
+        expect(
+          response.body,
+          contains('url("${mirroredPath('/img/b.png')}")'),
+        );
+      });
+    });
+
+    /// 許可した origin が無い場合は CSS に触れないこと
+    test('leaves a stylesheet untouched when no origin is listed', () async {
+      await withRealHttpClient(() async {
+        await startServers();
+        final stylesheet =
+            '@font-face { src: url("${cdn!.origin}/fonts/a.woff2"); }';
+        upstream!.routes = <String, _MockRoute>{
+          '/css/app.css': _route(
+            stylesheet,
+            contentType: 'text/css; charset=utf-8',
+          ),
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+
+        final response =
+            await _performGet(Uri.parse('http://127.0.0.1:$port/css/app.css'));
+
+        expect(response.body, equals(stylesheet));
+      });
+    });
+
+    /// style 要素内の @import を書き換え、要素外の文字列には触れないこと
+    test('rewrites a listed origin url inside a style element', () async {
+      await withRealHttpClient(() async {
+        await startServers();
+        upstream!.routes = <String, _MockRoute>{
+          '/index.html': _route(
+            '<html><head>'
+            '<link rel="stylesheet" href="${cdn!.origin}/css/app.css">'
+            '<style media="all">'
+            '@import url("${cdn!.origin}/css/fonts.css");'
+            '</style></head><body>'
+            '<p>url(${cdn!.origin}/img/text.png)</p>'
+            '</body></html>',
+          ),
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            mirroredOrigins: <String>[cdn!.origin],
+          ),
+        );
+
+        final response =
+            await _performGet(Uri.parse('http://127.0.0.1:$port/index.html'));
+
+        expect(
+          response.body,
+          contains('<style media="all">'
+              '@import url("${mirroredPath('/css/fonts.css')}");'
+              '</style>'),
+        );
+        // 同じ HTML のタグ属性も合わせて書き換えること
+        expect(
+          response.body,
+          contains('href="${mirroredPath('/css/app.css')}"'),
+        );
+        // style 要素の外にある文字列は CSS として扱わないこと
+        expect(
+          response.body,
+          contains('<p>url(${cdn!.origin}/img/text.png)</p>'),
+        );
+      });
+    });
+
+    /// 書き換えないパス相対 URL も、ブラウザが解決する中継用パスで
+    /// ウォームアップすること
+    test('warms up a path relative url of a relayed stylesheet', () async {
+      await withRealHttpClient(() async {
+        await startServers();
+        upstream!.routes = <String, _MockRoute>{
+          '/index.html': _route(
+            '<html><head>'
+            '<link rel="stylesheet" href="${cdn!.origin}/lib/css/app.css">'
+            '</head><body></body></html>',
+          ),
+        };
+        cdn!.routes = <String, _MockRoute>{
+          '/lib/css/app.css': _route(
+            '.a { background: url(../img/a.png); }',
+            contentType: 'text/css; charset=utf-8',
+          ),
+          '/lib/img/a.png': _route('png', contentType: 'image/png'),
+        };
+        await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            mirroredOrigins: <String>[cdn!.origin],
+          ),
+        );
+
+        final result = await proxy.warmupCache(
+          paths: const <String>['/index.html'],
+          followReferences: true,
+        );
+
+        // CSS 内に残る相対 URL を、中継用パスの下で解決した経路で取得すること
+        expect(
+          result.entries.map((entry) => entry.path),
+          contains(mirroredPath('/lib/img/a.png')),
+        );
+        expect(cdn!.receivedPaths, contains('/lib/img/a.png'));
+      });
+    });
+
+    /// 中継した CSS が別の許可 origin を参照する場合も書き換え、オフラインで
+    /// フォントまで返せること
+    test('warms up a web font referenced by a relayed stylesheet', () async {
+      await withRealHttpClient(() async {
+        await startServers();
+        final fonts = await _startMockServer();
+        addTearDown(fonts.close);
+        final fontPath = '/__offline_web_proxy/ext/http/127.0.0.1:${fonts.port}'
+            '/s/icons.woff2';
+
+        upstream!.routes = <String, _MockRoute>{
+          '/index.html': _route(
+            '<html><head>'
+            '<link rel="stylesheet" href="${cdn!.origin}/css2?family=Icons">'
+            '</head><body></body></html>',
+          ),
+        };
+        cdn!.routes = <String, _MockRoute>{
+          '/css2': _route(
+            '@font-face { src: url(${fonts.origin}/s/icons.woff2); }',
+            contentType: 'text/css; charset=utf-8',
+          ),
+        };
+        fonts.routes = <String, _MockRoute>{
+          '/s/icons.woff2': _route(
+            'font-bytes',
+            contentType: 'font/woff2',
+          ),
+        };
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            mirroredOrigins: <String>[cdn!.origin, fonts.origin],
+          ),
+        );
+
+        final result = await proxy.warmupCache(
+          paths: const <String>['/index.html'],
+          followReferences: true,
+        );
+
+        // HTML → CSS → フォントの 3 件を取得すること
+        expect(result.successCount, equals(3));
+        expect(fonts.receivedPaths, equals(<String>['/s/icons.woff2']));
+        final fontEntry =
+            result.entries.singleWhere((entry) => entry.path == fontPath);
+        expect(
+          fontEntry.referencedFrom,
+          equals(mirroredPath('/css2?family=Icons')),
+        );
+
+        await _emitConnectivity(['none']);
+
+        // キャッシュした CSS を返す際にもフォントの URL を書き換えること
+        final stylesheet = await _performGet(
+          Uri.parse(
+            'http://127.0.0.1:$port${mirroredPath('/css2')}?family=Icons',
+          ),
+        );
+        expect(stylesheet.offlineSource, equals('cache'));
+        expect(stylesheet.body, contains('url($fontPath)'));
+
+        final font =
+            await _performGet(Uri.parse('http://127.0.0.1:$port$fontPath'));
+        expect(font.statusCode, equals(HttpStatus.ok));
+        expect(font.body, equals('font-bytes'));
+        expect(font.offlineSource, equals('cache'));
+      });
+    });
   });
 }

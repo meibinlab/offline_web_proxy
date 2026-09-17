@@ -42,10 +42,11 @@ class WarmupEntry {
   /// この処理にかかった時間
   final Duration duration;
 
-  /// このパスを参照していた HTML のパス
+  /// このパスを参照していた HTML または CSS のパス
   ///
   /// `warmupCache(followReferences: true)` で連鎖して取得した場合に、
-  /// 参照元のパスが入ります。直接指定したパスの場合は `null` です。
+  /// 参照元のパスが入ります。CSS が参照するフォントのように複数段を辿った
+  /// 場合は、直前の段の参照元です。直接指定したパスの場合は `null` です。
   final String? referencedFrom;
 
   const WarmupEntry({

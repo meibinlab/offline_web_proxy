@@ -242,9 +242,12 @@ const config = ProxyConfig(
 - パスを指定する設定（`forceCachePaths` など）は共通の glob 記法で照合します。`*` は `/` を含まない 1 セグメント、`**` は `/` を含む任意の文字列に一致し、メタ文字が無い場合は完全一致です。クエリ文字列は照合対象に含みません。
 - `port: 0` を指定すると、OS が空きポートを自動割り当てします。
 - `preferredPort` を指定すると、まずそのポートを試し、使えない場合は自動割り当てへフォールバックします。直前に成功したポートも次回起動時に再利用されるため、WebView の origin をより安定させやすくなります。
-- `startupPaths` は `warmupCache()` で、オフライン時または上流到達不能時の代替応答を事前準備したいパスに使います。
+- `startupPaths` は `warmupCache()` で `paths` を省略したときに取得するパスです。オフライン時または上流到達不能時の代替応答を事前準備したいパスに使います。
+  - **`start()` は `startupPaths` を自動では取得しません。** 起動後の必要な時点で `warmupCache()` を呼んでください。
   - ウォームアップは転送経路と同じく Cookie Jar の内容を送ります。認証後に呼び出せば、認証が必要な API も取得できます。
-  - `warmupCache(followReferences: true)` を指定すると、取得した HTML が参照する資源（`<script src>`、`<link href>`、`<img src>`）も続けて取得します。対象は同一 origin と `mirroredOrigins` に列挙した origin です。1 段だけ辿り、実行時に JavaScript が組み立てる URL には届きません。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。
+  - `warmupCache(followReferences: true)` を指定すると、取得した HTML と CSS が参照する資源も続けて取得します。対象は同一 origin と `mirroredOrigins` に列挙した origin です。実行時に JavaScript が組み立てる URL には届きません。
+    - HTML からは `<script src>`、`<link href>`、`<img src>` と `<style>` 要素内の `url()` / `@import` を、`paths` に指定した HTML の 1 段だけ辿ります。`<link>` は `stylesheet` など資源を指す `rel` だけを対象とします。
+    - CSS からは `url()` と `@import` を続けて辿ります（HTML → CSS → フォントのように、指定したパスから数えて最大 4 段）。
 - `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。`GET` と `HEAD` は要求ログにも出力しません。Web アプリのルートと衝突する場合に変更します。
 - `statusPath` は proxy の状態を JSON で返すパスです。`healthCheckPath` と同じ扱いで、上流へ転送されず、統計にも計上されず、`GET` は要求ログにも出力しません。空文字列を指定すると無効になり、代替ページと `504` ページの自動復帰も止まります。
 - `enableAdminApi` を `true` にすると、隔離キューの一覧・再送・破棄を HTTP から操作できます。既定は無効です。
@@ -267,9 +270,11 @@ const config = ProxyConfig(
   - 一致したパスでは上流の `max-age` や `Expires` を使わず、`cacheTtl` の値を有効期限に使います。`no-store` は `max-age=0` と併記されることが多く、そのまま採用すると保存直後に stale になるためです。
   - **応答キャッシュは暗号化していません。** 指定したパスの応答本文は端末内に平文で残るため、画面が含む情報を踏まえて指定してください。
 - `mirroredOrigins` は、proxy 経由で取得する別 origin の一覧です。CDN から UI ライブラリを読み込む画面では、HTML 内の絶対 URL が 127.0.0.1 を経由せず、キャッシュもフォールバックもウォームアップも効きません。列挙した origin は proxy が中継し、通常のキャッシュとオフライン代替の対象になります。既定は空です。
-  - proxy が返す `text/html` の `<script src>`、`<link href>`、`<img src>` のうち、一致する絶対 URL を `/__offline_web_proxy/ext/<scheme>/<host>[:port]/<元のパス>` へ書き換えます。`<link>` は `stylesheet` など資源を指す `rel` だけが対象です。
+  - proxy が返す `text/html` の `<script src>`、`<link href>`、`<img src>` と `<style>` 要素内、および `text/css` の `url()` と `@import` のうち、一致する絶対 URL を `/__offline_web_proxy/ext/<scheme>/<host>[:port]/<元のパス>` へ書き換えます。`<link>` は `stylesheet` など資源を指す `rel` だけが対象です。
+  - Google Fonts のように CSS が別 origin のフォント本体を参照する場合は、CSS とフォント本体の両方の origin（例: `https://fonts.googleapis.com` と `https://fonts.gstatic.com`）を列挙します。
+  - 列挙した origin を指す絶対 URL、または中継した CSS 内の `/` で始まるルート相対 URL を含む CSS は、書き換えで本文が変わるため、`integrity` 属性を付けた `<link>` では検証に失敗します。`../x` のようなパス相対 URL は書き換えません。
   - 書き換えの判定はウォームアップの参照抽出と同じです。**書き換えた資源は必ず `warmupCache(followReferences: true)` の対象になります**。
-  - 書き換えは保存時ではなく応答時に行うため、オフラインでキャッシュから返す HTML にも同じ変換がかかります。設定から origin を外せば元の URL に戻ります。
+  - 書き換えは保存時ではなく応答時に行うため、オフラインでキャッシュから返す HTML と CSS にも同じ変換がかかります。設定から origin を外せば元の URL に戻ります。
   - 中継するのは `GET` と `HEAD` だけです。ほかのメソッドは `405` を返し、キューにも載せません。許可していない origin を指すパスは `404` を返し、設定済み origin へ素通ししません。
   - 一致判定はスキーム、ホスト、ポートの完全一致です。パスやクエリを含む値を指定すると起動時に `ProxyStartException` になります。
   - **中継先へは `Authorization`、`Origin`、`Referer` とクライアントの `Cookie` を送りません。** Cookie Jar のうち中継先のドメインに一致するものだけを送ります。
