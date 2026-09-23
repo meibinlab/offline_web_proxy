@@ -139,6 +139,34 @@ proxy が返す `text/html` と `text/css` の応答について、`mirroredOrig
 
 - **HTTPS 不要**: localhost はブラウザでセキュアコンテキストとして扱われるため、HTTP でも十分
 - **外部アクセス制限**: 127.0.0.1 バインドにより、デバイス外からのアクセスを完全に遮断
+- **端末内の別プロセス**: ループバックでは、端末内の別アプリやブラウザのページからも到達できます。WebView に限る場合は「到達の制限」を参照
+
+### 到達の制限
+
+proxy はループバックで待ち受けますが、要求がどのプロセスから来たかをソケットから確かめる手段は一般にありません。このため既定では、端末内の別アプリやブラウザのページからも到達でき、転送経路では Cookie Jar のセッションを付けて上流へ送ります。`ProxyConfig.requireAccessToken` を `true` にすると、WebView だけが知る秘密値を持たない要求を拒否します。既定は `false` です。
+
+- **秘密値**: `start()` のたびに、暗号論的乱数 32 バイトを base64url（パディングなし、43 文字）にした値を生成し、`OfflineWebProxy.accessToken` で返します。自動復旧の再バインドでは変えません。停止中と起動に失敗した後は `null` です。HTTP では返しません
+- **受け取り方**: Cookie `__offline_web_proxy_token`（`OfflineWebProxy.accessTokenCookieName`）またはヘッダ `X-Offline-Web-Proxy-Token`（`OfflineWebProxy.accessTokenHeaderName`）のどちらかが一致すれば許可します。同じ名前の Cookie が複数ある場合は、いずれかが一致すれば許可します。比較は定数時間で行います
+- **拒否**: `403`（`text/plain`、`Cache-Control: no-store`）を返します。CORS ヘッダは付けず、統計にも数えません。要求ログには出力します（`GET` の状態通知は従来どおり出力しません）
+- **対象**: 転送経路、同梱アセット、別 origin の中継経路、WebStorage の橋渡し、状態通知、管理エンドポイント
+- **対象外**: `GET` / `HEAD` の `healthCheckPath` だけです。情報を返さず、`probe()` と外部の死活監視が使うためです
+  - 判定はルーターと同じくパスの完全一致です。末尾に `/` を付けたパスは検査します。先頭の `/` の重複は 1 つにまとめてから判定するため、`//__offline_web_proxy/health` は稼働確認として扱います
+  - CORS の preflight（`OPTIONS`）は Cookie を送らないため、`healthCheckPath` 宛てを含めて拒否します
+  - `warmupCache()` など proxy 自身が上流へ送る要求は、この経路を通りません
+- **除去**: 設定にかかわらず、秘密値の Cookie とヘッダは検査の後に取り除いてから処理します。上流や中継先への転送、キューへの保存、再送のいずれにも含めません
+  - 上流の応答の `Set-Cookie` のうち同じ名前の Cookie は、WebView の秘密値を上書きさせないよう WebView へ返しません。この Cookie は上流自身の Cookie として Cookie Jar には保存し、以後の転送で上流へ送ります
+- **利用側の手順**: WebView が最初のページを読み込む前に、ネイティブの Cookie 管理（Android の `CookieManager`、`flutter_inappwebview` の `CookieManager.setCookie` など）で、proxy の origin（`baseUri`）へ **HttpOnly** の Cookie として置きます。同じ origin で動くスクリプトから値を読めないようにするためです。`start()` し直した後は、新しい値を置き直してから読み込みます
+  - Cookie はホストごとに保持されます。WebView が `127.0.0.1` と `localhost` の両方を使う場合は、それぞれに置きます
+  - Cookie はポートを区別しません。再バインドでポートが変わっても置き直す必要はありませんが、同じホストの別ポートのサーバへも秘密値が送られます
+  - `SameSite=Strict` にすると、別サイトのページから proxy への遷移では Cookie が送られません。一方、外部ログインのリダイレクトや `form_post` のように別サイトから戻る遷移も `403` になります。`Lax` でも、別サイトからの `POST` では送られません。ページが使う遷移に合わせて選んでください
+  - `fetch` の `credentials: "omit"` のように Cookie を送らない要求は、ヘッダを付けない限り `403` になります
+- **残るリスク**: WebView 内で動くスクリプト（第三者のスクリプトを含む）は、同一 origin の要求として秘密値付きで到達できます。端末の root 権限や WebView のデバッグ接続を持つ者も防げません
+
+### CORS ヘッダ
+
+- 既定（`ProxyConfig.addCorsHeaders: true`）では、内部エンドポイントを除くすべての応答へ `Access-Control-Allow-Origin: *`、`Access-Control-Allow-Methods`、`Access-Control-Allow-Headers` を付けます。上流が同じ名前のヘッダを返した場合は、上流の値を優先します
+- `false` にすると、proxy はこれらを付けません。WebView のページは proxy と同一 origin のため、CORS ヘッダを必要としません。別 origin のページから proxy の応答を読ませる必要が無い限り、`false` を推奨します
+- 上流が自ら返した CORS ヘッダは、設定にかかわらずそのまま返します
 
 ### 死活監視
 
@@ -146,6 +174,8 @@ proxy が返す `text/html` と `text/css` の応答について、`mirroredOrig
 - ヘルスチェックは `GET` と `HEAD` のみを受け付け、`204 No Content` と `Cache-Control: no-store` を返します。それ以外のメソッドは通常のプロキシ経路として扱います。
 - `healthCheckPath` は `/` で始まる固定パスとします。パスパラメータ記法（`<`、`>`）、`?`、`#`、空白を含む値は起動時に `ProxyStartException` で拒否します。空文字を指定した場合は既定パスを使用します。
 - ヘルスチェック要求は上流サーバへ転送せず、キャッシュ、キュー、Cookie 処理、統計カウンタの対象外とします。
+- ヘルスチェック・状態通知・管理の各エンドポイントとして扱う（統計と CORS ヘッダの対象から外す）のは、ルーターがそれぞれのハンドラへ渡す要求、つまりメソッドとパスがルーターの登録と一致する要求だけです。要求ログから外すのは、そのうち `GET` / `HEAD` の稼働確認と `GET` の状態通知だけです。`POST` の状態通知や、登録していない管理のパスやメソッドは、ルーターと同じく転送経路として扱い、統計・CORS ヘッダ・要求ログの対象にします。
+- パス先頭の `/` の重複（`//__offline_web_proxy/status` など）は、ルーターより前で 1 つにまとめます。ルーター、秘密値の検査、統計、転送のいずれも、まとめた後のパスで扱います。なお、dart:io は `//X/...` の先頭セグメントをホスト名として解析するため、その部分の大文字小文字は保たれない場合があります。
 - `probe()` は現在バインドしているポートのヘルスチェックパスへ要求を送り、`204` を受け取った場合のみ稼働中と判定します。既定タイムアウトは 2 秒です。接続失敗、タイムアウト、想定外のステータスは停止と判定します。
 - `isRunning` は内部状態のフラグのみを返し、ソケットが実際に応答するかは保証しません。実応答の確認には `probe()` を使用します。
 - 「ソケット死亡」状態を再現するため、内部状態を変更せずソケットのみを閉じる `closeServerSocketForTesting()` を `@visibleForTesting` として提供します。テスト以外の用途では使用しません。
@@ -681,7 +711,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 未送信件数やオンライン状態は Dart の API でしか取得できないため、表示も判断も画面側で行いたい場合はアプリへ橋渡しの実装が必要でした。`ProxyConfig.statusPath`（既定 `/__offline_web_proxy/status`）は、同じ情報を JSON で返します。
 
-- **メソッド**: `GET` のみ。上流へは転送せず、統計にもイベントにも計上せず、要求ログにも出力しません
+- **メソッド**: `GET` のみ（ルーターが `GET` に加える `HEAD` も同じく処理します）。上流へは転送せず、統計にもイベントにも計上しません。`GET` は要求ログにも出力しません
 - **無効化**: 空文字列を指定すると登録しません。代替ページと 504 ページへ自動復帰のスクリプトも入れません（【10】の「代替ページの自動復帰」）
 - **検証**: `healthCheckPath` と同じ規則で検証し、`healthCheckPath` と同じ値は起動時に拒否します
 - **応答ヘッダ**: `Cache-Control: no-store` を付与します
@@ -724,6 +754,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - `Origin` が proxy 自身（`http://<host>:<port>`）と一致する場合は許可します。`127.0.0.1` と `localhost` は同じ proxy を指すため、どちらの表記でも許可します
 - それ以外は `403` を返します
 - CORS ミドルウェアの対象外とし、`Access-Control-Allow-Origin: *` を付与しません
+- `Origin` の無い要求を許可するため、端末内の別アプリからも到達できます。WebView に限る場合は `requireAccessToken` を併用してください（【2】到達の制限）
 
 **注意**: この制御は「同じ origin で動くスクリプトすべてに操作を許す」ことでもあります。CDN など第三者のスクリプトを読み込んだままで管理エンドポイントを有効にすると、そのスクリプトから隔離の破棄まで到達し得ます。同梱アセットの配信（【3】）へ切り替えてから有効にしてください。
 
@@ -1223,6 +1254,8 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 - **capture**: Cookie Jar で Cookie を保存
 - **passthrough**: そのまま透過
+- **複数の Set-Cookie**: 上流から受け取った応答では、1 件ずつ別の行で WebView へ返します。ブラウザは 1 行の `Set-Cookie` から先頭の Cookie しか受け取らないためです
+- **キャッシュからの応答**: 保存時の `Set-Cookie` は返しません。キャッシュした後に上流が更新したセッションなどを、古い値で上書きしないためです。Cookie Jar には上流から受け取った時点で保存済みです
 
 ### Origin/Referer ヘッダ
 
@@ -1480,6 +1513,11 @@ proxy:
     level: "info" # debug/info/warn/error
     maskSensitiveHeaders: true # Authorization/Cookie等をマスク
 
+  # 到達の制限
+  access:
+    requireAccessToken: false # true で秘密値を持たない要求を 403 で拒否
+    addCorsHeaders: true # false で内部エンドポイント以外の応答へ CORS ヘッダを付けない
+
   # 開発・デバッグ設定
   debug:
     enableAdminApi: false # セキュリティ重視、開発時のみtrue推奨
@@ -1626,6 +1664,14 @@ await proxy.stop();
 WebView から読み込む proxy のベース URI を取得します。
 
 - **戻り値**: `http://<host>:<port>` 形式の URI。未起動時は `null`
+
+#### `String? get accessToken`
+
+proxy へ到達できる要求を WebView に限るための秘密値を取得します（【2】到達の制限）。
+
+- **戻り値**: 稼働中は秘密値（`start()` がサーバを待ち受ける前から値が入る）。停止中と起動に失敗した後は `null`
+- **生成**: `start()` のたびに生成し、自動復旧の再バインドでは変えない。HTTP では返さない
+- **関連定数**: `OfflineWebProxy.accessTokenCookieName`（`'__offline_web_proxy_token'`）、`OfflineWebProxy.accessTokenHeaderName`（`'X-Offline-Web-Proxy-Token'`）
 
 #### `Future<bool> probe({Duration timeout = const Duration(seconds: 2)})`
 
@@ -2453,6 +2499,8 @@ class ProxyConfig {
   final ProxyResponseConfig queuedResponse; // キュー投入時の応答（既定: 202 / JSON）
   final ProxyResponseConfig offlineMissResponse; // 代替できない場合の応答（既定: 504 / JSON）
   final bool enableAdminApi; // 管理API有効化（開発時のみ）
+  final bool requireAccessToken; // 秘密値を持たない要求を 403 で拒否（既定: false）
+  final bool addCorsHeaders; // 内部エンドポイント以外の応答へ CORS ヘッダを付ける（既定: true）
   final bool enableWebStorageInheritance; // WebStorage 引き継ぎ（既定: false）
   final String logLevel; // ログレベル（"debug", "info", "warn", "error"）
   final List<String> startupPaths; // warmupCache() で paths を省略した場合の既定パス（start() では自動取得しない）

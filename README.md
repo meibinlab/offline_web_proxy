@@ -21,6 +21,7 @@ It runs on 127.0.0.1, forwards requests to one configured upstream origin while 
 - Verification of stored data against the encryption key, and a recovery API for a lost key
 - Retention limits for the quarantine store and the dropped history (count, age and total size)
 - WebView navigation helper APIs for same-origin, external, and new-window flows
+- Option to limit access to the proxy to the WebView with a per-start secret (`requireAccessToken`)
 - Connection recovery that verifies responsiveness on resume and rebinds automatically
 - Runtime stats and event stream for monitoring and debugging
 
@@ -220,6 +221,8 @@ const config = ProxyConfig(
   ),
   retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
   enableAdminApi: false,
+  requireAccessToken: false,
+  addCorsHeaders: true,
   logLevel: 'info',
   startupPaths: ['/app/config'],
   preferredPort: 8787,
@@ -251,6 +254,8 @@ Notes:
 - `healthCheckPath` is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics, and `GET` and `HEAD` requests to it are omitted from the request log. Change it when it collides with a route of your web application.
 - `statusPath` returns the proxy state as JSON. It gets the same treatment as `healthCheckPath` — never forwarded, never counted, and `GET` requests omitted from the request log. An empty string disables it, which also stops the auto-reload of the fallback and `504` pages.
 - `enableAdminApi` set to `true` exposes listing, resending and discarding of quarantined requests over HTTP. Disabled by default.
+- `requireAccessToken` set to `true` refuses, with `403`, every request that lacks the per-start secret (`accessToken`). Disabled by default. See "Keeping Other Apps Away from the Proxy".
+- `addCorsHeaders` set to `false` stops adding CORS headers such as `Access-Control-Allow-Origin: *` to responses other than the internal endpoints. The default is `true` (added as before). Pages in the WebView share the proxy origin, so `false` is recommended unless a page on another origin has to read the responses.
 - Setting `healthCheckInterval` above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by `ProxyLifecycleGuard` is the primary path.
 - `offlineFallbackHtml` and `gatewayTimeoutHtml` replace the built-in offline and timeout response bodies with wording supplied by your app.
   - Both the built-in pages and replacement pages are answered with `Content-Type: text/html; charset=utf-8` and `Cache-Control: no-store`. The built-in pages carry a retry button.
@@ -537,6 +542,7 @@ The response looks like this.
 
 - `GET` only, never forwarded upstream, excluded from statistics, and omitted from the request log.
 - Only callers on the proxy's own origin are served. A request carrying another `Origin` is answered with `403`, and `Access-Control-Allow-Origin: *` is never attached.
+- A request without an `Origin` is allowed, so other apps on the device can reach it too. To limit it to the WebView, enable `requireAccessToken` as well ("Keeping Other Apps Away from the Proxy").
 - Setting `statusPath` to an empty string disables it, which also stops the auto-reload of the fallback and `504` pages.
 - `queueLength`, `quarantinedCount` and `unacknowledgedDroppedCount` include entries still waiting for migration from the storage of 0.14.0 or earlier (see [Migrating from 0.14.0 or earlier](#migrating-from-0140-or-earlier)).
 
@@ -570,7 +576,45 @@ for (const request of requests) {
 }
 ```
 
-**Warning**: Disabled by default. Same-origin also means *every script running on the page*. Enabling it while the page still loads third-party scripts from a CDN would let such a script reach as far as discarding a quarantined request. Move those files under `assets/static/` first.
+**Warning**: Disabled by default. Same-origin also means *every script running on the page*. Enabling it while the page still loads third-party scripts from a CDN would let such a script reach as far as discarding a quarantined request. Move those files under `assets/static/` first. A request without an `Origin` is also allowed, so other apps on the device can reach the endpoints. Enable `requireAccessToken` as well ("Keeping Other Apps Away from the Proxy").
+
+## Keeping Other Apps Away from the Proxy
+
+The proxy listens on loopback, but it cannot tell which process a request came from. By default, other apps and browser pages on the device can send requests to the proxy, and on the forwarding path those requests go upstream with the authenticated sessions in the proxy's Cookie Jar. On a device where users may install other apps, use `requireAccessToken` to accept requests from the WebView only.
+
+```dart
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:offline_web_proxy/offline_web_proxy.dart';
+
+final proxy = OfflineWebProxy();
+await proxy.start(
+  config: const ProxyConfig(
+    origin: 'https://api.example.com',
+    // Refuse requests without the secret with 403
+    requireAccessToken: true,
+    // Pages in the WebView share the proxy origin and need no CORS headers
+    addCorsHeaders: false,
+  ),
+);
+
+// Put it as an HttpOnly cookie before the WebView loads its first page
+await CookieManager.instance().setCookie(
+  url: WebUri(proxy.baseUri!.toString()),
+  name: OfflineWebProxy.accessTokenCookieName,
+  value: proxy.accessToken!,
+  isHttpOnly: true,
+);
+```
+
+- `accessToken` changes on every `start()` and is never returned over HTTP. After calling `start()` again, put the new value before loading. A rebind by automatic recovery keeps it.
+- `WebViewCookieManager` of `webview_flutter` cannot set HttpOnly. Use a platform cookie manager that can (Android's `CookieManager`, for example) or `flutter_inappwebview`.
+- Calls that can set headers, such as `fetch`, may send the value in `X-Offline-Web-Proxy-Token` (`OfflineWebProxy.accessTokenHeaderName`) instead.
+- Only `GET` / `HEAD` on `healthCheckPath` is exempt. The forwarding path, bundled assets, the mirrored-origin path, the status endpoint, the administrative endpoints and the WebStorage bridge are all covered.
+- Cookies are kept per host and do not distinguish ports. If you use both `127.0.0.1` and `localhost`, put one on each. The secret is also sent to any other server on the same host.
+- With `SameSite=Strict`, the cookie is not sent when a page on another site navigates to the proxy, but a navigation back from an external login then gets `403` too.
+- A `fetch` with `credentials: "omit"` sends no cookies and gets `403`. Use `same-origin` (the default).
+- Whatever the setting, the secret cookie and header are never forwarded upstream or stored in the queue, and a `Set-Cookie` of the same name from the upstream is not passed to the WebView.
+- Scripts running in the WebView reach the proxy as same-origin requests that carry the secret. This does not protect against third-party scripts.
 
 ## Cookie APIs
 
@@ -913,6 +957,8 @@ flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.d
 Find the device ID with `flutter devices`.
 
 `offline_web_proxy_storage_e2e_test.dart` deletes the cookie, queue, quarantine, and dropped-request boxes (including the legacy plain boxes) and the encryption key of the example app before each test. The first test waits for the migration delay of the legacy plain queue (30 seconds), so it takes more than 30 seconds.
+
+`offline_web_proxy_access_token_e2e_test.dart` checks the steps for using a proxy with `requireAccessToken` from the WebView. The secret cookie is put as HttpOnly with Android's `CookieManager`. The last test prints `OWP_E2E_EXTERNAL_PROBE_PORT=<port>` and then waits 40 seconds. During that window you can send requests from another process, such as `nc` in `adb shell`, to a path other than the health check (`/page`, for example) and confirm that they get `403` and never reach the upstream. The requests are sent by hand from outside the test (the test passes without them). To set HttpOnly, the test imports a file under `src/` of `webview_flutter_android` directly, so a plugin update may break it.
 
 ## Release Process
 

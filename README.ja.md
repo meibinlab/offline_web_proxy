@@ -21,6 +21,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 - 暗号化鍵と保存データの照合と、鍵を失った場合の復旧 API
 - 隔離とドロップ履歴の保持上限（件数、期間、合計バイト数）
 - same-origin、外部委譲、新規 window 判定のための WebView 補助 API
+- 起動ごとの秘密値で proxy への到達を WebView に限る設定（`requireAccessToken`）
 - サスペンド復帰時の稼働確認と自動再バインドによる接続復旧
 - 統計情報とイベントストリームによる監視とデバッグ
 
@@ -220,6 +221,8 @@ const config = ProxyConfig(
   ),
   retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
   enableAdminApi: false,
+  requireAccessToken: false,
+  addCorsHeaders: true,
   logLevel: 'info',
   startupPaths: ['/app/config'],
   preferredPort: 8787,
@@ -251,6 +254,8 @@ const config = ProxyConfig(
 - `healthCheckPath` は稼働確認専用のパスです。この URL は上流へ転送されず、統計にも計上されません。`GET` と `HEAD` は要求ログにも出力しません。Web アプリのルートと衝突する場合に変更します。
 - `statusPath` は proxy の状態を JSON で返すパスです。`healthCheckPath` と同じ扱いで、上流へ転送されず、統計にも計上されず、`GET` は要求ログにも出力しません。空文字列を指定すると無効になり、代替ページと `504` ページの自動復帰も止まります。
 - `enableAdminApi` を `true` にすると、隔離キューの一覧・再送・破棄を HTTP から操作できます。既定は無効です。
+- `requireAccessToken` を `true` にすると、起動ごとの秘密値（`accessToken`）を持たない要求を `403` で拒否します。既定は無効です。「WebView 以外からの到達を防ぐ」を参照してください。
+- `addCorsHeaders` を `false` にすると、内部エンドポイントを除く応答へ `Access-Control-Allow-Origin: *` などの CORS ヘッダを付けません。既定は `true`（従来どおり付ける）です。WebView のページは同一 origin のため、別 origin のページから読ませる必要が無ければ `false` を推奨します。
 - `healthCheckInterval` に 0 より大きい値を指定すると定期的に稼働確認を行います。既定は無効で、復帰時の確認（`ProxyLifecycleGuard`）を主経路とします。
 - `offlineFallbackHtml` と `gatewayTimeoutHtml` を指定すると、オフライン応答とタイムアウト応答の HTML をアプリ側の文言へ差し替えられます。
   - 既定のページも差し替えた HTML も、`Content-Type: text/html; charset=utf-8` と `Cache-Control: no-store` で返します。既定のページは再試行ボタンを持ちます。
@@ -537,6 +542,7 @@ if (!status.isOnline) {
 
 - `GET` のみで、上流へは転送されず、統計にも計上されず、要求ログにも出力されません。
 - proxy 自身の origin からの要求だけを受け付けます。別 origin の `Origin` を伴う要求には `403` を返し、`Access-Control-Allow-Origin: *` も付与しません。
+- `Origin` の無い要求は許可するため、端末内の別アプリからも到達できます。WebView に限る場合は `requireAccessToken` を併用してください（「WebView 以外からの到達を防ぐ」）。
 - `statusPath` に空文字列を指定すると無効になります。代替ページと `504` ページの自動復帰も止まります。
 - `queueLength`、`quarantinedCount`、`unacknowledgedDroppedCount` には、0.14.0 以前の保存領域から移行を待っている分も含みます（「0.14.0 以前からの移行」）。
 
@@ -570,7 +576,45 @@ for (const request of requests) {
 }
 ```
 
-**注意**: 既定は無効です。同一 origin 限定とはいえ、これは「同じ origin で動くスクリプトすべてに操作を許す」ことでもあります。CDN など第三者のスクリプトを読み込んだままで有効にすると、そのスクリプトから隔離の破棄まで到達し得ます。`assets/static/` への同梱へ切り替えてから有効にしてください。
+**注意**: 既定は無効です。同一 origin 限定とはいえ、これは「同じ origin で動くスクリプトすべてに操作を許す」ことでもあります。CDN など第三者のスクリプトを読み込んだままで有効にすると、そのスクリプトから隔離の破棄まで到達し得ます。`assets/static/` への同梱へ切り替えてから有効にしてください。また、`Origin` の無い要求は許可するため、端末内の別アプリからも到達できます。`requireAccessToken` を併用してください（「WebView 以外からの到達を防ぐ」）。
+
+## WebView 以外からの到達を防ぐ
+
+proxy はループバックで待ち受けますが、要求がどのプロセスから来たかは区別できません。既定のままでは、端末内の別アプリやブラウザのページも proxy へ要求を送れ、転送経路では proxy の Cookie Jar にある認証セッションを付けて上流へ送られます。利用者が他のアプリを入れうる端末では、`requireAccessToken` で WebView からの要求だけに限ってください。
+
+```dart
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:offline_web_proxy/offline_web_proxy.dart';
+
+final proxy = OfflineWebProxy();
+await proxy.start(
+  config: const ProxyConfig(
+    origin: 'https://api.example.com',
+    // 秘密値を持たない要求を 403 で拒否する
+    requireAccessToken: true,
+    // WebView のページは同一 origin のため、CORS ヘッダは不要
+    addCorsHeaders: false,
+  ),
+);
+
+// WebView が最初のページを読み込む前に、HttpOnly の Cookie として置く
+await CookieManager.instance().setCookie(
+  url: WebUri(proxy.baseUri!.toString()),
+  name: OfflineWebProxy.accessTokenCookieName,
+  value: proxy.accessToken!,
+  isHttpOnly: true,
+);
+```
+
+- `accessToken` は `start()` のたびに変わり、HTTP では返しません。`start()` し直した後は、新しい値を置き直してから読み込みます。自動復旧の再バインドでは変わりません。
+- `webview_flutter` の `WebViewCookieManager` は HttpOnly を指定できません。HttpOnly で置けるネイティブの Cookie 管理（Android の `CookieManager` など）か、`flutter_inappwebview` を使ってください。
+- `fetch` などヘッダを付けられる呼び出しでは、`X-Offline-Web-Proxy-Token`（`OfflineWebProxy.accessTokenHeaderName`）でも受け付けます。
+- 拒否しないのは `GET` / `HEAD` の `healthCheckPath` だけです。転送経路、同梱アセット、別 origin の中継、状態通知、管理エンドポイント、WebStorage の橋渡しはすべて対象です。
+- Cookie はホストごとに保持され、ポートは区別しません。`127.0.0.1` と `localhost` の両方を使う場合は、それぞれに置きます。同じホストの別ポートのサーバへも秘密値が送られます。
+- `SameSite=Strict` にすると、別サイトのページから proxy への遷移では Cookie が送られません。ただし、外部ログインから戻る遷移も `403` になります。
+- `credentials: "omit"` の `fetch` は Cookie を送らないため `403` になります。`same-origin`（既定）で呼んでください。
+- 秘密値の Cookie とヘッダは、設定にかかわらず上流へは転送せず、キューにも保存しません。上流が同じ名前の `Set-Cookie` を返しても、WebView へは返しません。
+- WebView 内で動くスクリプトは、同一 origin の要求として秘密値付きで到達できます。第三者のスクリプトへの対策にはなりません。
 
 ## Cookie API
 
@@ -913,6 +957,8 @@ flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.d
 デバイス ID は `flutter devices` で確認できます。
 
 `offline_web_proxy_storage_e2e_test.dart` は、テストごとに example アプリの Cookie・キュー・隔離・ドロップ履歴の Box（暗号化前の Box を含む）と暗号化鍵を削除してから始めます。1 件目は旧平文キューの移行の待ち時間（30 秒）を待つため、30 秒以上かかります。
+
+`offline_web_proxy_access_token_e2e_test.dart` は、`requireAccessToken` を有効にした proxy を WebView から使う手順を確かめます。秘密値の Cookie は Android の `CookieManager` で HttpOnly として置きます。最後のテストは `OWP_E2E_EXTERNAL_PROBE_PORT=<ポート>` を出力してから 40 秒待ちます。その間に `adb shell` の `nc` など別プロセスから稼働確認以外のパス（`/page` など）へ要求を送ると、`403` になり上流へ届かないことを確かめられます。要求はテストの外から手動で送ります（送らなくてもテストは通ります）。このテストは HttpOnly を指定するため `webview_flutter_android` の `src/` 配下を直接読み込んでおり、プラグインの更新で動かなくなることがあります。
 
 ## リリース手順
 

@@ -301,8 +301,69 @@ class ProxyConfig {
   /// own are refused, and the server binds to loopback only, but neither
   /// protects against a script already running on the page.
   ///
+  /// A request without an `Origin` header is allowed, so another app or
+  /// process on the same device can reach the endpoints over loopback. Enable
+  /// [requireAccessToken] together with this to refuse such requests.
+  ///
   /// **Default**: `false` (production safe)
   final bool enableAdminApi;
+
+  /// Refuse every request that does not carry the proxy's access token.
+  ///
+  /// The proxy listens on loopback, but it cannot tell which process a request
+  /// came from. Without this, another app on the device, or a page in a
+  /// browser, can send requests that the proxy forwards upstream with the
+  /// sessions held in its Cookie Jar, and can reach the status and admin
+  /// endpoints.
+  ///
+  /// When enabled, the proxy answers `403` to any request that has neither a
+  /// cookie named [OfflineWebProxy.accessTokenCookieName] nor a header named
+  /// [OfflineWebProxy.accessTokenHeaderName] whose value equals
+  /// [OfflineWebProxy.accessToken]. The check covers forwarded requests,
+  /// bundled static assets, the mirrored-origin path, the WebStorage bridge
+  /// and the status and admin endpoints. Only `GET` / `HEAD` on
+  /// [healthCheckPath] is exempt, because it returns no information and
+  /// [OfflineWebProxy.probe] relies on it. Requests the proxy sends by itself,
+  /// such as [OfflineWebProxy.warmupCache], are not affected.
+  ///
+  /// The token changes on every [OfflineWebProxy.start] and is never returned
+  /// over HTTP. Before the WebView loads the first page, put it as an
+  /// **HttpOnly** cookie on the proxy origin ([OfflineWebProxy.baseUri]) with
+  /// the platform cookie manager (for example `CookieManager.setCookie` of
+  /// `flutter_inappwebview`). Consider `SameSite=Strict` so that the cookie is
+  /// not sent when a page on another site navigates to the proxy. Note that
+  /// `Strict` also withholds the cookie on a navigation back from another
+  /// site, such as the redirect or `form_post` of an external login, which
+  /// then gets `403`; `Lax` still withholds it on a cross-site `POST`. Use a
+  /// setting that fits the flows the pages rely on.
+  ///
+  /// A cookie is kept per host, so `127.0.0.1` and `localhost` need a cookie
+  /// each if the WebView uses both. A cookie does not distinguish ports, so
+  /// the WebView also sends the token to any other server on the same host.
+  ///
+  /// A request that does not send cookies, such as `fetch` with
+  /// `credentials: "omit"`, is refused unless it carries the header.
+  ///
+  /// Whether or not this is enabled, the proxy removes the token cookie and
+  /// header before forwarding a request or storing it in the queue, and drops
+  /// a `Set-Cookie` of the same name from responses so that the upstream
+  /// cannot overwrite the token in the WebView.
+  ///
+  /// **Default**: `false`
+  final bool requireAccessToken;
+
+  /// Add `Access-Control-Allow-*` headers to responses other than the internal
+  /// endpoints.
+  ///
+  /// When `true`, the proxy adds `Access-Control-Allow-Origin: *` to every
+  /// response except the internal endpoints, which lets a page on another
+  /// origin read the response. Pages in the WebView are served from the proxy
+  /// origin and do not need these headers, so set this to `false` unless a
+  /// page on another origin must read the proxy. Headers returned by the
+  /// upstream itself are passed through either way.
+  ///
+  /// **Default**: `true`
+  final bool addCorsHeaders;
 
   /// Enable a lightweight WebStorage inheritance bridge for WebView pages.
   ///
@@ -721,6 +782,8 @@ class ProxyConfig {
     this.requestTimeout = const Duration(seconds: 20),
     this.retryBackoffSeconds = const [1, 2, 5, 10, 20, 30],
     this.enableAdminApi = false,
+    this.requireAccessToken = false,
+    this.addCorsHeaders = true,
     this.enableWebStorageInheritance = false,
     this.logLevel = 'info',
     this.startupPaths = const [],
