@@ -1108,6 +1108,21 @@ flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.d
 <p>Find the device ID with <code>flutter devices</code>.</p>
 <p><code>offline_web_proxy_storage_e2e_test.dart</code> deletes the cookie, queue, quarantine, and dropped-request boxes (including the legacy plain boxes) and the encryption key of the example app before each test. The first test waits for the migration delay of the legacy plain queue (30 seconds), so it takes more than 30 seconds.</p>
 <p><code>offline_web_proxy_access_token_e2e_test.dart</code> checks the steps for using a proxy with <code>requireAccessToken</code> from the WebView. The secret cookie is put as HttpOnly with Android's <code>CookieManager</code>. The last test prints <code>OWP_E2E_EXTERNAL_PROBE_PORT=&lt;port&gt;</code> and then waits 40 seconds. During that window you can send requests from another process, such as <code>nc</code> in <code>adb shell</code>, to a path other than the health check (<code>/page</code>, for example) and confirm that they get <code>403</code> and never reach the upstream. The requests are sent by hand from outside the test (the test passes without them). To set HttpOnly, the test imports a file under <code>src/</code> of <code>webview_flutter_android</code> directly, so a plugin update may break it.</p>
+<h3 id="dependency-updates">Dependency updates</h3>
+<p>Dependabot (<code>.github/dependabot.yml</code>) opens pull requests every Monday at 10:00 (UTC) for the pub dependencies of the package and <code>example/</code>, and for GitHub Actions.</p>
+<ul>
+<li>Minor and patch pub updates are grouped into one pull request each for the package and <code>example/</code>. A major update gets its own pull request per dependency. GitHub Actions updates, majors included, are grouped into one pull request</li>
+<li>The usual CI (tests on Flutter 3.22.0 / 3.24.0, static analysis, package validation) runs on each pull request. Merge only those that pass</li>
+<li>Known vulnerabilities are detected by Dependabot alerts, enabled in the repository settings, and Dependabot security updates open pull requests that fix them</li>
+<li>The e2e tests of <code>example/</code> (<code>integration_test/</code>) do not run in CI. When a pull request for <code>example/</code> updates the WebView packages (such as <code>webview_flutter</code>), run the e2e tests on an emulator before merging (see "Example e2e tests")</li>
+<li>The following updates are excluded from Dependabot and are done by hand
+<ul>
+<li>Majors of <code>flutter_secure_storage</code>: it holds the encryption key, so raise it after checking that the stored format stays compatible</li>
+<li>Majors of dependencies shared by the package and <code>example/</code> (<code>flutter_secure_storage</code>, <code>hive_flutter</code>, <code>http</code>, <code>flutter_lints</code>): raising only one side breaks the resolution of <code>example/</code>, so raise <code>pubspec.yaml</code> and <code>example/pubspec.yaml</code> to the same version in one pull request</li>
+<li>Versions that do not work on Flutter 3.22.0 (Dart 3.4) (<code>flutter_lints</code> 5 and later, <code>webview_flutter</code> 4.10.0 and later): revisit them together with the ignore rules in <code>.github/dependabot.yml</code> when the minimum supported Flutter is raised</li>
+</ul>
+</li>
+</ul>
 <h2 id="release-process">Release Process</h2>
 <ul>
 <li>Update <code>pubspec.yaml</code> and <code>CHANGELOG.md</code> first, then commit those changes to <code>main</code>.</li>
