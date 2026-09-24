@@ -106,6 +106,8 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 <h2 id="-3">セキュリティ</h2>
 <ul>
 <li>サーバは <code>127.0.0.1</code> のみにバインド（外部アクセス不可）</li>
+<li>端末内の別アプリからの要求は、<a href="../offline_web_proxy/ProxyConfig/requireAccessToken.html">ProxyConfig.requireAccessToken</a> と
+<a href="../offline_web_proxy/OfflineWebProxy/accessToken.html">accessToken</a> で拒否できる</li>
 <li>Cookieは永続化前にAES-256で暗号化</li>
 <li>機密ヘッダはログ内でマスク</li>
 <li>静的アセットに対するパストラバーサル攻撃を防止</li>
@@ -145,6 +147,18 @@ mutexロックを使用してシリアライズされ、データの一貫性が
       id="instance-properties">
     <h2>Properties</h2>
     <dl class="properties">
+        <dt id="accessToken" class="property">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/accessToken.html">accessToken</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span>
+  
+
+</dt>
+<dd>
+  proxy へ到達できる要求を WebView に限るための秘密値を取得します。
+  <div class="features"><span class="feature">no setter</span></div>
+
+</dd>
+
         <dt id="baseUri" class="property">
   <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/baseUri.html">baseUri</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Uri-class.html">Uri</a>?</span>
@@ -706,6 +720,36 @@ mutexロックを使用してシリアライズされ、データの一貫性が
     
     
 
+  <section class="summary offset-anchor" id="constants">
+    <h2>Constants</h2>
+
+    <dl class="properties">
+        <dt id="accessTokenCookieName" class="constant">
+    <span class="name "><a href="../offline_web_proxy/OfflineWebProxy/accessTokenCookieName-constant.html">accessTokenCookieName</a></span>
+  <span class="signature">&#8594; const <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+  
+
+</dt>
+<dd>
+  <a href="../offline_web_proxy/OfflineWebProxy/accessToken.html">accessToken</a> を WebView から受け取る Cookie の名前。
+  
+
+</dd>
+
+        <dt id="accessTokenHeaderName" class="constant">
+    <span class="name "><a href="../offline_web_proxy/OfflineWebProxy/accessTokenHeaderName-constant.html">accessTokenHeaderName</a></span>
+  <span class="signature">&#8594; const <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+  
+
+</dt>
+<dd>
+  <a href="../offline_web_proxy/OfflineWebProxy/accessToken.html">accessToken</a> を受け取るリクエストヘッダの名前。
+  
+
+</dd>
+
+    </dl>
+  </section>
 
   </div> <!-- /.main-content -->
 

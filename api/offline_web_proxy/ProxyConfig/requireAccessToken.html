@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the enableAdminApi property from the ProxyConfig class, for the Dart programming language.">
-  <title>enableAdminApi property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the requireAccessToken property from the ProxyConfig class, for the Dart programming language.">
+  <title>requireAccessToken property - ProxyConfig class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -31,9 +31,9 @@
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
     <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">enableAdminApi property</li>
+    <li class="self-crumb">requireAccessToken property</li>
   </ol>
-  <div class="self-name">enableAdminApi</div>
+  <div class="self-name">requireAccessToken</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -57,65 +57,59 @@
     data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">enableAdminApi</span> property 
+<h1><span class="kind-property">requireAccessToken</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
         <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a>
-        <span class="name ">enableAdminApi</span>
+        <span class="name ">requireAccessToken</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>Enable the administrative endpoints under <code>/__offline_web_proxy/admin</code>.</p>
-<p>A quarantined request is usually resolved by a person standing at the
-screen — a shop assistant who closed a stocktake and now wants the sale
-to go through. These endpoints let that screen list, resend and discard
-quarantined requests without a native bridge.</p>
-<table>
-<thead>
-<tr>
-<th>Method</th>
-<th>Path</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>GET</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine</code></td>
-<td>List quarantined requests</td>
-</tr>
-<tr>
-<td><code>POST</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine/&lt;id&gt;/retry</code></td>
-<td>Put one back on the queue</td>
-</tr>
-<tr>
-<td><code>DELETE</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine/&lt;id&gt;</code></td>
-<td>Discard one</td>
-</tr>
-</tbody>
-</table>
-<p><strong>Security Warning</strong>: The endpoints are reachable from every script
-running on the proxy origin, and discarding a request destroys business
-data. Do not enable this while the page still loads scripts from a third
-party such as a CDN. Requests carrying an <code>Origin</code> other than the proxy's
-own are refused, and the server binds to loopback only, but neither
-protects against a script already running on the page.</p>
-<p>A request without an <code>Origin</code> header is allowed, so another app or
-process on the same device can reach the endpoints over loopback. Enable
-<a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">requireAccessToken</a> together with this to refuse such requests.</p>
-<p><strong>Default</strong>: <code>false</code> (production safe)</p>
+  <p>Refuse every request that does not carry the proxy's access token.</p>
+<p>The proxy listens on loopback, but it cannot tell which process a request
+came from. Without this, another app on the device, or a page in a
+browser, can send requests that the proxy forwards upstream with the
+sessions held in its Cookie Jar, and can reach the status and admin
+endpoints.</p>
+<p>When enabled, the proxy answers <code>403</code> to any request that has neither a
+cookie named <a href="../../offline_web_proxy/OfflineWebProxy/accessTokenCookieName-constant.html">OfflineWebProxy.accessTokenCookieName</a> nor a header named
+<a href="../../offline_web_proxy/OfflineWebProxy/accessTokenHeaderName-constant.html">OfflineWebProxy.accessTokenHeaderName</a> whose value equals
+<a href="../../offline_web_proxy/OfflineWebProxy/accessToken.html">OfflineWebProxy.accessToken</a>. The check covers forwarded requests,
+bundled static assets, the mirrored-origin path, the WebStorage bridge
+and the status and admin endpoints. Only <code>GET</code> / <code>HEAD</code> on
+<a href="../../offline_web_proxy/ProxyConfig/healthCheckPath.html">healthCheckPath</a> is exempt, because it returns no information and
+<a href="../../offline_web_proxy/OfflineWebProxy/probe.html">OfflineWebProxy.probe</a> relies on it. Requests the proxy sends by itself,
+such as <a href="../../offline_web_proxy/OfflineWebProxy/warmupCache.html">OfflineWebProxy.warmupCache</a>, are not affected.</p>
+<p>The token changes on every <a href="../../offline_web_proxy/OfflineWebProxy/start.html">OfflineWebProxy.start</a> and is never returned
+over HTTP. Before the WebView loads the first page, put it as an
+<strong>HttpOnly</strong> cookie on the proxy origin (<a href="../../offline_web_proxy/OfflineWebProxy/baseUri.html">OfflineWebProxy.baseUri</a>) with
+the platform cookie manager (for example <code>CookieManager.setCookie</code> of
+<code>flutter_inappwebview</code>). Consider <code>SameSite=Strict</code> so that the cookie is
+not sent when a page on another site navigates to the proxy. Note that
+<code>Strict</code> also withholds the cookie on a navigation back from another
+site, such as the redirect or <code>form_post</code> of an external login, which
+then gets <code>403</code>; <code>Lax</code> still withholds it on a cross-site <code>POST</code>. Use a
+setting that fits the flows the pages rely on.</p>
+<p>A cookie is kept per host, so <code>127.0.0.1</code> and <code>localhost</code> need a cookie
+each if the WebView uses both. A cookie does not distinguish ports, so
+the WebView also sends the token to any other server on the same host.</p>
+<p>A request that does not send cookies, such as <code>fetch</code> with
+<code>credentials: "omit"</code>, is refused unless it carries the header.</p>
+<p>Whether or not this is enabled, the proxy removes the token cookie and
+header before forwarding a request or storing it in the queue, and drops
+a <code>Set-Cookie</code> of the same name from responses so that the upstream
+cannot overwrite the token in the WebView.</p>
+<p><strong>Default</strong>: <code>false</code></p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final bool enableAdminApi;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final bool requireAccessToken;</code></pre>
 </section>
 
 
@@ -133,7 +127,7 @@ process on the same device can reach the endpoints over loopback. Enable
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">enableAdminApi property</li>
+    <li class="self-crumb">requireAccessToken property</li>
 </ol>
 
 

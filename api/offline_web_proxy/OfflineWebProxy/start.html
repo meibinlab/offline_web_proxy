@@ -147,11 +147,16 @@
     _startConnectivityMonitoring();
     await _initializeOnlineState();
 
+    &#47;&#47; 起動ごとの秘密値。再バインドでは作り直さない
+    _accessToken = _generateAccessToken();
+
     &#47;&#47; ルーターとミドルウェアを作成し、再バインドで再利用できるよう保持する
     final router = _createRouter();
     final handler = const shelf.Pipeline()
         .addMiddleware(_errorHandlingMiddleware)
+        .addMiddleware(_leadingSlashNormalizationMiddleware)
         .addMiddleware(_requestLoggingMiddleware())
+        .addMiddleware(_accessTokenMiddleware)
         .addMiddleware(_corsMiddleware)
         .addMiddleware(_statisticsMiddleware)
         .addHandler(router.call);
@@ -187,6 +192,7 @@
     _isStarting = false;
     if (!_isRunning) {
       _activeInstances.remove(this);
+      _accessToken = null;
     }
   }
 }</code></pre>

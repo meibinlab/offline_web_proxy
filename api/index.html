@@ -70,6 +70,7 @@
 <li>Verification of stored data against the encryption key, and a recovery API for a lost key</li>
 <li>Retention limits for the quarantine store and the dropped history (count, age and total size)</li>
 <li>WebView navigation helper APIs for same-origin, external, and new-window flows</li>
+<li>Option to limit access to the proxy to the WebView with a per-start secret (<code>requireAccessToken</code>)</li>
 <li>Connection recovery that verifies responsiveness on resume and rebinds automatically</li>
 <li>Runtime stats and event stream for monitoring and debugging</li>
 </ul>
@@ -254,6 +255,8 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
   ),
   retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
   enableAdminApi: false,
+  requireAccessToken: false,
+  addCorsHeaders: true,
   logLevel: 'info',
   startupPaths: ['/app/config'],
   preferredPort: 8787,
@@ -290,6 +293,8 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>healthCheckPath</code> is reserved for responsiveness checks. Requests to it are never forwarded upstream and are excluded from statistics, and <code>GET</code> and <code>HEAD</code> requests to it are omitted from the request log. Change it when it collides with a route of your web application.</li>
 <li><code>statusPath</code> returns the proxy state as JSON. It gets the same treatment as <code>healthCheckPath</code> — never forwarded, never counted, and <code>GET</code> requests omitted from the request log. An empty string disables it, which also stops the auto-reload of the fallback and <code>504</code> pages.</li>
 <li><code>enableAdminApi</code> set to <code>true</code> exposes listing, resending and discarding of quarantined requests over HTTP. Disabled by default.</li>
+<li><code>requireAccessToken</code> set to <code>true</code> refuses, with <code>403</code>, every request that lacks the per-start secret (<code>accessToken</code>). Disabled by default. See "Keeping Other Apps Away from the Proxy".</li>
+<li><code>addCorsHeaders</code> set to <code>false</code> stops adding CORS headers such as <code>Access-Control-Allow-Origin: *</code> to responses other than the internal endpoints. The default is <code>true</code> (added as before). Pages in the WebView share the proxy origin, so <code>false</code> is recommended unless a page on another origin has to read the responses.</li>
 <li>Setting <code>healthCheckInterval</code> above zero enables a periodic check. It is disabled by default because the resume-triggered check performed by <code>ProxyLifecycleGuard</code> is the primary path.</li>
 <li><code>offlineFallbackHtml</code> and <code>gatewayTimeoutHtml</code> replace the built-in offline and timeout response bodies with wording supplied by your app.
 <ul>
@@ -552,6 +557,7 @@ if (!status.isOnline) {
 <ul>
 <li><code>GET</code> only, never forwarded upstream, excluded from statistics, and omitted from the request log.</li>
 <li>Only callers on the proxy's own origin are served. A request carrying another <code>Origin</code> is answered with <code>403</code>, and <code>Access-Control-Allow-Origin: *</code> is never attached.</li>
+<li>A request without an <code>Origin</code> is allowed, so other apps on the device can reach it too. To limit it to the WebView, enable <code>requireAccessToken</code> as well ("Keeping Other Apps Away from the Proxy").</li>
 <li>Setting <code>statusPath</code> to an empty string disables it, which also stops the auto-reload of the fallback and <code>504</code> pages.</li>
 <li><code>queueLength</code>, <code>quarantinedCount</code> and <code>unacknowledgedDroppedCount</code> include entries still waiting for migration from the storage of 0.14.0 or earlier (see <a href="#migrating-from-0140-or-earlier">Migrating from 0.14.0 or earlier</a>).</li>
 </ul>
@@ -605,7 +611,42 @@ for (const request of requests) {
   });
 }
 </code></pre>
-<p><strong>Warning</strong>: Disabled by default. Same-origin also means <em>every script running on the page</em>. Enabling it while the page still loads third-party scripts from a CDN would let such a script reach as far as discarding a quarantined request. Move those files under <code>assets/static/</code> first.</p>
+<p><strong>Warning</strong>: Disabled by default. Same-origin also means <em>every script running on the page</em>. Enabling it while the page still loads third-party scripts from a CDN would let such a script reach as far as discarding a quarantined request. Move those files under <code>assets/static/</code> first. A request without an <code>Origin</code> is also allowed, so other apps on the device can reach the endpoints. Enable <code>requireAccessToken</code> as well ("Keeping Other Apps Away from the Proxy").</p>
+<h2 id="keeping-other-apps-away-from-the-proxy">Keeping Other Apps Away from the Proxy</h2>
+<p>The proxy listens on loopback, but it cannot tell which process a request came from. By default, other apps and browser pages on the device can send requests to the proxy, and on the forwarding path those requests go upstream with the authenticated sessions in the proxy's Cookie Jar. On a device where users may install other apps, use <code>requireAccessToken</code> to accept requests from the WebView only.</p>
+<pre class="language-dart"><code class="language-dart">import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:offline_web_proxy/offline_web_proxy.dart';
+
+final proxy = OfflineWebProxy();
+await proxy.start(
+  config: const ProxyConfig(
+    origin: 'https://api.example.com',
+    // Refuse requests without the secret with 403
+    requireAccessToken: true,
+    // Pages in the WebView share the proxy origin and need no CORS headers
+    addCorsHeaders: false,
+  ),
+);
+
+// Put it as an HttpOnly cookie before the WebView loads its first page
+await CookieManager.instance().setCookie(
+  url: WebUri(proxy.baseUri!.toString()),
+  name: OfflineWebProxy.accessTokenCookieName,
+  value: proxy.accessToken!,
+  isHttpOnly: true,
+);
+</code></pre>
+<ul>
+<li><code>accessToken</code> changes on every <code>start()</code> and is never returned over HTTP. After calling <code>start()</code> again, put the new value before loading. A rebind by automatic recovery keeps it.</li>
+<li><code>WebViewCookieManager</code> of <code>webview_flutter</code> cannot set HttpOnly. Use a platform cookie manager that can (Android's <code>CookieManager</code>, for example) or <code>flutter_inappwebview</code>.</li>
+<li>Calls that can set headers, such as <code>fetch</code>, may send the value in <code>X-Offline-Web-Proxy-Token</code> (<code>OfflineWebProxy.accessTokenHeaderName</code>) instead.</li>
+<li>Only <code>GET</code> / <code>HEAD</code> on <code>healthCheckPath</code> is exempt. The forwarding path, bundled assets, the mirrored-origin path, the status endpoint, the administrative endpoints and the WebStorage bridge are all covered.</li>
+<li>Cookies are kept per host and do not distinguish ports. If you use both <code>127.0.0.1</code> and <code>localhost</code>, put one on each. The secret is also sent to any other server on the same host.</li>
+<li>With <code>SameSite=Strict</code>, the cookie is not sent when a page on another site navigates to the proxy, but a navigation back from an external login then gets <code>403</code> too.</li>
+<li>A <code>fetch</code> with <code>credentials: "omit"</code> sends no cookies and gets <code>403</code>. Use <code>same-origin</code> (the default).</li>
+<li>Whatever the setting, the secret cookie and header are never forwarded upstream or stored in the queue, and a <code>Set-Cookie</code> of the same name from the upstream is not passed to the WebView.</li>
+<li>Scripts running in the WebView reach the proxy as same-origin requests that carry the secret. This does not protect against third-party scripts.</li>
+</ul>
 <h2 id="cookie-apis">Cookie APIs</h2>
 <p>Cookies are persisted in encrypted storage and can be restored before the proxy starts.</p>
 <pre class="language-dart"><code class="language-dart">await proxy.restoreCookies([
@@ -1066,6 +1107,7 @@ flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.d
 </code></pre>
 <p>Find the device ID with <code>flutter devices</code>.</p>
 <p><code>offline_web_proxy_storage_e2e_test.dart</code> deletes the cookie, queue, quarantine, and dropped-request boxes (including the legacy plain boxes) and the encryption key of the example app before each test. The first test waits for the migration delay of the legacy plain queue (30 seconds), so it takes more than 30 seconds.</p>
+<p><code>offline_web_proxy_access_token_e2e_test.dart</code> checks the steps for using a proxy with <code>requireAccessToken</code> from the WebView. The secret cookie is put as HttpOnly with Android's <code>CookieManager</code>. The last test prints <code>OWP_E2E_EXTERNAL_PROBE_PORT=&lt;port&gt;</code> and then waits 40 seconds. During that window you can send requests from another process, such as <code>nc</code> in <code>adb shell</code>, to a path other than the health check (<code>/page</code>, for example) and confirm that they get <code>403</code> and never reach the upstream. The requests are sent by hand from outside the test (the test passes without them). To set HttpOnly, the test imports a file under <code>src/</code> of <code>webview_flutter_android</code> directly, so a plugin update may break it.</p>
 <h2 id="release-process">Release Process</h2>
 <ul>
 <li>Update <code>pubspec.yaml</code> and <code>CHANGELOG.md</code> first, then commit those changes to <code>main</code>.</li>

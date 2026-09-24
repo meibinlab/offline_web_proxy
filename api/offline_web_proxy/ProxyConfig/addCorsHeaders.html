@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the enableAdminApi property from the ProxyConfig class, for the Dart programming language.">
-  <title>enableAdminApi property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the addCorsHeaders property from the ProxyConfig class, for the Dart programming language.">
+  <title>addCorsHeaders property - ProxyConfig class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -31,9 +31,9 @@
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
     <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">enableAdminApi property</li>
+    <li class="self-crumb">addCorsHeaders property</li>
   </ol>
-  <div class="self-name">enableAdminApi</div>
+  <div class="self-name">addCorsHeaders</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -57,65 +57,33 @@
     data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">enableAdminApi</span> property 
+<h1><span class="kind-property">addCorsHeaders</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
         <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a>
-        <span class="name ">enableAdminApi</span>
+        <span class="name ">addCorsHeaders</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>Enable the administrative endpoints under <code>/__offline_web_proxy/admin</code>.</p>
-<p>A quarantined request is usually resolved by a person standing at the
-screen — a shop assistant who closed a stocktake and now wants the sale
-to go through. These endpoints let that screen list, resend and discard
-quarantined requests without a native bridge.</p>
-<table>
-<thead>
-<tr>
-<th>Method</th>
-<th>Path</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>GET</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine</code></td>
-<td>List quarantined requests</td>
-</tr>
-<tr>
-<td><code>POST</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine/&lt;id&gt;/retry</code></td>
-<td>Put one back on the queue</td>
-</tr>
-<tr>
-<td><code>DELETE</code></td>
-<td><code>/__offline_web_proxy/admin/quarantine/&lt;id&gt;</code></td>
-<td>Discard one</td>
-</tr>
-</tbody>
-</table>
-<p><strong>Security Warning</strong>: The endpoints are reachable from every script
-running on the proxy origin, and discarding a request destroys business
-data. Do not enable this while the page still loads scripts from a third
-party such as a CDN. Requests carrying an <code>Origin</code> other than the proxy's
-own are refused, and the server binds to loopback only, but neither
-protects against a script already running on the page.</p>
-<p>A request without an <code>Origin</code> header is allowed, so another app or
-process on the same device can reach the endpoints over loopback. Enable
-<a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">requireAccessToken</a> together with this to refuse such requests.</p>
-<p><strong>Default</strong>: <code>false</code> (production safe)</p>
+  <p>Add <code>Access-Control-Allow-*</code> headers to responses other than the internal
+endpoints.</p>
+<p>When <code>true</code>, the proxy adds <code>Access-Control-Allow-Origin: *</code> to every
+response except the internal endpoints, which lets a page on another
+origin read the response. Pages in the WebView are served from the proxy
+origin and do not need these headers, so set this to <code>false</code> unless a
+page on another origin must read the proxy. Headers returned by the
+upstream itself are passed through either way.</p>
+<p><strong>Default</strong>: <code>true</code></p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final bool enableAdminApi;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final bool addCorsHeaders;</code></pre>
 </section>
 
 
@@ -133,7 +101,7 @@ process on the same device can reach the endpoints over loopback. Enable
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">enableAdminApi property</li>
+    <li class="self-crumb">addCorsHeaders property</li>
 </ol>
 
 
