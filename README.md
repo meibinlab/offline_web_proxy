@@ -960,6 +960,19 @@ Find the device ID with `flutter devices`.
 
 `offline_web_proxy_access_token_e2e_test.dart` checks the steps for using a proxy with `requireAccessToken` from the WebView. The secret cookie is put as HttpOnly with Android's `CookieManager`. The last test prints `OWP_E2E_EXTERNAL_PROBE_PORT=<port>` and then waits 40 seconds. During that window you can send requests from another process, such as `nc` in `adb shell`, to a path other than the health check (`/page`, for example) and confirm that they get `403` and never reach the upstream. The requests are sent by hand from outside the test (the test passes without them). To set HttpOnly, the test imports a file under `src/` of `webview_flutter_android` directly, so a plugin update may break it.
 
+### Dependency updates
+
+Dependabot (`.github/dependabot.yml`) opens pull requests every Monday at 10:00 (UTC) for the pub dependencies of the package and `example/`, and for GitHub Actions.
+
+- Minor and patch pub updates are grouped into one pull request each for the package and `example/`. A major update gets its own pull request per dependency. GitHub Actions updates, majors included, are grouped into one pull request
+- The usual CI (tests on Flutter 3.22.0 / 3.24.0, static analysis, package validation) runs on each pull request. Merge only those that pass
+- Known vulnerabilities are detected by Dependabot alerts, enabled in the repository settings, and Dependabot security updates open pull requests that fix them
+- The e2e tests of `example/` (`integration_test/`) do not run in CI. When a pull request for `example/` updates the WebView packages (such as `webview_flutter`), run the e2e tests on an emulator before merging (see "Example e2e tests")
+- The following updates are excluded from Dependabot and are done by hand
+  - Majors of `flutter_secure_storage`: it holds the encryption key, so raise it after checking that the stored format stays compatible
+  - Majors of dependencies shared by the package and `example/` (`flutter_secure_storage`, `hive_flutter`, `http`, `flutter_lints`): raising only one side breaks the resolution of `example/`, so raise `pubspec.yaml` and `example/pubspec.yaml` to the same version in one pull request
+  - Versions that do not work on Flutter 3.22.0 (Dart 3.4) (`flutter_lints` 5 and later, `webview_flutter` 4.10.0 and later): revisit them together with the ignore rules in `.github/dependabot.yml` when the minimum supported Flutter is raised
+
 ## Release Process
 
 - Update `pubspec.yaml` and `CHANGELOG.md` first, then commit those changes to `main`.
