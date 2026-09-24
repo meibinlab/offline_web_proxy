@@ -960,6 +960,19 @@ flutter test integration_test/offline_web_proxy_offline_page_recovery_e2e_test.d
 
 `offline_web_proxy_access_token_e2e_test.dart` は、`requireAccessToken` を有効にした proxy を WebView から使う手順を確かめます。秘密値の Cookie は Android の `CookieManager` で HttpOnly として置きます。最後のテストは `OWP_E2E_EXTERNAL_PROBE_PORT=<ポート>` を出力してから 40 秒待ちます。その間に `adb shell` の `nc` など別プロセスから稼働確認以外のパス（`/page` など）へ要求を送ると、`403` になり上流へ届かないことを確かめられます。要求はテストの外から手動で送ります（送らなくてもテストは通ります）。このテストは HttpOnly を指定するため `webview_flutter_android` の `src/` 配下を直接読み込んでおり、プラグインの更新で動かなくなることがあります。
 
+### 依存関係の更新
+
+依存関係の更新は Dependabot（`.github/dependabot.yml`）が毎週月曜 10:00（UTC）に PR を作ります。対象はパッケージ本体と `example/` の pub、GitHub Actions です。
+
+- pub の minor / patch の更新は、本体と `example/` でそれぞれ 1 本の PR にまとめます。major の更新は依存ごとに個別の PR になります。GitHub Actions は major も含めて 1 本の PR にまとめます
+- PR には通常の CI（Flutter 3.22.0 / 3.24.0 のテスト、静的解析、パッケージ検証）が走ります。通ったものだけを取り込みます
+- 既知の脆弱性は、リポジトリ設定で有効にした Dependabot alerts が検知し、Dependabot のセキュリティ更新が修正の PR を作ります
+- `example/` の e2e（`integration_test/`）は CI で走りません。`example/` の PR で WebView 系（`webview_flutter` など）が更新された場合は、取り込む前にエミュレータで e2e を実行します（「example の e2e」）
+- 次の更新は Dependabot の対象外です。手動で上げます
+  - `flutter_secure_storage` の major: 暗号化鍵を保存しているため、保存形式の互換性を確かめてから上げます
+  - 本体と `example/` で共通の依存（`flutter_secure_storage`、`hive_flutter`、`http`、`flutter_lints`）の major: 片方だけ上がると `example/` の依存解決に失敗するため、`pubspec.yaml` と `example/pubspec.yaml` を同じ PR で同じ版に上げます
+  - Flutter 3.22.0（Dart 3.4）で使えない版（`flutter_lints` 5 以降、`webview_flutter` 4.10.0 以降）: サポートする最低 Flutter を上げるときに、`.github/dependabot.yml` の ignore とあわせて見直します
+
 ## リリース手順
 
 - 先に `pubspec.yaml` と `CHANGELOG.md` を更新し、その変更を `main` へコミットします。

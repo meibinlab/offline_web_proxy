@@ -1,0 +1,94 @@
+# 依存関係の更新 PR を Dependabot で作る。
+# 作られた PR には通常の CI（ci.yml）が走るため、テストと静的解析を通ったものだけを取り込む。
+# 実行は毎週月曜 10:00（UTC）。
+#
+# ignore の方針:
+# - flutter_secure_storage の major: 暗号化鍵を保存しているため、保存形式の互換性を
+#   確かめてから手動で上げる
+# - 本体と example で共通の依存（flutter_secure_storage、hive_flutter、http、
+#   flutter_lints）の major: 片方だけ上がると example の依存解決に失敗するため、
+#   両方を同時に手動で上げる
+# - Flutter 3.22.0（Dart 3.4）で使えない版: サポートする最低 Flutter を上げるまでの措置。
+#   flutter_lints 5 以降と webview_flutter 4.10.0 以降は Dart 3.5 以上が必要
+version: 2
+updates:
+  # パッケージ本体の依存
+  - package-ecosystem: "pub"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+    groups:
+      # minor / patch はまとめて 1 本の PR にする
+      pub-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "flutter_secure_storage"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "hive_flutter"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "http"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "flutter_lints"
+        update-types:
+          - "version-update:semver-major"
+
+  # example アプリの依存
+  - package-ecosystem: "pub"
+    directory: "/example"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+    groups:
+      example-pub-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "flutter_secure_storage"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "hive_flutter"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "http"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "flutter_lints"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "webview_flutter"
+        versions:
+          - ">=4.10.0"
+
+  # GitHub Actions のバージョン（major も含めて 1 本の PR にまとめる）
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
