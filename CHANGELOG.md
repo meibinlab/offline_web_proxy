@@ -1,3 +1,31 @@
+## Unreleased
+
+### 機能追加
+
+- **`ProxyConfig.requireAccessToken` で、proxy への到達を WebView に限れるようにした**: proxy はループバックで待ち受けますが、要求がどのプロセスから来たかを区別しないため、端末内の別アプリが利用側アプリの認証セッション（Cookie Jar）で上流の API を呼べ、`Origin` の無い要求は管理エンドポイントへも届きました
+  - `start()` のたびに秘密値を生成し、`OfflineWebProxy.accessToken` で返します（HTTP では返しません）。有効にすると、Cookie `__offline_web_proxy_token`（`OfflineWebProxy.accessTokenCookieName`）かヘッダ `X-Offline-Web-Proxy-Token`（`OfflineWebProxy.accessTokenHeaderName`）に正しい値を持たない要求を `403` で拒否します
+  - 対象は転送経路、同梱アセット、別 origin の中継、WebStorage の橋渡し、状態通知、管理エンドポイントです。`GET` / `HEAD` の `healthCheckPath` だけは対象外です
+  - 既定は `false` で、従来の挙動は変わりません。有効にした場合は、WebView の読み込み前に、ネイティブの Cookie 管理で proxy の origin へ HttpOnly の Cookie を置く必要があります。内部エンドポイントを `credentials: "omit"` で呼んでいるページは、`same-origin` へ改める必要があります
+  - 秘密値の Cookie とヘッダは、設定にかかわらず上流へ転送せず、キューにも保存しません。上流が同じ名前の `Set-Cookie` を返しても WebView へは返しません
+- **`ProxyConfig.addCorsHeaders` で、内部エンドポイント以外の応答へ CORS ヘッダを付けないようにできるようにした**: これまでは内部エンドポイントを除くすべての応答へ `Access-Control-Allow-Origin: *` を付けていたため、ブラウザ上の別 origin のページも proxy 経由の応答を読めました。既定は `true` で従来どおりです
+
+### 修正
+
+- **上流が返した複数の `Set-Cookie` が、先頭の 1 件しか WebView に効いていなかった**: 上流の応答ヘッダを 1 行へ平坦化する際に `Set-Cookie` を `, ` で連結して返していたため、ブラウザは先頭の Cookie しか受け取っていませんでした。上流から受け取った応答では 1 件ずつ別の行で返します。CORS ヘッダの付与や本文の書き換えでも行を連結しません
+- **キャッシュから返す応答で、保存時の `Set-Cookie` を返さないようにした**: これまではキャッシュした時点の `Set-Cookie` をそのまま返しており、その後に上流が更新したセッションなどを古い値で上書きするおそれがありました。Cookie Jar には上流から受け取った時点で保存済みです
+  - **既存の利用者への影響**: オフライン時などにキャッシュから返したページでは、WebView の Cookie が設定されなくなります
+- **上流へ転送する要求の一部が、内部エンドポイントとして統計・CORS・要求ログから外れていた**: `POST` の状態通知や、登録していない管理のパスやメソッドは、ルーターでは転送経路として上流へ送る一方、統計・CORS ヘッダ・要求ログの判定では内部エンドポイントとして扱っていました。判定をルーターの登録（メソッドとパスの一致）にそろえました
+- **パス先頭の `/` を重ねると、内部エンドポイント宛ての要求が上流へ転送されていた**: ルーターは `//__offline_web_proxy/status` を `/__offline_web_proxy/status` と別のパスとして照合する一方、転送の処理は先頭の `/` を 1 つ落として扱うため、状態通知・管理 API・稼働確認宛ての要求が `/__offline_web_proxy/...` として Cookie Jar のセッション付きで上流へ送られていました。ルーターより前で先頭の `/` の重複を 1 つにまとめるようにしました
+
+### ドキュメント
+
+- `enableAdminApi` の注意書きに、`Origin` の無い要求を許可するため端末内の別アプリからも到達できることを追記しました
+
+### テスト
+
+- `test/access_token_test.dart` を追加しました。秘密値の生成・再起動での更新・起動失敗時の破棄、各経路での拒否と許可、稼働確認だけを除外すること（末尾 `/` を付けたパスは除外しないこと）、上流・中継先・キューへの秘密値の非送出、予約名の `Set-Cookie` の除去、`addCorsHeaders`、複数の `Set-Cookie` を別の行で返すこと（書き換えた HTML・WebStorage の注入・リダイレクトを含む）、キャッシュから `Set-Cookie` を返さないこと、内部エンドポイントの判定がルーターと一致すること、先頭の `/` の重複をまとめてから扱うことを確かめます
+- `example/integration_test/offline_web_proxy_access_token_e2e_test.dart` を追加しました。WebView から HttpOnly の Cookie で到達できること、Cookie が無い・古い場合に拒否することを確かめます。最後のテストは別プロセスから要求を送るための待ち時間を設け、その間に上流へ要求が届かないことを確かめます（要求は手動で送る）。計 4 件、Android エミュレータで成功を確認しました（`adb shell` の `nc` から送った要求は、稼働確認を除きすべて `403`）
+
 ## 0.16.0
 
 ### 機能追加

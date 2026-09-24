@@ -139,6 +139,34 @@ Every `ProxyConfig` setting that names paths shares one glob notation. Accepting
 
 - **HTTPS Not Required**: localhost is treated as a secure context by browsers, so HTTP is sufficient
 - **External Access Restriction**: Completely blocks access from outside the device by binding to 127.0.0.1
+- **Other processes on the device**: Over loopback, other apps and browser pages on the device can also reach the proxy. See "Restricting Access" to limit it to the WebView
+
+### Restricting Access
+
+The proxy listens on loopback, but a socket generally cannot tell which process a request came from. By default, therefore, other apps and browser pages on the device can reach the proxy, and on the forwarding path the proxy sends their requests upstream with the sessions in its Cookie Jar. Setting `ProxyConfig.requireAccessToken` to `true` refuses every request that lacks a secret known only to the WebView. The default is `false`.
+
+- **Secret**: On every `start()`, the proxy generates 32 cryptographically random bytes encoded as base64url without padding (43 characters) and returns them from `OfflineWebProxy.accessToken`. A rebind by automatic recovery keeps the value. It is `null` while stopped and after a failed start. It is never returned over HTTP
+- **How it is received**: A request is allowed when either the cookie `__offline_web_proxy_token` (`OfflineWebProxy.accessTokenCookieName`) or the header `X-Offline-Web-Proxy-Token` (`OfflineWebProxy.accessTokenHeaderName`) matches. When several cookies share the name, one match is enough. The comparison runs in constant time
+- **Refusal**: `403` (`text/plain`, `Cache-Control: no-store`). No CORS headers are attached and the request is not counted in the statistics. It is still written to the request log (a `GET` to the status endpoint is left out, as before)
+- **Covered**: The forwarding path, bundled assets, the mirrored-origin path, the WebStorage bridge, the status endpoint and the administrative endpoints
+- **Exempt**: Only `GET` / `HEAD` on `healthCheckPath`, because it returns no information and `probe()` and external liveness checks rely on it
+  - The path must match exactly, as the router matches it. A path with a trailing `/` is checked. Repeated leading slashes are collapsed into one before the check, so `//__offline_web_proxy/health` is treated as the health check
+  - A CORS preflight (`OPTIONS`) sends no cookies and is refused, including one to `healthCheckPath`
+  - Requests the proxy sends upstream by itself, such as `warmupCache()`, do not go through this path
+- **Removal**: Whatever the setting, the secret cookie and header are removed after the check. They are never forwarded upstream or to a mirrored origin, stored in the queue, or resent
+  - A cookie of the same name in the upstream response's `Set-Cookie` is not passed to the WebView, so the upstream cannot overwrite the secret there. The proxy still stores it in the Cookie Jar as the upstream's own cookie and sends it upstream on later requests
+- **What the app does**: Before the WebView loads its first page, put the value as an **HttpOnly** cookie on the proxy origin (`baseUri`) with the platform cookie manager (Android's `CookieManager`, `CookieManager.setCookie` of `flutter_inappwebview`, and so on). HttpOnly keeps scripts on the same origin from reading it. After calling `start()` again, put the new value before loading
+  - Cookies are kept per host. If the WebView uses both `127.0.0.1` and `localhost`, put one on each
+  - Cookies do not distinguish ports. A rebind that changes the port needs no new cookie, but the secret is also sent to any other server on the same host
+  - With `SameSite=Strict`, the cookie is not sent when a page on another site navigates to the proxy. Navigations back from another site, such as the redirect or `form_post` of an external login, then get `403` as well. Even with `Lax`, a cross-site `POST` does not carry it. Choose the setting that fits the navigations the pages use
+  - A request that sends no cookies, such as `fetch` with `credentials: "omit"`, gets `403` unless it carries the header
+- **Remaining risk**: Scripts running in the WebView, including third-party scripts, reach the proxy as same-origin requests that carry the secret. Anyone with root on the device or a WebView debugging connection is not stopped either
+
+### CORS Headers
+
+- By default (`ProxyConfig.addCorsHeaders: true`), the proxy adds `Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` to every response except the internal endpoints. A header of the same name returned by the upstream takes precedence
+- With `false`, the proxy adds none of them. Pages in the WebView share the proxy's origin and do not need CORS headers. Unless a page on another origin has to read the proxy's responses, `false` is recommended
+- CORS headers returned by the upstream itself are passed through regardless of the setting
 
 ### Health Monitoring
 
@@ -146,6 +174,8 @@ Every `ProxyConfig` setting that names paths shares one glob notation. Accepting
 - Health checks accept only `GET` and `HEAD` and are answered with `204 No Content` and `Cache-Control: no-store`. Any other method is handled through the normal proxy path.
 - `healthCheckPath` must be a fixed path starting with `/`. Values containing route parameter syntax (`<`, `>`), `?`, `#`, or whitespace are rejected at startup with `ProxyStartException`. An empty value falls back to the default path.
 - Health check requests are never forwarded upstream and are excluded from cache, queue, cookie processing, and statistics counters.
+- Only a request that the router hands to the health check, status or administrative handler — one whose method and path match the router's registration — is treated as an internal endpoint and kept out of the statistics and CORS headers. Of those, only `GET` / `HEAD` health checks and `GET` status requests are also left out of the request log. A `POST` to the status path and administrative paths or methods that are not registered are handled as the forwarding path, as the router does, and are counted in the statistics, given CORS headers and written to the request log.
+- Repeated leading slashes in the path (`//__offline_web_proxy/status`, for example) are collapsed into one before routing. The router, the access token check, the statistics and forwarding all see the collapsed path. Because dart:io parses the first segment of `//X/...` as a host name, its letter case may not be preserved.
 - `probe()` sends a request to the health check path on the currently bound port and reports the server as running only when `204` is received. The default timeout is 2 seconds. Connection failure, timeout, and unexpected status are all treated as not running.
 - `isRunning` only returns the internal flag and does not guarantee that the socket actually responds. Use `probe()` to verify actual responsiveness.
 - To reproduce the "dead socket" state, `closeServerSocketForTesting()` is provided as `@visibleForTesting`. It closes only the socket without changing internal state and is not intended for production use.
@@ -681,7 +711,7 @@ The following `ProxyConfig` settings limit what the quarantine store and the dro
 
 The unsent count and the online state were reachable only from the Dart API, so showing them on the screen meant writing a bridge in the app. `ProxyConfig.statusPath` (default `/__offline_web_proxy/status`) returns the same information as JSON.
 
-- **Method**: `GET` only. Never forwarded upstream, excluded from statistics and events, and omitted from the request log
+- **Method**: `GET` only (the `HEAD` the router adds to a `GET` route is handled the same way). Never forwarded upstream and excluded from statistics and events. A `GET` is also omitted from the request log
 - **Disabling**: An empty value leaves the route unregistered, and the fallback and 504 pages no longer receive the auto-reload script (see Auto-reload of the Fallback Page in [10])
 - **Validation**: Same rules as `healthCheckPath`; a value equal to `healthCheckPath` is rejected at startup
 - **Response header**: `Cache-Control: no-store`
@@ -724,6 +754,7 @@ The status and administrative endpoints serve only callers on the proxy's own or
 - A request whose `Origin` equals the proxy's own (`http://<host>:<port>`) is allowed. `127.0.0.1` and `localhost` name the same proxy, so either spelling is accepted
 - Anything else is answered with `403`
 - They are excluded from the CORS middleware and never carry `Access-Control-Allow-Origin: *`
+- A request without an `Origin` is allowed, so other apps on the device can reach them too. To limit them to the WebView, enable `requireAccessToken` as well (section [2], Restricting Access)
 
 **Note**: Same-origin also means *every script running on the page*. Enabling the administrative endpoints while the page still loads third-party scripts from a CDN would let such a script reach as far as discarding a quarantined request. Move those files into the bundled assets (section [3]) first.
 
@@ -1223,6 +1254,8 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 - **capture**: Save cookies in Cookie Jar
 - **passthrough**: Pass through as-is
+- **Multiple Set-Cookie headers**: A response received from the upstream passes each `Set-Cookie` to the WebView on its own line, because a browser takes only the first cookie from a single `Set-Cookie` line
+- **Responses from the cache**: The `Set-Cookie` stored with the response is not returned, so a session the upstream updated after caching is not overwritten with an old value. The cookies were already saved to the Cookie Jar when the upstream sent them
 
 ### Origin/Referer Headers
 
@@ -1480,6 +1513,11 @@ proxy:
     level: "info" # debug/info/warn/error
     maskSensitiveHeaders: true # Mask Authorization/Cookie, etc.
 
+  # Access restriction
+  access:
+    requireAccessToken: false # true refuses requests without the secret with 403
+    addCorsHeaders: true # false stops adding CORS headers to responses other than the internal endpoints
+
   # Development/debug settings
   debug:
     enableAdminApi: false # Security-focused, recommend true only during development
@@ -1626,6 +1664,14 @@ Returns the currently bound port number.
 Returns the proxy base URI that the WebView loads.
 
 - **Return Value**: URI in `http://<host>:<port>` form, `null` when not started
+
+#### `String? get accessToken`
+
+Returns the secret that limits access to the proxy to the WebView (section [2], Restricting Access).
+
+- **Return Value**: The secret while running (set before `start()` begins listening). `null` while stopped and after a failed start
+- **Generation**: Generated on every `start()` and kept across a rebind by automatic recovery. Never returned over HTTP
+- **Related constants**: `OfflineWebProxy.accessTokenCookieName` (`'__offline_web_proxy_token'`), `OfflineWebProxy.accessTokenHeaderName` (`'X-Offline-Web-Proxy-Token'`)
 
 #### `Future<bool> probe({Duration timeout = const Duration(seconds: 2)})`
 
@@ -2453,6 +2499,8 @@ class ProxyConfig {
   final ProxyResponseConfig queuedResponse; // Response for a queued request (default: 202 / JSON)
   final ProxyResponseConfig offlineMissResponse; // Response when nothing can be served (default: 504 / JSON)
   final bool enableAdminApi; // Enable admin API (development only)
+  final bool requireAccessToken; // Refuse requests without the secret with 403 (default: false)
+  final bool addCorsHeaders; // Add CORS headers to responses other than the internal endpoints (default: true)
   final bool enableWebStorageInheritance; // WebStorage inheritance bridge (default: false)
   final String logLevel; // Log level ("debug", "info", "warn", "error")
   final List<String> startupPaths; // Default paths of warmupCache() when paths is omitted (start() does not fetch them)

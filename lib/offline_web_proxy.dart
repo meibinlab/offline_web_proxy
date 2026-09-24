@@ -256,6 +256,22 @@ const String _defaultStatusPath = '/__offline_web_proxy/status';
 /// proxy が予約している名前空間の下に固定し、業務ルートと衝突させない。
 const String _adminPathPrefix = '/__offline_web_proxy/admin';
 
+/// `, ` で連結した `Set-Cookie` を Cookie ごとに分ける区切り。
+///
+/// `Expires=Wed, 21 Oct 2015 ...` の `,` で分けないよう、直後が
+/// `名前=` で始まる `,` だけを区切りとして扱う。
+final RegExp _joinedSetCookieSeparator = RegExp(r',\s*(?=[^;,=\s]+=)');
+
+/// 隔離を再送する管理エンドポイントのパス。
+///
+/// shelf_router の `<id>` と同じく、`/` を含まない 1 セグメントに一致させる。
+final RegExp _adminQuarantineRetryPathPattern =
+    RegExp('^${RegExp.escape(_adminPathPrefix)}/quarantine/[^/]+/retry\$');
+
+/// 隔離の 1 件を指す管理エンドポイントのパス。
+final RegExp _adminQuarantineItemPathPattern =
+    RegExp('^${RegExp.escape(_adminPathPrefix)}/quarantine/[^/]+\$');
+
 /// 別 origin の資源を中継するパスの接頭辞。
 /// proxy が予約している名前空間の下に固定し、業務ルートと衝突させない。
 const String _mirroredOriginPathPrefix = '/__offline_web_proxy/ext';
@@ -447,6 +463,8 @@ const List<String> _staticResourceAssetPrefixes = [
 /// ## セキュリティ
 ///
 /// * サーバは `127.0.0.1` のみにバインド（外部アクセス不可）
+/// * 端末内の別アプリからの要求は、[ProxyConfig.requireAccessToken] と
+///   [accessToken] で拒否できる
 /// * Cookieは永続化前にAES-256で暗号化
 /// * 機密ヘッダはログ内でマスク
 /// * 静的アセットに対するパストラバーサル攻撃を防止
@@ -456,8 +474,26 @@ const List<String> _staticResourceAssetPrefixes = [
 /// * [ProxyStats] 監視機能
 /// * [ProxyEvent] リアルタイムイベントストリーミング
 class OfflineWebProxy {
+  /// [accessToken] を WebView から受け取る Cookie の名前。
+  ///
+  /// [ProxyConfig.requireAccessToken] を有効にした場合、利用側はネイティブの
+  /// Cookie 管理（Android の `CookieManager` など）で、この名前の HttpOnly
+  /// Cookie を proxy の origin（[baseUri]）へ置きます。proxy が予約している
+  /// 名前のため、上流へは転送しません。
+  static const String accessTokenCookieName = '__offline_web_proxy_token';
+
+  /// [accessToken] を受け取るリクエストヘッダの名前。
+  ///
+  /// `fetch` などヘッダを付けられる呼び出し向けに、Cookie と同じ値を
+  /// このヘッダでも受け付けます。proxy が予約している名前のため、上流へは
+  /// 転送しません。
+  static const String accessTokenHeaderName = 'X-Offline-Web-Proxy-Token';
+
   /// 内部HTTPサーバのインスタンス。
   HttpServer? _server;
+
+  /// 起動ごとに生成する秘密値。停止中は `null`。
+  String? _accessToken;
 
   /// プロキシサーバの設定。
   ProxyConfig? _config;
@@ -847,11 +883,16 @@ class OfflineWebProxy {
       _startConnectivityMonitoring();
       await _initializeOnlineState();
 
+      // 起動ごとの秘密値。再バインドでは作り直さない
+      _accessToken = _generateAccessToken();
+
       // ルーターとミドルウェアを作成し、再バインドで再利用できるよう保持する
       final router = _createRouter();
       final handler = const shelf.Pipeline()
           .addMiddleware(_errorHandlingMiddleware)
+          .addMiddleware(_leadingSlashNormalizationMiddleware)
           .addMiddleware(_requestLoggingMiddleware())
+          .addMiddleware(_accessTokenMiddleware)
           .addMiddleware(_corsMiddleware)
           .addMiddleware(_statisticsMiddleware)
           .addHandler(router.call);
@@ -887,6 +928,7 @@ class OfflineWebProxy {
       _isStarting = false;
       if (!_isRunning) {
         _activeInstances.remove(this);
+        _accessToken = null;
       }
     }
   }
@@ -984,6 +1026,7 @@ class OfflineWebProxy {
       _server = null;
       _boundPort = null;
       _handler = null;
+      _accessToken = null;
       // 障害解析のため診断値は残し、実行制御状態のみ初期化する
       _resetRecoveryControlState();
       // 閉じた Box を共有しないよう、次の起動や Cookie API で初期化し直す
@@ -1027,6 +1070,17 @@ class OfflineWebProxy {
   ///
   /// Returns: サーバが動作中の場合は `true`。
   bool get isRunning => _isRunning;
+
+  /// proxy へ到達できる要求を WebView に限るための秘密値を取得します。
+  ///
+  /// [start] のたびに新しい値を生成し、自動復旧による再バインドでは
+  /// 変えません。HTTP では返しません。[ProxyConfig.requireAccessToken] を
+  /// 有効にした場合は、WebView の読み込み前に [accessTokenCookieName] の
+  /// Cookie として proxy の origin へ置いてください。
+  ///
+  /// Returns: 稼働中は秘密値（[start] がサーバを待ち受ける前から値が
+  /// 入ります）。停止中と、起動に失敗した後は `null`。
+  String? get accessToken => _accessToken;
 
   /// プロキシサーバのイベントストリームを取得します。
   ///
@@ -1267,6 +1321,11 @@ class OfflineWebProxy {
 
   /// 統計やイベントの対象外とする proxy 内部のエンドポイントかを返します。
   ///
+  /// ルーター（[_createRouter]）が内部エンドポイントのハンドラへ渡す要求
+  /// だけを対象とし、メソッドとパスの両方をルーターの登録と一致させます。
+  /// 一致しない要求はルーターが転送経路で扱うため、統計・CORS・要求ログの
+  /// 対象に残します。
+  ///
   /// [request] 判定する要求。
   ///
   /// Returns: 内部エンドポイント宛ての場合は `true`。
@@ -1277,10 +1336,14 @@ class OfflineWebProxy {
       return true;
     }
 
+    final method = request.method.toUpperCase();
     final normalizedPath = _normalizedRequestPath(request);
 
+    // 状態通知は GET だけを登録しており、shelf_router は GET に HEAD を加える
     final statusPath = _statusPath;
-    if (statusPath.isNotEmpty && normalizedPath == statusPath) {
+    if (statusPath.isNotEmpty &&
+        normalizedPath == statusPath &&
+        (method == 'GET' || method == 'HEAD')) {
       return true;
     }
 
@@ -1289,8 +1352,16 @@ class OfflineWebProxy {
       return false;
     }
 
-    return normalizedPath.startsWith('$_adminPathPrefix/') ||
-        normalizedPath == _adminPathPrefix;
+    if (normalizedPath == '$_adminPathPrefix/quarantine') {
+      return method == 'GET' || method == 'HEAD';
+    }
+    if (_adminQuarantineRetryPathPattern.hasMatch(normalizedPath)) {
+      return method == 'POST';
+    }
+    if (_adminQuarantineItemPathPattern.hasMatch(normalizedPath)) {
+      return method == 'DELETE';
+    }
+    return false;
   }
 
   /// proxy 自身の origin からの要求かどうかを返します。
@@ -1499,14 +1570,15 @@ class OfflineWebProxy {
     return _normalizedRequestPath(request) == _healthCheckPath;
   }
 
-  /// 要求のパスを `/` で始まる形にそろえて返します。
+  /// ルーターが照合するのと同じ形の要求のパスを返します。
   ///
   /// [request] 対象の要求。
   ///
   /// Returns: 先頭に `/` を付けた要求のパス。
   String _normalizedRequestPath(shelf.Request request) {
-    final requestPath = request.url.path;
-    return requestPath.startsWith('/') ? requestPath : '/$requestPath';
+    // shelf_router と同じく `'/${request.url.path}'` で組み立てる。先頭の
+    // `/` の重複は _leadingSlashNormalizationMiddleware がまとめてある
+    return '/${request.url.path}';
   }
 
   /// 要求ログを出力するミドルウェアを返します。
@@ -5545,10 +5617,222 @@ class OfflineWebProxy {
     return router;
   }
 
+  /// 秘密値を検査し、取り除いてから後段へ渡すミドルウェアを取得します。
+  ///
+  /// [ProxyConfig.requireAccessToken] が有効な場合、稼働確認を除き、
+  /// [accessTokenCookieName] の Cookie または [accessTokenHeaderName] の
+  /// ヘッダに [accessToken] を持たない要求を `403` で拒否します。設定に
+  /// かかわらず、秘密値は後段へ渡す前に取り除き、上流への転送やキューへの
+  /// 保存に含めません。また、WebView に置いた秘密値の Cookie を上書き
+  /// されないよう、応答の `Set-Cookie` から予約名の Cookie を取り除きます。
+  ///
+  /// Returns: 秘密値の検査用ミドルウェア。
+  shelf.Middleware get _accessTokenMiddleware {
+    return (shelf.Handler innerHandler) {
+      return (shelf.Request request) async {
+        // 稼働確認は情報を返さず、probe() や外部の死活監視から使うため検査しない
+        if ((_config?.requireAccessToken ?? false) &&
+            !_isHealthCheckRequest(request) &&
+            !_hasValidAccessToken(request)) {
+          return shelf.Response.forbidden(
+            'access token is required',
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Cache-Control': 'no-store',
+            },
+          );
+        }
+
+        final response = await innerHandler(_stripAccessToken(request));
+        return _stripAccessTokenSetCookie(response);
+      };
+    };
+  }
+
+  /// 応答の `Set-Cookie` から、秘密値と同じ名前の Cookie を取り除きます。
+  ///
+  /// [response] 後段が返した応答。
+  ///
+  /// Returns: 予約名の Cookie を取り除いた応答。含まない場合は [response]
+  /// そのもの。
+  shelf.Response _stripAccessTokenSetCookie(shelf.Response response) {
+    for (final entry in response.headersAll.entries) {
+      if (entry.key.toLowerCase() != 'set-cookie') {
+        continue;
+      }
+
+      // 1 件の値に `, ` で連結した Cookie が含まれていても判定できるよう、
+      // Cookie ごとに分けてから判定し、残りを同じ形式で連結し直す
+      var removed = false;
+      final remainingValues = <String>[];
+      for (final value in entry.value) {
+        final cookies = value.split(_joinedSetCookieSeparator);
+        final remainingCookies = cookies
+            .where((cookie) => _setCookieName(cookie) != accessTokenCookieName)
+            .toList(growable: false);
+        if (remainingCookies.length != cookies.length) {
+          removed = true;
+        }
+        if (remainingCookies.isNotEmpty) {
+          remainingValues.add(remainingCookies.join(', '));
+        }
+      }
+
+      if (!removed) {
+        return response;
+      }
+      return response.change(headers: {
+        entry.key: remainingValues.isEmpty ? null : remainingValues,
+      });
+    }
+
+    return response;
+  }
+
+  /// `Set-Cookie` ヘッダ値から Cookie 名を取り出します。
+  ///
+  /// [setCookie] `Set-Cookie` ヘッダ値の 1 件。
+  ///
+  /// Returns: 前後の空白を除いた Cookie 名。
+  String _setCookieName(String setCookie) {
+    final pair = setCookie.split(';').first;
+    final separatorIndex = pair.indexOf('=');
+    return (separatorIndex < 0 ? pair : pair.substring(0, separatorIndex))
+        .trim();
+  }
+
+  /// 起動ごとの秘密値を生成します。
+  ///
+  /// Returns: 暗号論的乱数 32 バイトを base64url（パディングなし）にした値。
+  String _generateAccessToken() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  /// 要求が正しい秘密値を持つかどうかを返します。
+  ///
+  /// 同じ名前の Cookie が複数ある場合は、いずれかが一致すれば許可します。
+  ///
+  /// [request] 判定する要求。
+  ///
+  /// Returns: Cookie またはヘッダの値が [accessToken] と一致する場合は `true`。
+  bool _hasValidAccessToken(shelf.Request request) {
+    final expected = _accessToken;
+    if (expected == null) {
+      return false;
+    }
+
+    final headerValues =
+        request.headersAll[accessTokenHeaderName.toLowerCase()] ?? const [];
+    for (final value in headerValues) {
+      if (_constantTimeEquals(value.trim(), expected)) {
+        return true;
+      }
+    }
+
+    final cookieHeaders = request.headersAll['cookie'] ?? const [];
+    for (final cookieHeader in cookieHeaders) {
+      for (final cookie in _parseCookieHeaderPairs(cookieHeader)) {
+        if (cookie.key == accessTokenCookieName &&
+            _constantTimeEquals(cookie.value, expected)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /// 2 つの文字列を、一致する位置に処理時間が左右されない方法で比較します。
+  ///
+  /// 長さが異なる場合は直ちに `false` を返します。秘密値は長さが固定のため、
+  /// 長さから値は推測できません。
+  ///
+  /// [actual] 要求から受け取った値。
+  /// [expected] 正しい値。
+  ///
+  /// Returns: 一致する場合は `true`。
+  bool _constantTimeEquals(String actual, String expected) {
+    final actualBytes = utf8.encode(actual);
+    final expectedBytes = utf8.encode(expected);
+    if (actualBytes.length != expectedBytes.length) {
+      return false;
+    }
+
+    var difference = 0;
+    for (var i = 0; i < expectedBytes.length; i++) {
+      difference |= actualBytes[i] ^ expectedBytes[i];
+    }
+    return difference == 0;
+  }
+
+  /// 秘密値の Cookie とヘッダを取り除いた要求を返します。
+  ///
+  /// 上流へ秘密値を漏らさず、上流の Cookie とも混ぜないために使います。
+  ///
+  /// [request] 受信した要求。
+  ///
+  /// Returns: 秘密値を取り除いた要求。含まない場合は [request] そのもの。
+  shelf.Request _stripAccessToken(shelf.Request request) {
+    // shelf はヘッダを大小文字を区別する Map へ写してから削除するため、
+    // 実際に格納されているキー名のまま指定する
+    final changedHeaders = <String, Object?>{};
+    final headerName = accessTokenHeaderName.toLowerCase();
+    for (final entry in request.headersAll.entries) {
+      final lowerKey = entry.key.toLowerCase();
+      if (lowerKey == headerName) {
+        changedHeaders[entry.key] = null;
+      } else if (lowerKey == 'cookie') {
+        final remainingCookie = _removeAccessTokenCookie(entry.value);
+        if (remainingCookie != null) {
+          changedHeaders[entry.key] =
+              remainingCookie.isEmpty ? null : remainingCookie;
+        }
+      }
+    }
+
+    if (changedHeaders.isEmpty) {
+      return request;
+    }
+    return request.change(headers: changedHeaders);
+  }
+
+  /// `Cookie` ヘッダ値から秘密値の Cookie を取り除きます。
+  ///
+  /// [cookieHeaders] `Cookie` ヘッダ値の一覧。
+  ///
+  /// Returns: 取り除いた後の `Cookie` ヘッダ値（残りが無い場合は空文字列）。
+  /// 秘密値の Cookie を含まない場合は `null`。
+  String? _removeAccessTokenCookie(List<String> cookieHeaders) {
+    var removed = false;
+    final remainingSegments = <String>[];
+    for (final cookieHeader in cookieHeaders) {
+      for (final segment in cookieHeader.split(';')) {
+        final trimmedSegment = segment.trim();
+        if (trimmedSegment.isEmpty) {
+          continue;
+        }
+        final separatorIndex = trimmedSegment.indexOf('=');
+        final name = separatorIndex < 0
+            ? trimmedSegment
+            : trimmedSegment.substring(0, separatorIndex).trim();
+        if (name == accessTokenCookieName) {
+          removed = true;
+          continue;
+        }
+        remainingSegments.add(trimmedSegment);
+      }
+    }
+
+    return removed ? remainingSegments.join('; ') : null;
+  }
+
   /// CORSヘッダを追加するミドルウェアを取得します。
   ///
-  /// クロスオリジンリクエストを許可するためのヘッダを
-  /// 全てのレスポンスに自動追加します。
+  /// クロスオリジンリクエストを許可するためのヘッダを、内部エンドポイントを
+  /// 除く全てのレスポンスに自動追加します。[ProxyConfig.addCorsHeaders] が
+  /// `false` の場合は追加しません。
   ///
   /// Returns: CORSヘッダ追加用ミドルウェア。
   shelf.Middleware get _corsMiddleware {
@@ -5561,15 +5845,68 @@ class OfflineWebProxy {
           return response;
         }
 
-        return response.change(headers: {
+        // WebView のページは proxy と同一 origin のため、CORS ヘッダを必要としない
+        if (!(_config?.addCorsHeaders ?? true)) {
+          return response;
+        }
+
+        // 上流が返した同名のヘッダを優先する。既存のヘッダを展開して渡すと
+        // 複数行の Set-Cookie が 1 行へ連結されるため、足りないものだけ渡す
+        const corsHeaders = {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'Access-Control-Allow-Headers':
               'Origin, Content-Type, Accept, Authorization',
-          ...response.headers,
+        };
+        return response.change(headers: {
+          for (final entry in corsHeaders.entries)
+            if (!response.headers.containsKey(entry.key))
+              entry.key: entry.value,
         });
       };
     };
+  }
+
+  /// パス先頭の `/` の重複を 1 つにまとめるミドルウェアを取得します。
+  ///
+  /// shelf_router は `//x` を `/x` と別のパスとして照合する一方、転送や
+  /// 中継などの処理は先頭の `/` を 1 つ落として `/x` と同じものとして扱う。
+  /// この食い違いで、`//__offline_web_proxy/...` の内部エンドポイント宛ての
+  /// 要求が上流へ転送されないよう、ルーターより前でパスをそろえる。
+  ///
+  /// Returns: パスを正規化するミドルウェア。
+  shelf.Middleware get _leadingSlashNormalizationMiddleware {
+    return (shelf.Handler innerHandler) {
+      return (shelf.Request request) {
+        return innerHandler(_collapseLeadingSlashes(request));
+      };
+    };
+  }
+
+  /// パス先頭の `/` の重複を 1 つにまとめた要求を返します。
+  ///
+  /// 作り直した要求は hijack（`onHijack`）を引き継ぎません。proxy は
+  /// hijack を使わないためです。WebSocket などで使う場合は中継が必要です。
+  ///
+  /// [request] 受信した要求。
+  ///
+  /// Returns: 先頭の `/` が重複していない場合は [request] そのもの。
+  /// 重複している場合は、パスだけを変えた新しい要求。
+  shelf.Request _collapseLeadingSlashes(shelf.Request request) {
+    final path = request.requestedUri.path;
+    if (!path.startsWith('//')) {
+      return request;
+    }
+
+    final collapsedPath = '/${path.replaceFirst(RegExp(r'^/+'), '')}';
+    return shelf.Request(
+      request.method,
+      request.requestedUri.replace(path: collapsedPath),
+      protocolVersion: request.protocolVersion,
+      headers: request.headersAll,
+      body: request.read(),
+      context: request.context,
+    );
   }
 
   /// グローバル例外ハンドリングミドルウェア
@@ -5997,10 +6334,9 @@ class OfflineWebProxy {
 
     return response.change(
       body: responseBytes,
-      headers: {
-        ...response.headers,
-        'Content-Length': responseBytes.length.toString(),
-      },
+      // 既存のヘッダは change が引き継ぐ。展開して渡すと複数行の Set-Cookie が
+      // 1 行へ連結されるため、変える値だけ渡す
+      headers: {'Content-Length': responseBytes.length.toString()},
     );
   }
 
@@ -6253,8 +6589,9 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     return response.change(
       body: utf8.encode(updatedBody),
+      // 既存のヘッダは change が引き継ぐ。展開して渡すと複数行の Set-Cookie が
+      // 1 行へ連結されるため、変える値だけ渡す
       headers: {
-        ...response.headers,
         'Content-Length': utf8.encode(updatedBody).length.toString(),
       },
     );
@@ -6322,6 +6659,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         upstreamRequestUri: result.upstreamUri,
         statusCode: result.statusCode,
         headers: result.headers,
+        setCookieHeaders: result.setCookieHeaders,
         bodyBytes: result.bodyBytes,
       );
       if (redirectResponse != null) {
@@ -6329,10 +6667,14 @@ window.__offline_web_proxy_web_storage_bridge = {
         return redirectResponse;
       }
 
+      // 複数の Set-Cookie は 1 行へ連結すると先頭しか効かないため、行を分けて返す
       final response = shelf.Response(
         result.statusCode,
         body: Uint8List.fromList(result.bodyBytes),
-        headers: result.headers,
+        headers: _withSeparateSetCookieHeaders(
+          result.headers,
+          result.setCookieHeaders,
+        ),
       );
       final finalResponse = await _decorateResponseForWebStorageInheritance(
         request: request,
@@ -6537,11 +6879,12 @@ window.__offline_web_proxy_web_storage_bridge = {
     Map<String, String>? extraHeaders,
   }) {
     if (request.method.toUpperCase() == 'HEAD') {
+      // headers は複数行の値を 1 行へ連結するため、headersAll を使う
       return shelf.Response(
         cachedResponse.statusCode,
         headers: {
           if (extraHeaders != null) ...extraHeaders,
-          ...cachedResponse.headers,
+          ...cachedResponse.headersAll,
         },
       );
     }
@@ -6555,19 +6898,36 @@ window.__offline_web_proxy_web_storage_bridge = {
       if (rangeResponse != null) {
         return extraHeaders == null
             ? rangeResponse
-            : rangeResponse.change(headers: {
-                ...extraHeaders,
-                ...rangeResponse.headers,
-              });
+            : rangeResponse.change(
+                headers: _missingHeaders(rangeResponse, extraHeaders),
+              );
       }
     }
 
     return extraHeaders == null
         ? cachedResponse
-        : cachedResponse.change(headers: {
-            ...extraHeaders,
-            ...cachedResponse.headers,
-          });
+        : cachedResponse.change(
+            headers: _missingHeaders(cachedResponse, extraHeaders),
+          );
+  }
+
+  /// 応答にまだ無いヘッダだけを取り出します。
+  ///
+  /// 既存のヘッダを展開して `change` へ渡すと、複数行の `Set-Cookie` が
+  /// 1 行へ連結されるため、足すヘッダだけを渡すときに使います。
+  ///
+  /// [response] 足す先の応答。
+  /// [headers] 足したいヘッダ。
+  ///
+  /// Returns: [response] に同じ名前のヘッダが無いものだけの Map。
+  Map<String, String> _missingHeaders(
+    shelf.Response response,
+    Map<String, String> headers,
+  ) {
+    return {
+      for (final entry in headers.entries)
+        if (!response.headers.containsKey(entry.key)) entry.key: entry.value,
+    };
   }
 
   /// 上流へ到達できずキャッシュも使えない場合のレスポンスを返します。
@@ -6839,7 +7199,11 @@ window.__offline_web_proxy_web_storage_bridge = {
   shelf.Response? _responseFromCacheData(Map data) {
     // キャッシュデータからレスポンスを再構築
     final statusCode = data['statusCode'] as int;
-    final headers = Map<String, String>.from(data['headers'] as Map);
+    // 保存時の Set-Cookie は返さない。キャッシュした後に更新されたセッションを
+    // 古い値で上書きしないため
+    final headers = _withoutSetCookieHeaders(
+      Map<String, String>.from(data['headers'] as Map),
+    );
     final body = data['body'];
 
     // 互換性: 旧バージョンは body を String で保存していた
@@ -6927,18 +7291,26 @@ window.__offline_web_proxy_web_storage_bridge = {
     return shelf.Response(
       206,
       body: Uint8List.fromList(slice),
-      headers: headers,
+      // キャッシュから返すため、保存時の Set-Cookie は返さない
+      headers: _withoutSetCookieHeaders(headers),
     );
   }
 
-  /// キャッシュが有効かどうかを判定します。
+  /// 要求を上流へ転送し、応答を読み取ります。
   ///
-  /// TTL、Staleポリシー、Cache-Controlヘッダなどを
-  /// 参照してキャッシュの有効性を判定します。
+  /// [request] 受信した要求。
+  /// [requestBodyBytes] 読み取り済みの要求本文。`null` の場合は [request]
+  ///   から読みます。
+  /// [idempotencyKey] 上流へ送るべき等性キー。
+  /// [acceptedAt] 上流へ送る受付時刻。
+  ///
+  /// Returns: ステータス、`Set-Cookie` を 1 行へ連結したヘッダ、`Set-Cookie`
+  /// の値の一覧、本文、転送先の URI。
   Future<
       ({
         int statusCode,
         Map<String, String> headers,
+        List<String> setCookieHeaders,
         List<int> bodyBytes,
         Uri upstreamUri,
       })> _forwardToUpstream(
@@ -7023,6 +7395,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       return (
         statusCode: ioResponse.statusCode,
         headers: sanitizedHeaders,
+        setCookieHeaders: headerSnapshot.setCookieHeaders,
         bodyBytes: bodyBytes,
         upstreamUri: uri,
       );
@@ -7281,6 +7654,45 @@ window.__offline_web_proxy_web_storage_bridge = {
     return sanitized;
   }
 
+  /// `Set-Cookie` を 1 件ずつ別の行で返すためのヘッダを組み立てます。
+  ///
+  /// 上流の応答ヘッダは `Set-Cookie` を `, ` で 1 行へ連結して持ちますが、
+  /// ブラウザは 1 行の `Set-Cookie` から先頭の Cookie しか受け取りません。
+  /// 連結した値を取り除き、元の値の一覧を複数行として渡します。
+  ///
+  /// [headers] `Set-Cookie` を連結して持つ応答ヘッダ。
+  /// [setCookieHeaders] 上流が返した `Set-Cookie` の値の一覧。
+  ///
+  /// Returns: shelf の応答へ渡すヘッダ。`Set-Cookie` は値の一覧になります。
+  Map<String, Object> _withSeparateSetCookieHeaders(
+    Map<String, String> headers,
+    List<String> setCookieHeaders,
+  ) {
+    final result = <String, Object>{
+      for (final entry in headers.entries)
+        if (entry.key.toLowerCase() != 'set-cookie') entry.key: entry.value,
+    };
+    if (setCookieHeaders.isNotEmpty) {
+      result['set-cookie'] = List<String>.of(setCookieHeaders);
+    }
+    return result;
+  }
+
+  /// `Set-Cookie` を取り除いたヘッダを返します。
+  ///
+  /// キャッシュから返す応答に使います。保存した時点の Cookie を返すと、
+  /// その後に上流が更新したセッションなどを古い値で上書きするためです。
+  ///
+  /// [headers] キャッシュに保存したヘッダ。
+  ///
+  /// Returns: `Set-Cookie` を除いたヘッダ。
+  Map<String, String> _withoutSetCookieHeaders(Map<String, String> headers) {
+    return {
+      for (final entry in headers.entries)
+        if (entry.key.toLowerCase() != 'set-cookie') entry.key: entry.value,
+    };
+  }
+
   /// ヘッダ名を大文字小文字を無視して取得します。
   String? _getHeaderValueIgnoreCase(Map<String, String> headers, String name) {
     final lowerName = name.toLowerCase();
@@ -7311,6 +7723,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     required Uri upstreamRequestUri,
     required int statusCode,
     required Map<String, String> headers,
+    List<String> setCookieHeaders = const <String>[],
     required List<int> bodyBytes,
   }) {
     if (!_isRedirectStatusCode(statusCode)) {
@@ -7347,10 +7760,13 @@ window.__offline_web_proxy_web_storage_bridge = {
         return shelf.Response(
           statusCode,
           body: Uint8List.fromList(bodyBytes),
-          headers: _putHeaderValueIgnoreCase(
-            headers,
-            'location',
-            webViewUri.toString(),
+          headers: _withSeparateSetCookieHeaders(
+            _putHeaderValueIgnoreCase(
+              headers,
+              'location',
+              webViewUri.toString(),
+            ),
+            setCookieHeaders,
           ),
         );
       case ProxyWebViewNavigationAction.launchExternal:
