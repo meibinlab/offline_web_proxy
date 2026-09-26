@@ -534,6 +534,52 @@ class ProxyConfig {
   /// **Default**: `'X-Offline-Accepted-At'`
   final String acceptedAtHeaderName;
 
+  /// Whether the proxy marks the update requests it sends from the queue.
+  ///
+  /// The upstream cannot otherwise tell a request the screen is still waiting
+  /// for from one the proxy sends later on its own: both carry the same
+  /// [idempotencyHeaderName] and [acceptedAtHeaderName] values and the same
+  /// body. With the mark, the upstream can treat them differently. For
+  /// example, it can reject a stale form on the first forward, while the
+  /// user can still correct it, and accept the same form from the queue,
+  /// where a rejection would only move the request to quarantine.
+  ///
+  /// The proxy adds [replayHeaderName] with the value `1` to every update
+  /// request sent from the queue: requests queued while offline, requests
+  /// queued after a 5xx or an unreachable upstream, and requests put back
+  /// from quarantine. It never adds the header to the first forward or to a
+  /// read request. A header of the same name sent by the screen is removed
+  /// from every forwarded request and replaced on requests sent from the
+  /// queue, so scripts on the page cannot claim to be a queued request.
+  ///
+  /// To reject a request on the first forward, the upstream must answer with
+  /// 4xx, such as 409 or 422. The proxy returns 4xx to the screen as it is,
+  /// but queues a request answered with 5xx and sends it again with the
+  /// header. A first forward the upstream rejected can still come back from
+  /// the queue when the rejection never reached the proxy, for example after
+  /// a timeout. Keep the answer for the same idempotency key once given, so
+  /// a request rejected on the first forward stays rejected from the queue.
+  ///
+  /// **Note**: This is not authentication. Any client that reaches the
+  /// upstream directly can send the header. Check the caller's permissions
+  /// separately and use the header only to choose how to handle the request.
+  ///
+  /// When disabled, the proxy neither adds nor removes the header, so a
+  /// header sent by the screen reaches the upstream unchanged.
+  ///
+  /// **Default**: `true`
+  final bool enableReplayHeader;
+
+  /// Name of the header that marks update requests sent from the queue.
+  ///
+  /// The value is always `1`. Change the name when the upstream expects a
+  /// different one. Use a valid, non-empty HTTP header name that differs from
+  /// [idempotencyHeaderName] and [acceptedAtHeaderName]; a shared name would
+  /// overwrite their values on requests sent from the queue.
+  ///
+  /// **Default**: `'X-Offline-Replay'`
+  final String replayHeaderName;
+
   /// What happens to a queued update request the upstream rejected with 4xx.
   ///
   /// Resending cannot change a 4xx result, so the request leaves the queue.
@@ -805,6 +851,8 @@ class ProxyConfig {
     this.queueExcludePaths = const [],
     this.enableAcceptedAtHeader = true,
     this.acceptedAtHeaderName = 'X-Offline-Accepted-At',
+    this.enableReplayHeader = true,
+    this.replayHeaderName = 'X-Offline-Replay',
     this.dropPolicy = DropPolicy.quarantine,
     this.quarantineMaxCount = 1000,
     this.quarantineRetention = const Duration(days: 30),

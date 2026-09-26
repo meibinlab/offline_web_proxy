@@ -590,6 +590,27 @@ The proxy keeps the moment it first accepted the request and sends the same valu
 
 **Note**: The value comes from the device clock. A device whose clock is wrong while offline reports a wrong time.
 
+### Marking Requests Sent from the Queue (replay)
+
+The upstream cannot tell a request forwarded as soon as the screen sent it (the first forward) from a request the proxy sends later from the queue: both carry the same idempotency key and acceptance time, and the stored body is sent unchanged. The proxy marks the update requests it sends from the queue so the upstream can handle the two differently.
+
+Take a screen that sends content which no longer matches what the upstream has on record. On the first forward, the upstream can reject it and let the user check again on the screen. From the queue, it can accept and record it instead, because rejecting it would only move it to quarantine, with no one in front of the screen to check again.
+
+- **Header name**: `ProxyConfig.replayHeaderName` (default `X-Offline-Replay`)
+- **Enabled**: `ProxyConfig.enableReplayHeader` (default `true`)
+- **Value**: `1`. Use a valid, non-empty HTTP header name that differs from the idempotency key and acceptance time header names; a shared name overwrites their values on requests sent from the queue
+- **Sent on**: Every update request sent from the queue, whatever put it there
+  - Requests queued without a first forward because the device was offline
+  - Requests queued after a 5xx or an unreachable upstream, including a first forward that reached the upstream but whose response never arrived. The idempotency key prevents a duplicate record
+  - Requests put back from quarantine (`retryQuarantinedRequest`)
+- **Never sent on**: The first forward and read requests
+- **Overwrite**: A header of the same name sent by the client is removed from every request forwarded to the upstream, and replaced with the proxy's value on requests sent from the queue, so scripts on the page cannot claim to be a queued request
+- **When disabled**: The proxy neither adds nor removes the header. A header of the same name sent by the client reaches the upstream unchanged
+
+**Upstream responses**: To reject a first forward, answer with 4xx, such as 409 or 422. The proxy returns 4xx to the screen as it is, but queues a request answered with 5xx and sends it again with this header. A first forward rejected with 4xx also comes back from the queue with this header when the rejection never reached the proxy, for example after a timeout; the screen never saw the rejection. Give the same answer from the queue to a request already rejected under the same idempotency key.
+
+**Note**: This is not authentication. Any request that reaches the upstream without the proxy can carry the header. Check the caller's permissions separately and use the header only to choose how to handle the request.
+
 ### Reporting the Outcome of a Resend
 
 A resend happens in the background, so its response never reaches the page that made the request. Each attempt is reported for apps that must reconcile what the upstream actually recorded.
@@ -2490,6 +2511,8 @@ class ProxyConfig {
   final List<QueueExcludeRule> queueExcludePaths; // Updates never queued (default: empty)
   final bool enableAcceptedAtHeader; // Report the acceptance time (default: true)
   final String acceptedAtHeaderName; // Acceptance time header (default: "X-Offline-Accepted-At")
+  final bool enableReplayHeader; // Mark requests sent from the queue (default: true)
+  final String replayHeaderName; // Header marking requests sent from the queue (default: "X-Offline-Replay")
   final DropPolicy dropPolicy; // How a request that stopped retrying is handled (default: quarantine)
   final int quarantineMaxCount; // Maximum number of quarantined requests (default: 1000, 0 = no limit)
   final Duration quarantineRetention; // Retention of quarantined requests (default: 30 days, Duration.zero = no limit)
