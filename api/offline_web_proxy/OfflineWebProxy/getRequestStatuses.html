@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="API docs for the getRequestStatuses method from the OfflineWebProxy class, for the Dart programming language.">
+  <title>getRequestStatuses method - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../../static-assets/styles.css?v1">
+  <link rel="icon" href="../../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">getRequestStatuses method</li>
+  </ol>
+  <div class="self-name">getRequestStatuses</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html"
+    data-below-sidebar="">
+    <div>
+<h1><span class="kind-method">getRequestStatuses</span> method 
+</h1></div>
+
+    <section class="multi-line-signature">
+      
+
+<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/RequestStatus-class.html">RequestStatus</a></span>&gt;</span></span>&gt;</span></span>
+<span class="name ">getRequestStatuses</span>(<wbr><ol class="parameter-list single-line"> <li><span class="parameter" id="getRequestStatuses-param-idempotencyKeys"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span></span> <span class="parameter-name">idempotencyKeys</span></span></li>
+</ol>)
+
+      
+
+    </section>
+    
+<section class="desc markdown">
+  <p>べき等性キーごとに、更新系リクエストがいまどうなっているかを返します。</p>
+<p>画面が自分で決めたキー（<code>Idempotency-Key</code> など）で送った要求について、
+送信待ち・隔離・届いた・ドロップのどれにあるかを返します。送信待ち・隔離・
+ドロップ履歴と、キューから送って上流が 2xx を返したキーの記録
+（<a href="../../offline_web_proxy/ProxyConfig/idempotencyRetention.html">ProxyConfig.idempotencyRetention</a> の間）を探します。暗号化する前の
+保存領域から移行を待っている分も探します。</p>
+<p>同じキーが複数の場所にある場合は、<a href="../../offline_web_proxy/RequestState.html">RequestState.delivered</a>、
+<a href="../../offline_web_proxy/RequestState.html">RequestState.queued</a>、<a href="../../offline_web_proxy/RequestState.html">RequestState.quarantined</a>、<a href="../../offline_web_proxy/RequestState.html">RequestState.dropped</a>
+の順で先に当てはまるものを返します。どこにも無い場合は
+<a href="../../offline_web_proxy/RequestState.html">RequestState.unknown</a> です。最初の転送で上流が 5xx 以外を返した要求と、
+<a href="../../offline_web_proxy/ProxyConfig/queueExcludePaths.html">ProxyConfig.queueExcludePaths</a> に一致して送信待ちへ入れなかった要求は
+記録しないため、<a href="../../offline_web_proxy/RequestState.html">RequestState.unknown</a> になります（5xx の場合は送信待ちへ
+入るため <a href="../../offline_web_proxy/RequestState.html">RequestState.queued</a> です）。
+<a href="../../offline_web_proxy/ProxyConfig/enableIdempotencyKey.html">ProxyConfig.enableIdempotencyKey</a> が <code>false</code> の場合は、すべて
+<a href="../../offline_web_proxy/RequestState.html">RequestState.unknown</a> です。</p>
+<p>照会するだけで、送信待ちや隔離の中身は変えません。</p>
+<p><code>idempotencyKeys</code> 照会するべき等性キー。前後の空白を除いて照合し、
+  空のキーは無視します。同じキーを重ねて指定した場合も、そのまま返します。</p>
+<p>Returns: 指定した順（空のキーを除く）に並べた状態の一覧。</p>
+<p>Throws:</p>
+<ul>
+<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 保存領域が開いていない、または読めない場合。
+どこにも無いのか分からないため、<a href="../../offline_web_proxy/RequestState.html">RequestState.unknown</a> は返しません。</li>
+</ul>
+</section>
+
+
+    
+<section class="summary source-code" id="source">
+  <h2><span>Implementation</span></h2>
+  <pre class="language-dart"><code class="language-dart">Future&lt;List&lt;RequestStatus&gt;&gt; getRequestStatuses(
+  List&lt;String&gt; idempotencyKeys,
+) async {
+  try {
+    return _resolveRequestStatuses(idempotencyKeys);
+  } catch (e) {
+    throw QueueOperationException(&#39;getRequestStatuses&#39;,
+        &#39;リクエストの状態の照会に失敗しました: $e&#39;, e is Exception ? e : null);
+  }
+}</code></pre>
+</section>
+
+
+  </div> <!-- /.main-content -->
+
+  <div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+    <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">getRequestStatuses method</li>
+</ol>
+
+
+    <h5>OfflineWebProxy class</h5>
+    <div id="dartdoc-sidebar-left-content"></div>
+  </div><!--/.sidebar-offcanvas-->
+
+  <div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+</div><!--/.sidebar-offcanvas-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.18.0
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../../static-assets/highlight.pack.js?v1"></script>
+<script src="../../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+

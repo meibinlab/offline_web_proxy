@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the DroppedRequest constructor from Class DroppedRequest from the offline_web_proxy library, for the Dart programming language.">
-  <title>DroppedRequest constructor - DroppedRequest - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the RequestStatus constructor from Class RequestStatus from the offline_web_proxy library, for the Dart programming language.">
+  <title>RequestStatus constructor - RequestStatus - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/DroppedRequest-class.html">DroppedRequest</a></li>
-    <li class="self-crumb">DroppedRequest const constructor</li>
+    <li><a href="../../offline_web_proxy/RequestStatus-class.html">RequestStatus</a></li>
+    <li class="self-crumb">RequestStatus const constructor</li>
   </ol>
-  <div class="self-name">DroppedRequest</div>
+  <div class="self-name">RequestStatus</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,44 +54,40 @@
   <div
       id="dartdoc-main-content"
       class="main-content"
-      data-above-sidebar="offline_web_proxy&#47;DroppedRequest-class-sidebar.html"
+      data-above-sidebar="offline_web_proxy&#47;RequestStatus-class-sidebar.html"
       data-below-sidebar="">
       <div>
-<h1><span class="kind-constructor">DroppedRequest</span> constructor 
+<h1><span class="kind-constructor">RequestStatus</span> constructor 
 </h1></div>
 
     <section class="multi-line-signature">
       const
-      <span class="name ">DroppedRequest</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="-param-url"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span>, </span></li>
-<li><span class="parameter" id="-param-method"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">method</span>, </span></li>
-<li><span class="parameter" id="-param-droppedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">droppedAt</span>, </span></li>
-<li><span class="parameter" id="-param-dropReason"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">dropReason</span>, </span></li>
-<li><span class="parameter" id="-param-statusCode"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">statusCode</span>, </span></li>
-<li><span class="parameter" id="-param-errorMessage"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">errorMessage</span>, </span></li>
-<li><span class="parameter" id="-param-acknowledged"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">acknowledged</span> = <span class="default-value">false</span>, </span></li>
-<li><span class="parameter" id="-param-pendingMigration"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">pendingMigration</span> = <span class="default-value">false</span>, </span></li>
-<li><span class="parameter" id="-param-idempotencyKey"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">idempotencyKey</span>, </span></li>
+      <span class="name ">RequestStatus</span>(<wbr>{<ol class="parameter-list"> <li><span class="parameter" id="-param-idempotencyKey"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">idempotencyKey</span>, </span></li>
+<li><span class="parameter" id="-param-state"><span>required</span> <span class="type-annotation"><a href="../../offline_web_proxy/RequestState.html">RequestState</a></span> <span class="parameter-name">state</span>, </span></li>
 <li><span class="parameter" id="-param-acceptedAt"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a>?</span> <span class="parameter-name">acceptedAt</span>, </span></li>
+<li><span class="parameter" id="-param-statusCode"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">statusCode</span>, </span></li>
 </ol>})
     </section>
 
     
+<section class="desc markdown">
+  <p>Creates a request status.</p>
+<p><a href="../../offline_web_proxy/RequestStatus/idempotencyKey.html">idempotencyKey</a> is the key that was looked up.
+<a href="../../offline_web_proxy/RequestStatus/state.html">state</a> is where the request stands.
+<a href="../../offline_web_proxy/RequestStatus/acceptedAt.html">acceptedAt</a> is when the proxy first accepted it, when known.
+<a href="../../offline_web_proxy/RequestStatus/statusCode.html">statusCode</a> is the upstream status code for quarantined and dropped
+requests.</p>
+</section>
 
 
     
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">const DroppedRequest({
-  required this.url,
-  required this.method,
-  required this.droppedAt,
-  required this.dropReason,
-  required this.statusCode,
-  required this.errorMessage,
-  this.acknowledged = false,
-  this.pendingMigration = false,
-  this.idempotencyKey,
+  <pre class="language-dart"><code class="language-dart">const RequestStatus({
+  required this.idempotencyKey,
+  required this.state,
   this.acceptedAt,
+  this.statusCode,
 });</code></pre>
 </section>
 
@@ -109,12 +105,12 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/DroppedRequest-class.html">DroppedRequest</a></li>
-    <li class="self-crumb">DroppedRequest const constructor</li>
+    <li><a href="../../offline_web_proxy/RequestStatus-class.html">RequestStatus</a></li>
+    <li class="self-crumb">RequestStatus const constructor</li>
 </ol>
 
 
-    <h5>DroppedRequest class</h5>
+    <h5>RequestStatus class</h5>
     <div id="dartdoc-sidebar-left-content"></div>
   </div><!--/.sidebar-offcanvas-left-->
 

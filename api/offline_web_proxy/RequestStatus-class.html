@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the DroppedRequest class from the offline_web_proxy library, for the Dart programming language.">
-  <title>DroppedRequest class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the RequestStatus class from the offline_web_proxy library, for the Dart programming language.">
+  <title>RequestStatus class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,9 +30,9 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../index.html">offline_web_proxy</a></li>
     <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li class="self-crumb">DroppedRequest class</li>
+    <li class="self-crumb">RequestStatus class</li>
   </ol>
-  <div class="self-name">DroppedRequest</div>
+  <div class="self-name">RequestStatus</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,15 +54,17 @@
     id="dartdoc-main-content"
     class="main-content"
     data-above-sidebar="offline_web_proxy&#47;offline_web_proxy-library-sidebar.html"
-    data-below-sidebar="offline_web_proxy&#47;DroppedRequest-class-sidebar.html">
+    data-below-sidebar="offline_web_proxy&#47;RequestStatus-class-sidebar.html">
     <div>
-<h1><span class="kind-class">DroppedRequest</span> class 
+<h1><span class="kind-class">RequestStatus</span> class 
  
 </h1></div>
 
     
 <section class="desc markdown">
-  <p>エラーによりキューからドロップされたリクエストの履歴を表すクラス</p>
+  <p>State of one update request, looked up by its idempotency key.</p>
+<p>Carries no body, headers or query string, so that a page can only learn
+about the requests it asked for.</p>
 </section>
 
 
@@ -72,11 +74,11 @@
     <h2>Constructors</h2>
 
     <dl class="constructor-summary-list">
-        <dt id="DroppedRequest" class="callable">
-          <span class="name"><a href="../offline_web_proxy/DroppedRequest/DroppedRequest.html">DroppedRequest</a></span><span class="signature">({<span class="parameter" id="-param-url"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">url</span>, </span><span class="parameter" id="-param-method"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">method</span>, </span><span class="parameter" id="-param-droppedAt"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span> <span class="parameter-name">droppedAt</span>, </span><span class="parameter" id="-param-dropReason"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">dropReason</span>, </span><span class="parameter" id="-param-statusCode"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span> <span class="parameter-name">statusCode</span>, </span><span class="parameter" id="-param-errorMessage"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">errorMessage</span>, </span><span class="parameter" id="-param-acknowledged"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">acknowledged</span> = <span class="default-value">false</span>, </span><span class="parameter" id="-param-pendingMigration"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span> <span class="parameter-name">pendingMigration</span> = <span class="default-value">false</span>, </span><span class="parameter" id="-param-idempotencyKey"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">idempotencyKey</span>, </span><span class="parameter" id="-param-acceptedAt"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a>?</span> <span class="parameter-name">acceptedAt</span></span>})</span>
+        <dt id="RequestStatus" class="callable">
+          <span class="name"><a href="../offline_web_proxy/RequestStatus/RequestStatus.html">RequestStatus</a></span><span class="signature">({<span class="parameter" id="-param-idempotencyKey"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">idempotencyKey</span>, </span><span class="parameter" id="-param-state"><span>required</span> <span class="type-annotation"><a href="../offline_web_proxy/RequestState.html">RequestState</a></span> <span class="parameter-name">state</span>, </span><span class="parameter" id="-param-acceptedAt"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a>?</span> <span class="parameter-name">acceptedAt</span>, </span><span class="parameter" id="-param-statusCode"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span> <span class="parameter-name">statusCode</span></span>})</span>
         </dt>
         <dd>
-          
+          Creates a request status.
             <div class="constructor-modifier features">const</div>
         </dd>
     </dl>
@@ -88,61 +90,13 @@
     <h2>Properties</h2>
     <dl class="properties">
         <dt id="acceptedAt" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/acceptedAt.html">acceptedAt</a></span>
+  <span class="name"><a href="../offline_web_proxy/RequestStatus/acceptedAt.html">acceptedAt</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a>?</span>
   
 
 </dt>
 <dd>
-  proxy が最初にこのリクエストを受け付けた日時
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="acknowledged" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/acknowledged.html">acknowledged</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
-  
-
-</dt>
-<dd>
-  アプリ側が内容を確認済みかどうか
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="droppedAt" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/droppedAt.html">droppedAt</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/DateTime-class.html">DateTime</a></span>
-  
-
-</dt>
-<dd>
-  ドロップされた日時
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="dropReason" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/dropReason.html">dropReason</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
-  
-
-</dt>
-<dd>
-  ドロップ理由
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="errorMessage" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/errorMessage.html">errorMessage</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
-  
-
-</dt>
-<dd>
-  詳細なエラーメッセージ
+  When the proxy first accepted the request, in UTC.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -160,37 +114,13 @@
 </dd>
 
         <dt id="idempotencyKey" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/idempotencyKey.html">idempotencyKey</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span>
-  
-
-</dt>
-<dd>
-  上流へ送っていたべき等性キー
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="method" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/method.html">method</a></span>
+  <span class="name"><a href="../offline_web_proxy/RequestStatus/idempotencyKey.html">idempotencyKey</a></span>
   <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
   
 
 </dt>
 <dd>
-  HTTPメソッド
-  <div class="features"><span class="feature">final</span></div>
-
-</dd>
-
-        <dt id="pendingMigration" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/pendingMigration.html">pendingMigration</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>
-  
-
-</dt>
-<dd>
-  暗号化する前の保存領域に残り、移行を待っているかどうか
+  Idempotency key that was looked up, with surrounding whitespace removed.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -207,26 +137,26 @@
 
 </dd>
 
-        <dt id="statusCode" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/statusCode.html">statusCode</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>
+        <dt id="state" class="property">
+  <span class="name"><a href="../offline_web_proxy/RequestStatus/state.html">state</a></span>
+  <span class="signature">&#8594; <a href="../offline_web_proxy/RequestState.html">RequestState</a></span>
   
 
 </dt>
 <dd>
-  エラー時のHTTPステータスコード
+  Where the request stands.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
 
-        <dt id="url" class="property">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/url.html">url</a></span>
-  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+        <dt id="statusCode" class="property">
+  <span class="name"><a href="../offline_web_proxy/RequestStatus/statusCode.html">statusCode</a></span>
+  <span class="signature">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>?</span>
   
 
 </dt>
 <dd>
-  ドロップされたリクエストのURL
+  Status code the upstream returned.
   <div class="features"><span class="feature">final</span></div>
 
 </dd>
@@ -252,8 +182,21 @@
 
 </dd>
 
+        <dt id="toMap" class="callable">
+  <span class="name"><a href="../offline_web_proxy/RequestStatus/toMap.html">toMap</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/Map-class.html">Map</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>, <span class="type-parameter">dynamic</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  Converts the status into a JSON-compatible map.
+  
+
+</dd>
+
         <dt id="toString" class="callable">
-  <span class="name"><a href="../offline_web_proxy/DroppedRequest/toString.html">toString</a></span><span class="signature">(<wbr>)
+  <span class="name"><a href="../offline_web_proxy/RequestStatus/toString.html">toString</a></span><span class="signature">(<wbr>)
     <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
   </span>
   
@@ -306,7 +249,7 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../index.html">offline_web_proxy</a></li>
     <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li class="self-crumb">DroppedRequest class</li>
+    <li class="self-crumb">RequestStatus class</li>
 </ol>
 
 

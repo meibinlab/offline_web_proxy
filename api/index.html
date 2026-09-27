@@ -570,6 +570,30 @@ if (!status.isOnline) {
 <li>Setting <code>statusPath</code> to an empty string disables it, which also stops the auto-reload of the fallback and <code>504</code> pages.</li>
 <li><code>queueLength</code>, <code>quarantinedCount</code> and <code>unacknowledgedDroppedCount</code> include entries still waiting for migration from the storage of 0.14.0 or earlier (see <a href="#migrating-from-0140-or-earlier">Migrating from 0.14.0 or earlier</a>).</li>
 </ul>
+<h4 id="looking-up-a-request-by-its-key">Looking up a request by its key</h4>
+<p>When the page sends an update request with its own key in <code>Idempotency-Key</code> (or the header named by <code>idempotencyHeaderName</code>), it can ask where that request stands by passing <code>idempotencyKey</code>. Use it to keep showing a request as unsent after the page is reopened, or to notice that the upstream rejected it and ask for it again.</p>
+<pre class="language-javascript"><code class="language-javascript">const query = requestIds
+  .map((id) =&gt; `idempotencyKey=${encodeURIComponent(id)}`)
+  .join("&amp;");
+const response = await fetch(`/__offline_web_proxy/status?${query}`, {
+  cache: "no-store",
+});
+if (!response.ok) {
+  // 503 means the stores cannot be read. Keep the saved keys and ask again later
+  return;
+}
+for (const item of (await response.json()).requests) {
+  // item.state is queued / quarantined / delivered / dropped / unknown
+}
+</code></pre>
+<ul>
+<li><code>state</code> is one of <code>queued</code> (waiting in the queue), <code>quarantined</code> (rejected with 4xx), <code>delivered</code> (sent from the queue and answered with 2xx, for <code>idempotencyRetention</code>), <code>dropped</code> (in the dropped history) or <code>unknown</code> (found nowhere). <code>quarantined</code> and <code>dropped</code> carry <code>statusCode</code>.</li>
+<li>When the same key sits in several places, the first match in the order <code>delivered</code> → <code>queued</code> → <code>quarantined</code> → <code>dropped</code> wins.</li>
+<li>A request the upstream answered on its first forward with anything but 5xx is <code>unknown</code>, because the page receives that answer directly. A 5xx or an unreachable upstream puts the request in the queue, so it is <code>queued</code> (a request matching <code>queueExcludePaths</code> is never queued, so it stays <code>unknown</code>).</li>
+<li>Up to 50 keys of up to 200 characters each; beyond that the answer is <code>400</code>. When the stores cannot be read the answer is <code>503</code>, never <code>unknown</code>.</li>
+<li>Another app on the device that knows a key can look it up. Use keys that cannot be guessed, such as version 4 UUIDs.</li>
+<li>From Dart, <code>getRequestStatuses()</code> makes the same decision.</li>
+</ul>
 <h3 id="operating-the-quarantine-store-from-the-page">Operating the quarantine store from the page</h3>
 <p>A sale quarantined by a 4xx is resent once the cause — a closed stocktake, for example — is resolved. When the person doing that stands at the screen, <code>enableAdminApi: true</code> exposes the same operations over HTTP.</p>
 <table>
@@ -701,6 +725,10 @@ final warmupResult = await proxy.warmupCache(
 final queued = await proxy.getQueuedRequests();
 final dropped = await proxy.getDroppedRequests(limit: 50);
 await proxy.clearDroppedRequests();
+
+// Where a request stands, by the idempotency key the page attached
+final statuses = await proxy.getRequestStatuses(['3f0c...']);
+print(statuses.single.state); // RequestState.queued, for example
 
 // 上流に拒否されて再送を打ち切ったリクエスト
 final quarantined = await proxy.getQuarantinedRequests();
