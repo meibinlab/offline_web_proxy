@@ -32,7 +32,7 @@ proxy は Hive の Box と secure storage にデータを保存します。暗�
 | `proxy_cookies_secure` | Cookie（名前、値、ドメイン、パス、有効期限、属性）。キーはドメイン、パス、名前など | 値のみ（AES-256） | 有効期限を過ぎたものは、送信する Cookie を探すときに削除。`clearCookies()` で削除 |
 | `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
 | `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限（【5】の「保持上限」） |
-| `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
+| `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか、べき等性キー、受け付けた日時）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
 | `proxy_cache` | 応答キャッシュ（ステータスコード、ヘッダ、本文、有効期限）。キーは正規化した URL の SHA-256 | なし | stale 期間を過ぎたものを 1 時間ごとに削除 |
 | `proxy_web_storage` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット | なし | 次のスナップショットで上書きされるまで |
 | `proxy_idempotency` | 上流へ届いたべき等性キーと、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
@@ -550,6 +550,7 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 - **隔離時の通知**: `ProxyEventType.requestQuarantined` を発行します
 - **破棄時の通知**: `ProxyEventType.requestDropped` を発行します
 - **二重記録の回避**: 隔離した場合はドロップ履歴へ記録しません。例外は保持上限を超えた場合で、隔離から移す分と、1 件で合計バイト数の上限を超える分をドロップ履歴へ記録します（「保持上限」）
+- **履歴に残すキー**: ドロップ履歴には、べき等性キーと最初に受け付けた日時（`acceptedAt`）も記録します。隔離から移す場合（`quarantine_limit`・`quarantine_expired`）と、1 件で上限を超える場合（`quarantine_too_large`）も同じです。0.19.0 より前に記録した履歴には、どちらもありません
 - **記録の順序**: 隔離もドロップ履歴も、キューから取り除く前に記録します。記録できなかった場合はキューへ残すため、取り除いたのに記録が無い状態にはなりません。保持上限で隔離から移す場合も、ドロップ履歴へ記録してから隔離から削除します
 
 ### キューへ入れない更新系（queueExcludePaths）
@@ -753,6 +754,66 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 これにより「未送信があるときは精算させない」「未送信件数を表示する」「オフラインならレジ認証を出さない」が Web 側だけで完結します。
 
+#### 要求の状態の照会
+
+画面が自分で決めたべき等性キー（【6】）で送った更新系について、いまどうなっているかをキーで照会できます。画面を開き直した後も送信待ちを表示し続ける、隔離やドロップに気付いて取り直してもらう、といった用途を想定します。
+
+- **要求**: `GET {statusPath}?idempotencyKey=<キー>`。複数のキーは同じ名前を繰り返して指定します
+- **入力**: キーは前後の空白を除いて照合し、空のキーは無視します。件数は 50 件まで、長さは 200 文字までで、超えた場合は `400` と `{"error": "…"}` を返します。クエリを復号できない場合（不正な UTF-8 など）は、キーの有無にかかわらず、従来どおり shelf が `400` を返します。同じキーを重ねて指定した場合も、指定した順にそのまま返します
+- **応答**: 従来の項目に `requests` を加えます。`requests` は指定した順（空のキーを除く）に並べます
+- **キーを指定しない場合**: 従来と同じ応答を返します（`requests` は含みません）
+- **照会だけ**: 送信待ちや隔離の中身は変えません
+- **API**: 同じ判定を `getRequestStatuses()` で行えます（【20】）
+
+```json
+{
+  "isOnline": true,
+  "queueLength": 1,
+  "requests": [
+    {"idempotencyKey": "3f0c…", "state": "queued", "acceptedAt": "2026-09-27T01:23:45.678Z"},
+    {"idempotencyKey": "9a41…", "state": "quarantined", "acceptedAt": "2026-09-26T23:00:00.000Z", "statusCode": 409},
+    {"idempotencyKey": "c7d2…", "state": "unknown"}
+  ]
+}
+```
+
+（`requests` 以外の項目は一部を省略しています。）
+
+| `state` | 意味 | `statusCode` |
+| --- | --- | --- |
+| `queued` | 送信待ち。5xx や到達できないために再送を待っている場合を含む | なし |
+| `quarantined` | 上流が 4xx で拒否し、隔離している | 上流が返した値 |
+| `delivered` | 送信待ちから送り、上流が 2xx を返した。`idempotencyRetention`（既定 24 時間）の間だけ | なし |
+| `dropped` | ドロップ履歴にある | 上流が返した値（無い場合は `0`） |
+| `unknown` | どこにも無い | なし |
+
+- **`acceptedAt`**: 最初に受け付けた日時（UTC の ISO 8601）です。`queued`・`quarantined`・`dropped` で分かる場合だけ返します。`delivered` と `unknown` には付けません
+- **探す範囲**: 送信待ち・隔離・ドロップ履歴と、`proxy_idempotency` に記録した届いたキーです。旧平文 Box から移行を待っている分も探します
+- **同じキーが複数の場所にある場合**: `delivered` → `queued` → `quarantined` → `dropped` の順で、先に当てはまるものを返します。上流が一度でも受け付けていれば、画面にとっては済んだことになるためです。同じキーは次の場合に複数の場所にあり得ます
+  - 送信待ちの重複防止は送信待ちだけを探すため、隔離中のキーと同じキーの要求は送信待ちにも入ります
+  - `retryQuarantinedRequest()` は、同じキーが送信待ちにあるかを確かめずに戻します
+- **`unknown` になる場合**:
+  - 最初の転送で上流が 5xx 以外（2xx・3xx・4xx）を返した要求と、`queueExcludePaths` に一致して送信待ちへ入れなかった要求は、記録しないため `unknown` です。画面はその応答を直接受け取ります。5xx を返した場合や上流へ到達できなかった場合は送信待ちへ入るため、`queued` です
+  - どこかにあった要求も、次の場合は記録が無くなるため `unknown` に変わります
+    - 隔離を破棄した場合（`discardQuarantinedRequest()`・`clearQuarantinedRequests()`・管理エンドポイント）
+    - ドロップ履歴が保持期間か件数の上限で消えた場合と、`clearDroppedRequests()`
+    - `delivered` の記録が `idempotencyRetention` を過ぎた場合
+  - 0.19.0 より前に記録したドロップ履歴は、キーを持たないため見つかりません
+  - `enableIdempotencyKey` が `false` の場合は、すべて `unknown` です
+- **状態の変化**:
+
+| 状態 | 次の状態 |
+| --- | --- |
+| `queued` | `delivered`（2xx、または届いた記録に同じキーがあり、送らずに成功とみなした場合）、`quarantined`（4xx）、`dropped`（4xx で `dropPolicy` が `drop` の場合、`quarantine_too_large` の場合）。5xx や到達できない間は `queued` のまま |
+| `quarantined` | `queued`（`retryQuarantinedRequest()`）、`dropped`（`quarantine_limit`・`quarantine_expired`）、`unknown`（破棄） |
+| `dropped` | `unknown`（保持期間か件数の上限で消えた場合、`clearDroppedRequests()`） |
+| `delivered` | `unknown`（`idempotencyRetention` を過ぎた場合） |
+
+- **読み取りの一貫性**: 保存領域の間を移すときは、移し先へ書いてから元を消します。照会はすべての保存領域を、処理を譲らずに続けて読みます。そのため、移す途中の要求を見落として `unknown` を返すことはありません
+- **読めない場合**: 送信待ち・隔離・ドロップ履歴・`proxy_idempotency` のどれかが開いていない場合は、`unknown` ではなく `503` と `{"error": "…"}` を返します。起動中・停止中・保存領域の復旧中などです。`unknown` を返すと、画面が送信待ちの記録を消してしまうためです。キーを指定しない応答は、従来どおり件数を 0 として返します
+- **到達の制限**: 状態通知と同じです（【5】内部エンドポイントの origin 制御、【2】到達の制限）。`Origin` の無い要求を許可するため、端末内の別アプリもキーを知っていれば照会できます。**キーは推測できない乱数（UUID 第 4 版など）にしてください。** 応答には本文・ヘッダ・URL を含めず、照会したキーの状態だけを返します
+- **200 文字を超えるキー**: 201 文字以上のキーで送った要求は、HTTP では照会できません
+
 ### 管理エンドポイント
 
 `ProxyConfig.enableAdminApi` を `true` にすると、隔離キューの操作を HTTP で公開します。原因を解消して再送する操作は店舗の人が行うため、操作面がレジ画面にある場合に使います。既定は無効です。
@@ -763,7 +824,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 | `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | キューへ戻して再送 |
 | `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | 破棄 |
 
-- **一覧の項目**: `id`、`url`、`method`、`quarantinedAt`、`queuedAt`、`acceptedAt`（いずれも UTC の ISO 8601）、`reason`、`statusCode`、`errorMessage`、`pendingMigration`。隔離した日時の古い順に並びます
+- **一覧の項目**: `id`、`url`、`method`、`quarantinedAt`、`queuedAt`、`acceptedAt`（いずれも UTC の ISO 8601）、`reason`、`statusCode`、`errorMessage`、`pendingMigration`、`idempotencyKey`（無い場合は `null`）。隔離した日時の古い順に並びます
 - **応答**: 再送は `{"retried": true}`、破棄は `{"discarded": true}` を `200` で返します
 - **失敗時の応答**: 該当が無い場合は `404`、旧平文 Box から移行を待っている項目の場合は `409` を返します。どちらも `retried` / `discarded` が `false` で、`error` に理由が入ります。隔離のロックを 30 秒以内に取得できない場合は `500`（`text/plain`）を返します
 
@@ -790,6 +851,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - **適用範囲**: 上流への転送とキューからの再送の両方に同じキーを付与します
 - **キューの重複防止**: クライアントが同じキーで送り直した場合、キューへ二重に積みません
 - **送信済みの抑止**: 保持期間内に上流へ届いたことが確認できているキーは再送しません
+- **状態の照会**: 画面は、自分で付けたキーで要求の状態を照会できます（【5】状態通知エンドポイントの「要求の状態の照会」）
 
 ### 責務の分担
 
@@ -2150,6 +2212,24 @@ if (stats.unacknowledgedDroppedCount > 0) {
 }
 ```
 
+#### `Future<List<RequestStatus>> getRequestStatuses(List<String> idempotencyKeys)`
+
+べき等性キーごとに、更新系リクエストがいまどうなっているかを返します。判定は状態通知の照会と同じです（【5】の「要求の状態の照会」）。
+
+- **パラメータ**:
+  - `idempotencyKeys`: 照会するキー。前後の空白を除いて照合し、空のキーは無視する。件数と長さの上限は設けない
+- **戻り値**: 指定した順（空のキーを除く）に並べた `RequestStatus` のリスト
+- **例外**:
+  - `QueueOperationException`: 保存領域が開いていない、または読めない場合。どこにも無いのか分からないため、`RequestState.unknown` は返さない
+- **注意**: 照会するだけで、送信待ちや隔離の中身は変えない
+
+```dart
+final statuses = await proxy.getRequestStatuses([requestId]);
+if (statuses.single.state == RequestState.quarantined) {
+  // 上流に拒否されたことを利用者へ伝え、取り直してもらう
+}
+```
+
 ### 隔離キュー管理
 
 `ProxyConfig.dropPolicy` が `DropPolicy.quarantine`（既定）の場合、上流に拒否されたリクエストは本文を保持したまま隔離領域へ退避します。以下の API で内容を確認し、再送または破棄を選択します。
@@ -2350,6 +2430,7 @@ class QueuedRequest {
   final int retryCount; // 現在の再試行回数
   final DateTime nextRetryAt; // 次回再試行予定日時
   final bool pendingMigration; // 旧平文 Box から移行を待っている項目か（既定: false）
+  final String? idempotencyKey; // べき等性キー（enableIdempotencyKey が false の間に受け付けた場合は null）
 }
 ```
 
@@ -2367,6 +2448,8 @@ class DroppedRequest {
   final String errorMessage; // 詳細なエラーメッセージ
   final bool acknowledged; // 利用者へ提示済みか（既定: false）
   final bool pendingMigration; // 旧平文 Box から移行を待っている履歴か（既定: false）
+  final String? idempotencyKey; // べき等性キー（0.19.0 より前の履歴では null）
+  final DateTime? acceptedAt; // 最初に受け付けた日時（0.19.0 より前の履歴では null）
 }
 ```
 
@@ -2386,6 +2469,7 @@ class QuarantinedRequest {
   final int statusCode; // 上流から返されたHTTPステータスコード
   final String errorMessage; // 詳細なエラーメッセージ
   final bool pendingMigration; // 旧平文 Box から移行を待っている項目か。再送も破棄もできない（既定: false）
+  final String? idempotencyKey; // べき等性キー（enableIdempotencyKey が false の間に受け付けた場合は null）
 }
 ```
 
@@ -2417,6 +2501,22 @@ class QueueResendResult {
   final String? dropReason; // キューから取り除いた理由
   final bool willRetry; // キューへ残して再試行するかどうか
   final DateTime attemptedAt; // 試行日時（UTC）
+}
+```
+
+#### `RequestStatus` と `RequestState`
+
+べき等性キーで照会した、更新系リクエストの状態を表します。本文・ヘッダ・URL は持ちません。
+
+```dart
+enum RequestState { queued, quarantined, delivered, dropped, unknown }
+
+class RequestStatus {
+  final String idempotencyKey; // 照会したキー（前後の空白を除いた値）
+  final RequestState state; // 状態
+  final DateTime? acceptedAt; // 最初に受け付けた日時（UTC。分からない場合は null）
+  final int? statusCode; // 上流が返した状態コード（quarantined と dropped のときだけ）
+  Map<String, dynamic> toMap(); // 状態通知の requests の 1 件と同じ形
 }
 ```
 

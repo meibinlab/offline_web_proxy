@@ -35,6 +35,17 @@ class DroppedRequest {
   /// なります。確認済みへの変更と全削除は、旧版の保存領域にも適用されます。
   final bool pendingMigration;
 
+  /// 上流へ送っていたべき等性キー
+  ///
+  /// 0.19.0 より前に記録した履歴と、`enableIdempotencyKey` が `false` の間に
+  /// 受け付けたリクエストでは `null` です。
+  final String? idempotencyKey;
+
+  /// proxy が最初にこのリクエストを受け付けた日時
+  ///
+  /// 0.19.0 より前に記録した履歴では `null` です。
+  final DateTime? acceptedAt;
+
   const DroppedRequest({
     required this.url,
     required this.method,
@@ -44,6 +55,8 @@ class DroppedRequest {
     required this.errorMessage,
     this.acknowledged = false,
     this.pendingMigration = false,
+    this.idempotencyKey,
+    this.acceptedAt,
   });
 
   @override

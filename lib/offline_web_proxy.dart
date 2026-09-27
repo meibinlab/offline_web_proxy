@@ -90,6 +90,7 @@ import 'src/models/quarantined_request.dart';
 import 'src/models/queue_exclude_rule.dart';
 import 'src/models/queue_resend_result.dart';
 import 'src/models/queued_request.dart';
+import 'src/models/request_status.dart';
 import 'src/models/response_header_snapshot.dart';
 import 'src/models/storage_integrity.dart';
 import 'src/models/upstream_circuit_state.dart';
@@ -123,6 +124,7 @@ export 'src/models/quarantined_request.dart';
 export 'src/models/queue_exclude_rule.dart';
 export 'src/models/queue_resend_result.dart';
 export 'src/models/queued_request.dart';
+export 'src/models/request_status.dart';
 export 'src/models/storage_integrity.dart';
 export 'src/models/upstream_circuit_state.dart';
 export 'src/models/warmup_result.dart';
@@ -295,6 +297,15 @@ const String _defaultReplayHeaderName = 'X-Offline-Replay';
 /// 保持するキュー再送結果の件数。
 /// 監視用の直近確認が目的のため、上限を設けてメモリ使用量を抑える。
 const int _recentResendResultCapacity = 20;
+
+/// 状態通知で、要求の状態を照会するべき等性キーのクエリ名。
+const String _statusIdempotencyKeyParameter = 'idempotencyKey';
+
+/// 状態通知で、1 回に照会できるべき等性キーの件数の上限。
+const int _maxStatusIdempotencyKeys = 50;
+
+/// 状態通知で照会できるべき等性キーの長さの上限。
+const int _maxStatusIdempotencyKeyLength = 200;
 
 /// 設定が読み込めない場合に使う既定のキュー投入応答。
 const ProxyResponseConfig _defaultQueuedResponse = ProxyResponseConfig(
@@ -1429,9 +1440,14 @@ class OfflineWebProxy {
 
   /// 状態通知エンドポイントの要求を処理します。
   ///
+  /// クエリに `idempotencyKey` を指定した場合は、そのキーの要求の状態
+  /// （[getRequestStatuses]）を `requests` として加えます。指定しない場合は
+  /// 従来と同じ内容を返します。
+  ///
   /// [request] 受信した要求。
   ///
-  /// Returns: 現在の状態を表す JSON 応答。
+  /// Returns: 現在の状態を表す JSON 応答。キーが多すぎる・長すぎる場合は
+  ///   `400`、保存領域を読めない場合は `503`。
   Future<shelf.Response> _handleStatusRequest(shelf.Request request) async {
     if (!_isSameOriginInternalRequest(request)) {
       return _buildInternalJsonResponse(
@@ -1440,9 +1456,46 @@ class OfflineWebProxy {
       );
     }
 
+    // 復号できないクエリは、shelf がハンドラへ渡す前に 400 で拒否する
+    final requestedKeys =
+        request.url.queryParametersAll[_statusIdempotencyKeyParameter];
+    List<RequestStatus>? requestStatuses;
+    if (requestedKeys != null) {
+      final keys = [
+        for (final key in requestedKeys)
+          if (key.trim().isNotEmpty) key.trim(),
+      ];
+      if (keys.length > _maxStatusIdempotencyKeys) {
+        return _buildInternalJsonResponse(HttpStatus.badRequest, {
+          'error': 'too many idempotencyKey values '
+              '(max $_maxStatusIdempotencyKeys)',
+        });
+      }
+      if (keys.any((key) => key.length > _maxStatusIdempotencyKeyLength)) {
+        return _buildInternalJsonResponse(HttpStatus.badRequest, {
+          'error': 'idempotencyKey is too long '
+              '(max $_maxStatusIdempotencyKeyLength characters)',
+        });
+      }
+
+      try {
+        requestStatuses = await getRequestStatuses(keys);
+      } on QueueOperationException {
+        // unknown と答えると、画面は送信待ちの記録を消してしまうため区別する
+        return _buildInternalJsonResponse(
+          HttpStatus.serviceUnavailable,
+          {'error': 'request states are not available'},
+        );
+      }
+    }
+
     final stats = await getStats();
 
     return _buildInternalJsonResponse(HttpStatus.ok, {
+      if (requestStatuses != null)
+        'requests': requestStatuses
+            .map((status) => status.toMap())
+            .toList(growable: false),
       'isOnline': _isOnline,
       'onlineDecisionSource': _onlineDecisionSource.name,
       'isUpstreamReachable': _isUpstreamReachable,
@@ -1486,6 +1539,7 @@ class OfflineWebProxy {
                 'statusCode': request.statusCode,
                 'errorMessage': request.errorMessage,
                 'pendingMigration': request.pendingMigration,
+                'idempotencyKey': request.idempotencyKey,
               })
           .toList(growable: false),
     });
@@ -3258,6 +3312,157 @@ class OfflineWebProxy {
       throw QueueOperationException('acknowledgeDropped',
           'ドロップされたリクエストの確認状態の更新に失敗しました: $e', e is Exception ? e : null);
     }
+  }
+
+  /// べき等性キーごとに、更新系リクエストがいまどうなっているかを返します。
+  ///
+  /// 画面が自分で決めたキー（`Idempotency-Key` など）で送った要求について、
+  /// 送信待ち・隔離・届いた・ドロップのどれにあるかを返します。送信待ち・隔離・
+  /// ドロップ履歴と、キューから送って上流が 2xx を返したキーの記録
+  /// （[ProxyConfig.idempotencyRetention] の間）を探します。暗号化する前の
+  /// 保存領域から移行を待っている分も探します。
+  ///
+  /// 同じキーが複数の場所にある場合は、[RequestState.delivered]、
+  /// [RequestState.queued]、[RequestState.quarantined]、[RequestState.dropped]
+  /// の順で先に当てはまるものを返します。どこにも無い場合は
+  /// [RequestState.unknown] です。最初の転送で上流が 5xx 以外を返した要求と、
+  /// [ProxyConfig.queueExcludePaths] に一致して送信待ちへ入れなかった要求は
+  /// 記録しないため、[RequestState.unknown] になります（5xx の場合は送信待ちへ
+  /// 入るため [RequestState.queued] です）。
+  /// [ProxyConfig.enableIdempotencyKey] が `false` の場合は、すべて
+  /// [RequestState.unknown] です。
+  ///
+  /// 照会するだけで、送信待ちや隔離の中身は変えません。
+  ///
+  /// [idempotencyKeys] 照会するべき等性キー。前後の空白を除いて照合し、
+  ///   空のキーは無視します。同じキーを重ねて指定した場合も、そのまま返します。
+  ///
+  /// Returns: 指定した順（空のキーを除く）に並べた状態の一覧。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 保存領域が開いていない、または読めない場合。
+  ///     どこにも無いのか分からないため、[RequestState.unknown] は返しません。
+  Future<List<RequestStatus>> getRequestStatuses(
+    List<String> idempotencyKeys,
+  ) async {
+    try {
+      return _resolveRequestStatuses(idempotencyKeys);
+    } catch (e) {
+      throw QueueOperationException('getRequestStatuses',
+          'リクエストの状態の照会に失敗しました: $e', e is Exception ? e : null);
+    }
+  }
+
+  /// べき等性キーごとの状態を、保存領域から同期的に読み取ります。
+  ///
+  /// 送信待ちから隔離・ドロップ履歴・届いた記録へ移すときは、移し先へ書いて
+  /// から元を消すため、途中では両方にあります。途中で処理を譲ると、読み終えた
+  /// 場所から未読の場所へ移った要求を見落として [RequestState.unknown] を返す
+  /// ため、すべての保存領域を `await` を挟まずに読みます。
+  ///
+  /// [idempotencyKeys] 照会するべき等性キー。
+  ///
+  /// Returns: 指定した順（空のキーを除く）に並べた状態の一覧。
+  ///
+  /// Throws:
+  ///   * [StateError] 保存領域が開いていない場合。
+  List<RequestStatus> _resolveRequestStatuses(List<String> idempotencyKeys) {
+    final keys = [
+      for (final key in idempotencyKeys)
+        if (key.trim().isNotEmpty) key.trim(),
+    ];
+    if (keys.isEmpty) {
+      return const <RequestStatus>[];
+    }
+
+    if (!(_config?.enableIdempotencyKey ?? true)) {
+      return [
+        for (final key in keys)
+          RequestStatus(idempotencyKey: key, state: RequestState.unknown),
+      ];
+    }
+
+    final queueBox = _queueBox;
+    final quarantineBox = _quarantinedRequestBox;
+    final droppedBox = _droppedRequestBox;
+    final idempotencyBox = _idempotencyBox;
+    if (queueBox == null ||
+        !queueBox.isOpen ||
+        quarantineBox == null ||
+        !quarantineBox.isOpen ||
+        droppedBox == null ||
+        !droppedBox.isOpen ||
+        idempotencyBox == null ||
+        !idempotencyBox.isOpen) {
+      throw StateError('storage is not open');
+    }
+
+    final wanted = keys.toSet();
+
+    // 保存領域ごとに、照会されたキーの最初の記録を控える。旧平文 Box と同じ
+    // キーの記録は、移行の巻き戻しに失敗した古い写しのため、暗号化 Box の側を
+    // 読まない（一覧や件数と同じ扱い）
+    Map<String, Map> findRecords(ProxyStorageBox kind, Box encryptedBox) {
+      final excludedKeys = _excludedLegacyKeys(kind);
+      final found = <String, Map>{};
+      for (final (box, isLegacy) in [
+        (encryptedBox, false),
+        (_legacyBoxFor(kind), true),
+      ]) {
+        if (box == null || !box.isOpen) {
+          continue;
+        }
+        for (final storageKey in box.keys) {
+          if (!isLegacy && excludedKeys.contains(storageKey.toString())) {
+            continue;
+          }
+          final data = box.get(storageKey);
+          if (data is! Map) {
+            continue;
+          }
+          final key = data['idempotencyKey'];
+          if (key is String && wanted.contains(key)) {
+            found.putIfAbsent(key, () => data);
+          }
+        }
+      }
+      return found;
+    }
+
+    final queued = findRecords(ProxyStorageBox.queue, queueBox);
+    final quarantined = findRecords(ProxyStorageBox.quarantine, quarantineBox);
+    final dropped = findRecords(ProxyStorageBox.droppedRequests, droppedBox);
+
+    DateTime? parseAcceptedAt(String? value) =>
+        DateTime.tryParse(value ?? '')?.toUtc();
+
+    return [
+      for (final key in keys)
+        if (_isIdempotencyKeyCompleted(key))
+          RequestStatus(idempotencyKey: key, state: RequestState.delivered)
+        else if (queued[key] case final data?)
+          RequestStatus(
+            idempotencyKey: key,
+            state: RequestState.queued,
+            acceptedAt: parseAcceptedAt(_resolveQueuedAcceptedAt(data)),
+          )
+        else if (quarantined[key] case final data?)
+          RequestStatus(
+            idempotencyKey: key,
+            state: RequestState.quarantined,
+            acceptedAt: parseAcceptedAt(_resolveQueuedAcceptedAt(data)),
+            statusCode: data['statusCode'] as int? ?? 0,
+          )
+        else if (dropped[key] case final data?)
+          RequestStatus(
+            idempotencyKey: key,
+            state: RequestState.dropped,
+            acceptedAt: parseAcceptedAt(data['acceptedAt'] as String?),
+            statusCode: data['statusCode'] as int? ?? 0,
+          )
+        else
+          RequestStatus(idempotencyKey: key, state: RequestState.unknown),
+    ];
   }
 
   /// 隔離されたリクエストの一覧を取得します。
@@ -9279,6 +9484,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       retryCount: data['retryCount'] as int? ?? 0,
       nextRetryAt: DateTime.parse(
           data['nextRetryAt'] as String? ?? DateTime.now().toIso8601String()),
+      idempotencyKey: data['idempotencyKey'] as String?,
     );
   }
 
@@ -9303,6 +9509,9 @@ window.__offline_web_proxy_web_storage_bridge = {
       errorMessage: data['errorMessage'] as String? ?? '',
       // 旧バージョンの履歴には項目が無いため、未確認として扱う
       acknowledged: data['acknowledged'] as bool? ?? false,
+      // 0.19.0 より前の履歴には項目が無い
+      idempotencyKey: data['idempotencyKey'] as String?,
+      acceptedAt: DateTime.tryParse(data['acceptedAt'] as String? ?? ''),
     );
   }
 
@@ -10133,6 +10342,8 @@ window.__offline_web_proxy_web_storage_bridge = {
         while (droppedEntries.containsKey(key)) {
           key = _generateUniqueStorageKey(box, _legacyDroppedRequestBox);
         }
+        final idempotencyKey = record.data['idempotencyKey'] as String?;
+        final acceptedAt = _resolveQueuedAcceptedAt(record.data);
         droppedEntries[key] = {
           'url': record.data['url'] as String? ?? '',
           'method': record.data['method'] as String? ?? 'GET',
@@ -10141,6 +10352,9 @@ window.__offline_web_proxy_web_storage_bridge = {
           'statusCode': record.statusCode,
           'errorMessage': record.errorMessage,
           'acknowledged': false,
+          // 画面が送った要求の行方をキーで照会できるよう残す
+          if (idempotencyKey != null) 'idempotencyKey': idempotencyKey,
+          if (acceptedAt != null) 'acceptedAt': acceptedAt,
         };
       }
 
@@ -10259,6 +10473,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       reason: data['reason'] as String? ?? 'dropped',
       statusCode: data['statusCode'] as int? ?? 0,
       errorMessage: data['errorMessage'] as String? ?? '',
+      idempotencyKey: data['idempotencyKey'] as String?,
     );
   }
 

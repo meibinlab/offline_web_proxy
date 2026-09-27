@@ -34,6 +34,11 @@ class QueuedRequest {
   /// なり、暗号化した保存領域の項目より後に再送されます。
   final bool pendingMigration;
 
+  /// 上流へ送るべき等性キー
+  ///
+  /// `enableIdempotencyKey` が `false` の間に受け付けたリクエストでは `null` です。
+  final String? idempotencyKey;
+
   const QueuedRequest({
     required this.url,
     required this.method,
@@ -43,6 +48,7 @@ class QueuedRequest {
     required this.retryCount,
     required this.nextRetryAt,
     this.pendingMigration = false,
+    this.idempotencyKey,
   });
 
   @override
