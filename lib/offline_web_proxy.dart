@@ -289,6 +289,9 @@ const Duration _defaultIdempotencyRetention = Duration(hours: 24);
 /// 設定が読み込めない場合に使う既定の受付時刻ヘッダ名。
 const String _defaultAcceptedAtHeaderName = 'X-Offline-Accepted-At';
 
+/// 設定が読み込めない場合に使う既定の再送ヘッダ名。
+const String _defaultReplayHeaderName = 'X-Offline-Replay';
+
 /// 保持するキュー再送結果の件数。
 /// 監視用の直近確認が目的のため、上限を設けてメモリ使用量を抑える。
 const int _recentResendResultCapacity = 20;
@@ -1816,6 +1819,32 @@ class OfflineWebProxy {
       _config?.acceptedAtHeaderName ?? _defaultAcceptedAtHeaderName,
       acceptedAt,
     );
+  }
+
+  /// 再送ヘッダを付与するかどうかを返します。
+  ///
+  /// Returns: 付与する場合は `true`。
+  bool get _isReplayHeaderEnabled => _config?.enableReplayHeader ?? true;
+
+  /// 再送ヘッダの名前を返します。
+  ///
+  /// Returns: 設定済みのヘッダ名。
+  String get _replayHeaderName =>
+      _config?.replayHeaderName ?? _defaultReplayHeaderName;
+
+  /// 再送ヘッダを上流リクエストへ付与します。
+  ///
+  /// キューから送る更新系であることを上流へ伝えます。クライアントが同名の
+  /// ヘッダを送っていた場合も proxy の値で上書きし、画面のスクリプトから
+  /// キューからの送信を装えないようにします。
+  ///
+  /// [ioRequest] 送信する上流リクエスト。
+  void _applyReplayHeader(HttpClientRequest ioRequest) {
+    if (!_isReplayHeaderEnabled) {
+      return;
+    }
+
+    ioRequest.headers.set(_replayHeaderName, '1');
   }
 
   /// キュー再送の結果を記録し、イベントとして通知します。
@@ -7418,7 +7447,14 @@ window.__offline_web_proxy_web_storage_bridge = {
   }) async {
     final connectionSpecificHeaders =
         _extractConnectionSpecificHeaders(request.headers);
+    // 最初の転送はキューからの送信ではないため、画面が送った再送ヘッダは
+    // 上流へ渡さない。画面のスクリプトから再送を装えないようにする。
+    final replayHeaderName =
+        _isReplayHeaderEnabled ? _replayHeaderName.toLowerCase() : null;
     request.headers.forEach((key, value) {
+      if (key.toLowerCase() == replayHeaderName) {
+        return;
+      }
       if (_shouldForwardUpstreamHeader(
         key,
         connectionSpecificHeaders: connectionSpecificHeaders,
@@ -8923,6 +8959,9 @@ window.__offline_web_proxy_web_storage_bridge = {
 
       // 初回転送と同じ値を送り、受け付けた時点を上流へ伝える
       _applyAcceptedAtHeader(request, _resolveQueuedAcceptedAt(data));
+
+      // 最初の転送と見分けられるよう、キューからの送信であることを伝える
+      _applyReplayHeader(request);
 
       if (body.isNotEmpty && method != 'GET') {
         request.add(body);

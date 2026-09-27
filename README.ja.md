@@ -214,6 +214,8 @@ const config = ProxyConfig(
   ],
   enableAcceptedAtHeader: true,
   acceptedAtHeaderName: 'X-Offline-Accepted-At',
+  enableReplayHeader: true,
+  replayHeaderName: 'X-Offline-Replay',
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -290,6 +292,10 @@ const config = ProxyConfig(
 - `enableAcceptedAtHeader` と `acceptedAtHeaderName` は、proxy が最初にリクエストを受け付けた時刻を上流へ伝える設定です。初回転送と以降の再送で同じ値（UTC の ISO 8601）を送るため、上流は「業務日時が未指定ならこのヘッダを使う」と 1 箇所で実装できます。オフラインで積んだ会計が復帰時刻で記録される問題を避けられます。既定で有効です。
   - 隔離からの再送でも値は変わりません。`queuedAt` は再送のたびに更新されるため流用できません。
   - **値は端末の時計に依存します。** オフライン中に時計がずれた端末は、ずれた時刻を報告します。
+- `enableReplayHeader` と `replayHeaderName` は、キューから送る更新系に `X-Offline-Replay: 1` を付ける設定です。上流は、画面から受けてすぐ転送した要求と、キューから後で送った要求とを見分けられます。たとえば、内容が現在の登録と食い違うとき、最初の転送では拒否して画面で確認し直してもらい、キューからの送信では受け付ける、という扱いができます。既定で有効です。
+  - 最初の転送を拒否する場合は 4xx を返してください。5xx を返すとキューへ入り、このヘッダを付けて送り直されます。4xx でも、タイムアウトなどで応答が proxy へ届かなければ同じく送り直されるため、同じべき等性キーで一度拒否した要求には、キューからの送信でも同じ判定を返してください。
+  - 画面が送った同名のヘッダは、画面から受けて上流へ転送する要求（read 系を含む）からは取り除き、キューからの送信では proxy の値で上書きします。
+  - **認証の代わりにはなりません。** 上流へ直接届く要求は、proxy を通らずにこのヘッダを付けられます。
 - `cacheTtl` と `cacheStale` は、指定すると既定のマップとマージされず**丸ごと置き換わります**。未掲載の Content-Type が `default` へ落ちるよう、`default` は必ず含めてください。
 - `text/html` の既定は TTL 1 時間、stale 1 日です。最後にオンラインで取得してから約 25 時間でフォールバック対象から外れるため、**長期のオフライン運用では `cacheTtl` と `cacheStale` の設定が必要です**。`cacheStale` には JavaScript のキーが無く、スクリプトは `default`（3 日）になります。
 

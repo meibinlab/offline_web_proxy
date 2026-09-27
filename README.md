@@ -214,6 +214,8 @@ const config = ProxyConfig(
   ],
   enableAcceptedAtHeader: true,
   acceptedAtHeaderName: 'X-Offline-Accepted-At',
+  enableReplayHeader: true,
+  replayHeaderName: 'X-Offline-Replay',
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -290,6 +292,10 @@ Notes:
 - `enableAcceptedAtHeader` and `acceptedAtHeaderName` tell the upstream when the proxy first accepted a request. The same UTC ISO 8601 value is sent on the first forward and on every resend, so the upstream needs one rule — use this header when the payload carries no business timestamp — to stop offline sales from being recorded at reconnection time. Enabled by default.
   - The value survives a quarantine retry. `queuedAt` cannot be reused because a retry updates it.
   - **The value comes from the device clock.** A device whose clock is wrong while offline reports a wrong time.
+- `enableReplayHeader` and `replayHeaderName` add `X-Offline-Replay: 1` to update requests sent from the queue, so the upstream can tell them from requests forwarded as soon as the screen sent them. For example, when the content no longer matches what the upstream has on record, it can reject the first forward and let the user check again on the screen, yet accept the same request from the queue. Enabled by default.
+  - Answer 4xx to reject a first forward. A 5xx answer puts the request in the queue, and it is sent again with this header. So is a 4xx answer that never reaches the proxy, for example after a timeout, so give the same answer from the queue to a request already rejected under the same idempotency key.
+  - A header of the same name sent by the screen is removed from every request forwarded as the screen sent it (read requests included) and replaced with the proxy's value on requests sent from the queue.
+  - **This is not authentication.** Any request that reaches the upstream without the proxy can carry the header.
 - `cacheTtl` and `cacheStale` **replace** the default maps rather than merging with them. Always keep a `default` entry so that unlisted content types still resolve.
 - `text/html` defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. **Long offline operation requires tuning both `cacheTtl` and `cacheStale`.** `cacheStale` has no JavaScript entry, so scripts fall back to `default` (3 days).
 
