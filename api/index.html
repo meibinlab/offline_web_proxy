@@ -248,6 +248,8 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
   ],
   enableAcceptedAtHeader: true,
   acceptedAtHeaderName: 'X-Offline-Accepted-At',
+  enableReplayHeader: true,
+  replayHeaderName: 'X-Offline-Replay',
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -342,6 +344,13 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <ul>
 <li>The value survives a quarantine retry. <code>queuedAt</code> cannot be reused because a retry updates it.</li>
 <li><strong>The value comes from the device clock.</strong> A device whose clock is wrong while offline reports a wrong time.</li>
+</ul>
+</li>
+<li><code>enableReplayHeader</code> and <code>replayHeaderName</code> add <code>X-Offline-Replay: 1</code> to update requests sent from the queue, so the upstream can tell them from requests forwarded as soon as the screen sent them. For example, when the content no longer matches what the upstream has on record, it can reject the first forward and let the user check again on the screen, yet accept the same request from the queue. Enabled by default.
+<ul>
+<li>Answer 4xx to reject a first forward. A 5xx answer puts the request in the queue, and it is sent again with this header. So is a 4xx answer that never reaches the proxy, for example after a timeout, so give the same answer from the queue to a request already rejected under the same idempotency key.</li>
+<li>A header of the same name sent by the screen is removed from every request forwarded as the screen sent it (read requests included) and replaced with the proxy's value on requests sent from the queue.</li>
+<li><strong>This is not authentication.</strong> Any request that reaches the upstream without the proxy can carry the header.</li>
 </ul>
 </li>
 <li><code>cacheTtl</code> and <code>cacheStale</code> <strong>replace</strong> the default maps rather than merging with them. Always keep a <code>default</code> entry so that unlisted content types still resolve.</li>
