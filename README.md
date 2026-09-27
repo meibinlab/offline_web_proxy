@@ -552,6 +552,33 @@ The response looks like this.
 - Setting `statusPath` to an empty string disables it, which also stops the auto-reload of the fallback and `504` pages.
 - `queueLength`, `quarantinedCount` and `unacknowledgedDroppedCount` include entries still waiting for migration from the storage of 0.14.0 or earlier (see [Migrating from 0.14.0 or earlier](#migrating-from-0140-or-earlier)).
 
+#### Looking up a request by its key
+
+When the page sends an update request with its own key in `Idempotency-Key` (or the header named by `idempotencyHeaderName`), it can ask where that request stands by passing `idempotencyKey`. Use it to keep showing a request as unsent after the page is reopened, or to notice that the upstream rejected it and ask for it again.
+
+```javascript
+const query = requestIds
+  .map((id) => `idempotencyKey=${encodeURIComponent(id)}`)
+  .join("&");
+const response = await fetch(`/__offline_web_proxy/status?${query}`, {
+  cache: "no-store",
+});
+if (!response.ok) {
+  // 503 means the stores cannot be read. Keep the saved keys and ask again later
+  return;
+}
+for (const item of (await response.json()).requests) {
+  // item.state is queued / quarantined / delivered / dropped / unknown
+}
+```
+
+- `state` is one of `queued` (waiting in the queue), `quarantined` (rejected with 4xx), `delivered` (sent from the queue and answered with 2xx, for `idempotencyRetention`), `dropped` (in the dropped history) or `unknown` (found nowhere). `quarantined` and `dropped` carry `statusCode`.
+- When the same key sits in several places, the first match in the order `delivered` → `queued` → `quarantined` → `dropped` wins.
+- A request the upstream answered on its first forward with anything but 5xx is `unknown`, because the page receives that answer directly. A 5xx or an unreachable upstream puts the request in the queue, so it is `queued` (a request matching `queueExcludePaths` is never queued, so it stays `unknown`).
+- Up to 50 keys of up to 200 characters each; beyond that the answer is `400`. When the stores cannot be read the answer is `503`, never `unknown`.
+- Another app on the device that knows a key can look it up. Use keys that cannot be guessed, such as version 4 UUIDs.
+- From Dart, `getRequestStatuses()` makes the same decision.
+
 ### Operating the quarantine store from the page
 
 A sale quarantined by a 4xx is resent once the cause — a closed stocktake, for example — is resolved. When the person doing that stands at the screen, `enableAdminApi: true` exposes the same operations over HTTP.
@@ -670,6 +697,10 @@ final warmupResult = await proxy.warmupCache(
 final queued = await proxy.getQueuedRequests();
 final dropped = await proxy.getDroppedRequests(limit: 50);
 await proxy.clearDroppedRequests();
+
+// Where a request stands, by the idempotency key the page attached
+final statuses = await proxy.getRequestStatuses(['3f0c...']);
+print(statuses.single.state); // RequestState.queued, for example
 
 // 上流に拒否されて再送を打ち切ったリクエスト
 final quarantined = await proxy.getQuarantinedRequests();

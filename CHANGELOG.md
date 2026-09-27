@@ -1,3 +1,15 @@
+## Unreleased
+
+### 機能追加
+
+- **画面が送った更新系の状態を、べき等性キーで照会できるようにした**: 送信待ちになった要求が、その後に上流へ届いたのか、隔離やドロップされたのかを、画面から知る手段がありませんでした。状態通知（`statusPath`）に `idempotencyKey` を指定すると、キーごとの状態を `requests` として返します。Dart からは `OfflineWebProxy.getRequestStatuses()` で同じ判定を行えます
+  - 状態は `queued`・`quarantined`・`delivered`（送信待ちから送り、上流が 2xx を返した）・`dropped`・`unknown` のいずれかです。同じキーが複数の場所にある場合は、`delivered` → `queued` → `quarantined` → `dropped` で先に当てはまるものを返します
+  - キーは 50 件まで、長さは 200 文字までで、超えると `400` を返します。保存領域を読めない場合は、`unknown` ではなく `503` を返します
+  - すべての保存領域を処理を譲らずに続けて読むため、保存領域の間を移る途中の要求を `unknown` と答えることはありません
+  - キーを指定しない場合の応答は変わりません
+- **ドロップ履歴に、べき等性キーと受け付けた日時を記録するようにした**: `DroppedRequest.idempotencyKey` と `acceptedAt` を追加しました。隔離から移す場合（`quarantine_limit`・`quarantine_expired`）と `quarantine_too_large` も含みます。0.19.0 より前の履歴では `null` です
+- **一覧にべき等性キーを出すようにした**: `QueuedRequest.idempotencyKey`、`QuarantinedRequest.idempotencyKey` と、管理エンドポイントの隔離の一覧の `idempotencyKey` を追加しました
+
 ## 0.18.0
 
 ### 機能追加

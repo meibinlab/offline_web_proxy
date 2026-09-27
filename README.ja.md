@@ -552,6 +552,33 @@ if (!status.isOnline) {
 - `statusPath` に空文字列を指定すると無効になります。代替ページと `504` ページの自動復帰も止まります。
 - `queueLength`、`quarantinedCount`、`unacknowledgedDroppedCount` には、0.14.0 以前の保存領域から移行を待っている分も含みます（「0.14.0 以前からの移行」）。
 
+#### 送った要求の状態をキーで照会する
+
+画面が `Idempotency-Key`（`idempotencyHeaderName` で変えた場合はそのヘッダ）に自分で決めたキーを付けて送った更新系は、`idempotencyKey` を指定して、いまどうなっているかを照会できます。画面を開き直した後も送信待ちを表示し続ける、上流に拒否されたことに気付いて取り直してもらう、といった用途に使います。
+
+```javascript
+const query = requestIds
+  .map((id) => `idempotencyKey=${encodeURIComponent(id)}`)
+  .join("&");
+const response = await fetch(`/__offline_web_proxy/status?${query}`, {
+  cache: "no-store",
+});
+if (!response.ok) {
+  // 503 は保存領域を読めない状態。残したキーは消さず、次の照会を待つ
+  return;
+}
+for (const item of (await response.json()).requests) {
+  // item.state は queued / quarantined / delivered / dropped / unknown
+}
+```
+
+- `state` は、`queued`（送信待ち）、`quarantined`（4xx で隔離）、`delivered`（送信待ちから送り、上流が 2xx を返した。`idempotencyRetention` の間だけ）、`dropped`（ドロップ履歴にある）、`unknown`（どこにも無い）のいずれかです。`quarantined` と `dropped` には `statusCode` が付きます。
+- 同じキーが複数の場所にある場合は、`delivered` → `queued` → `quarantined` → `dropped` の順で先に当てはまるものを返します。
+- 最初の転送で上流が 5xx 以外を返した要求は `unknown` です。画面はその応答を直接受け取るためです。5xx を返した場合や上流へ到達できなかった場合は送信待ちへ入るため、`queued` です（`queueExcludePaths` に一致する要求は送信待ちへ入らないため、`unknown` です）。
+- キーは 50 件まで、長さは 200 文字までです。超えると `400` を返します。保存領域を読めない場合は、`unknown` ではなく `503` を返します。
+- 端末内の別アプリも、キーを知っていれば照会できます。キーは推測できない乱数（UUID 第 4 版など）にしてください。
+- Dart からは `getRequestStatuses()` で同じ判定を行えます。
+
 ### 隔離キューを画面から操作する
 
 4xx で隔離された会計は、原因（棚卸の締めなど）を解いてから再送します。操作するのが店舗の人であれば、`enableAdminApi: true` で HTTP からも操作できます。
@@ -670,6 +697,10 @@ final warmupResult = await proxy.warmupCache(
 final queued = await proxy.getQueuedRequests();
 final dropped = await proxy.getDroppedRequests(limit: 50);
 await proxy.clearDroppedRequests();
+
+// 画面が付けたべき等性キーで、要求がいまどうなっているかを調べる
+final statuses = await proxy.getRequestStatuses(['3f0c...']);
+print(statuses.single.state); // RequestState.queued など
 
 // 上流に拒否されて再送を打ち切ったリクエスト
 final quarantined = await proxy.getQuarantinedRequests();

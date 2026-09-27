@@ -856,6 +856,66 @@ void main() {
         expect(upstream!.receivedBodies, ['first', 'second', 'third']);
       });
     });
+
+    /// 移行を待っている旧 Box の項目も、べき等性キーで照会できること
+    test('finds pending legacy entries by idempotency key', () async {
+      await withRealHttpClient(() async {
+        final base = _recentBase();
+        await writeLegacyBox(_legacyQueueBoxName, {
+          _keyA: {
+            ..._queueEntry(
+              url: '$_offlineOrigin/api/queued',
+              body: 'queued',
+              queuedAt: base,
+              nextRetryAt: _farFuture,
+            ),
+            'idempotencyKey': 'legacy-queued',
+          },
+        });
+        await writeLegacyBox(_legacyQuarantineBoxName, {
+          _keyA: {
+            ..._quarantineEntry(
+              url: '$_offlineOrigin/api/quarantined',
+              body: 'quarantined',
+              quarantinedAt: base,
+            ),
+            'idempotencyKey': 'legacy-quarantined',
+          },
+        });
+        // 0.14.0 以前の履歴は実際にはキーを持たない。旧 Box も探すことを
+        // 確かめるため、ここではキーを付けておく
+        await writeLegacyBox(_legacyDroppedBoxName, {
+          _keyA: {
+            ..._droppedEntry(
+              url: '$_offlineOrigin/api/dropped',
+              droppedAt: base,
+            ),
+            'idempotencyKey': 'legacy-dropped',
+          },
+        });
+        await Hive.close();
+
+        proxy = createProxy();
+        await proxy.start(config: const ProxyConfig(origin: _offlineOrigin));
+
+        // 前提: 移行を待っていること
+        expect(
+          (await proxy.getQueuedRequests()).single.pendingMigration,
+          isTrue,
+        );
+
+        final statuses = await proxy.getRequestStatuses(
+          ['legacy-queued', 'legacy-quarantined', 'legacy-dropped'],
+        );
+        expect(statuses.map((status) => status.state), [
+          RequestState.queued,
+          RequestState.quarantined,
+          RequestState.dropped,
+        ]);
+        expect(statuses[1].statusCode, HttpStatus.badRequest);
+        expect(statuses[2].statusCode, HttpStatus.badRequest);
+      });
+    });
   });
 
   group('遅らせた移行の途中失敗と再試行', () {
@@ -1100,6 +1160,46 @@ void main() {
         // 確認済みへの変更でも残骸を数えないこと（旧 Box の履歴と追加された履歴の 2 件）
         expect(await proxy.acknowledgeDroppedRequests(), 2);
         expect((await proxy.getStats()).unacknowledgedDroppedCount, 0);
+      });
+    });
+
+    /// べき等性キーの照会でも、暗号化 Box にある同じキーの残骸を読まないこと
+    test('ignores leftovers when looking up idempotency keys', () async {
+      await withRealHttpClient(() async {
+        final base = _recentBase();
+        await writeLegacyBox(_legacyQueueBoxName, {
+          _keyA: {
+            ..._queueEntry(
+              url: '$_offlineOrigin/api/legacy',
+              body: 'legacy',
+              queuedAt: base,
+              nextRetryAt: _farFuture,
+            ),
+            'idempotencyKey': 'legacy-key',
+          },
+        });
+        await Hive.close();
+
+        proxy = createProxy();
+        await proxy.start(config: const ProxyConfig(origin: _offlineOrigin));
+
+        // 書き写した後にキーを消せなかった、古い内容の残骸を再現する
+        await Hive.box(_encryptedQueueBoxName).put(_keyA, {
+          ..._queueEntry(
+            url: '$_offlineOrigin/api/legacy',
+            body: 'legacy',
+            queuedAt: base,
+            nextRetryAt: _farFuture,
+          ),
+          'idempotencyKey': 'stale-key',
+        });
+
+        final statuses =
+            await proxy.getRequestStatuses(['legacy-key', 'stale-key']);
+        expect(statuses.map((status) => status.state), [
+          RequestState.queued,
+          RequestState.unknown,
+        ]);
       });
     });
   });

@@ -32,7 +32,7 @@ The proxy stores data in Hive boxes and in secure storage. In an encrypted box o
 | `proxy_cookies_secure` | Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on | Values only (AES-256) | An expired cookie is removed when the cookies to send are looked up. `clearCookies()` removes them |
 | `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
 | `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default (see "Retention Limits" in [5]) |
-| `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
+| `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged, idempotency key, time first accepted). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
 | `proxy_cache` | Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL | None | Entries past their stale period are removed every hour |
 | `proxy_web_storage` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on | None | Until the next snapshot overwrites it |
 | `proxy_idempotency` | Idempotency keys that reached the upstream, with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
@@ -550,6 +550,7 @@ Network errors and 5xx errors are treated as temporary failures: they are kept i
 - **Quarantine notification**: Emits `ProxyEventType.requestQuarantined`
 - **Drop notification**: Emits `ProxyEventType.requestDropped`
 - **No double bookkeeping**: A quarantined request is not also written to the dropped history. The exception is the retention limits: requests moved out of the quarantine store, and a request that alone exceeds the total size limit, are written to the dropped history (see "Retention Limits")
+- **Keys kept in the history**: The dropped history also records the idempotency key and the time the request was first accepted (`acceptedAt`). This includes requests moved out of the quarantine store (`quarantine_limit`, `quarantine_expired`) and a request that alone exceeds the size limit (`quarantine_too_large`). Entries recorded before 0.19.0 have neither
 - **Recording order**: Both the quarantine store and the dropped history are written before the request is removed from the queue. If the write fails the request stays queued, so it is never removed without a record. A request moved out of the quarantine store by a retention limit is likewise written to the dropped history before it is removed
 
 ### Update Requests That Are Never Queued (queueExcludePaths)
@@ -753,6 +754,66 @@ The unsent count and the online state were reachable only from the Dart API, so 
 
 With it, "block settlement while something is unsent", "show the unsent count" and "hide the sign-in when offline" are decided entirely in the web app.
 
+#### Looking Up a Request's State
+
+A page that sends an update request with its own idempotency key (section [6]) can look up where that request stands by the key. Typical uses are to keep showing a request as unsent after the page is reopened, or to notice a quarantined or dropped request and ask for it to be taken again.
+
+- **Request**: `GET {statusPath}?idempotencyKey=<key>`. Repeat the parameter for several keys
+- **Input**: Keys are matched with surrounding whitespace removed, and empty keys are ignored. Up to 50 keys of up to 200 characters each; beyond that the answer is `400` with `{"error": "…"}`. A query that cannot be decoded (invalid UTF-8, for example) is answered with `400` by shelf, with or without a key, as before. A key given twice is answered twice, in the order given
+- **Response**: The usual fields plus `requests`, in the order the keys were given (empty keys left out)
+- **Without a key**: The response is unchanged (no `requests`)
+- **Read-only**: The lookup never changes the queue or the quarantine store
+- **API**: `getRequestStatuses()` makes the same decision (section [20])
+
+```json
+{
+  "isOnline": true,
+  "queueLength": 1,
+  "requests": [
+    {"idempotencyKey": "3f0c…", "state": "queued", "acceptedAt": "2026-09-27T01:23:45.678Z"},
+    {"idempotencyKey": "9a41…", "state": "quarantined", "acceptedAt": "2026-09-26T23:00:00.000Z", "statusCode": 409},
+    {"idempotencyKey": "c7d2…", "state": "unknown"}
+  ]
+}
+```
+
+(Some fields other than `requests` are omitted.)
+
+| `state` | Meaning | `statusCode` |
+| --- | --- | --- |
+| `queued` | Waiting in the queue, including a request waiting to be resent after 5xx or an unreachable upstream | None |
+| `quarantined` | Rejected by the upstream with 4xx and kept in quarantine | Value the upstream returned |
+| `delivered` | Sent from the queue and answered with 2xx by the upstream, for `idempotencyRetention` (24 hours by default) | None |
+| `dropped` | In the dropped history | Value the upstream returned (`0` when none) |
+| `unknown` | Found nowhere | None |
+
+- **`acceptedAt`**: When the request was first accepted (ISO 8601 in UTC). Returned for `queued`, `quarantined` and `dropped` when known; never for `delivered` or `unknown`
+- **Where it looks**: The queue, the quarantine store, the dropped history and the delivered keys recorded in `proxy_idempotency`, including entries still waiting for migration from a legacy plain box
+- **A key in several places**: The first match in the order `delivered` → `queued` → `quarantined` → `dropped` wins. Once the upstream has accepted the request, the page has nothing left to do. The same key can sit in several places:
+  - Queue deduplication looks only at the queue, so a request with the key of a quarantined request is queued as well
+  - `retryQuarantinedRequest()` puts a request back without checking whether the queue already holds the same key
+- **When the answer is `unknown`**:
+  - A request the upstream answered on its first forward with anything but 5xx (2xx, 3xx or 4xx), and a request kept out of the queue by `queueExcludePaths`, are not recorded and are `unknown`; the page receives that answer directly. A 5xx or an unreachable upstream on the first forward puts the request in the queue, so it is `queued`
+  - A request that was found before becomes `unknown` once its record is gone:
+    - when a quarantined request is discarded (`discardQuarantinedRequest()`, `clearQuarantinedRequests()` or the administrative endpoint)
+    - when a dropped record expires or is removed by the count limit, and on `clearDroppedRequests()`
+    - when a delivered record passes `idempotencyRetention`
+  - Dropped records made before 0.19.0 carry no key and are never found
+  - Every key is `unknown` while `enableIdempotencyKey` is `false`
+- **Transitions**:
+
+| State | Next state |
+| --- | --- |
+| `queued` | `delivered` (2xx, or treated as sent because the delivered records already hold the key), `quarantined` (4xx), `dropped` (4xx with `dropPolicy` `drop`, or `quarantine_too_large`). Stays `queued` on 5xx or an unreachable upstream |
+| `quarantined` | `queued` (`retryQuarantinedRequest()`), `dropped` (`quarantine_limit`, `quarantine_expired`), `unknown` (discarded) |
+| `dropped` | `unknown` (expired or removed by the count limit, `clearDroppedRequests()`) |
+| `delivered` | `unknown` (after `idempotencyRetention`) |
+
+- **Consistent reads**: A request moving between stores is written to its new store before it is removed from the old one, and the lookup reads every store in one go without yielding. A request in the middle of a move is therefore never reported as `unknown`
+- **When the stores cannot be read**: If the queue, the quarantine store, the dropped history or `proxy_idempotency` is not open — during startup, shutdown or a storage recovery, for example — the answer is `503` with `{"error": "…"}` rather than `unknown`, because `unknown` would make the page forget a request it is still waiting for. A response without a key still reports the counts as 0, as before
+- **Access**: Same as the status endpoint (section [5], Origin Control for Internal Endpoints, and section [2], Restricting Access). Requests without an `Origin` are allowed, so another app on the device that knows a key can look it up. **Use keys that cannot be guessed, such as version 4 UUIDs.** The answer carries no body, headers or URL, and covers only the keys asked for
+- **Keys longer than 200 characters**: A request sent with a key of 201 characters or more cannot be looked up over HTTP
+
 ### Administrative Endpoints
 
 Setting `ProxyConfig.enableAdminApi` to `true` exposes the quarantine store over HTTP. The person who resolves the cause is usually standing at the screen, so the controls belong on the page. Disabled by default.
@@ -763,7 +824,7 @@ Setting `ProxyConfig.enableAdminApi` to `true` exposes the quarantine store over
 | `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | Put one back on the queue |
 | `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | Discard one |
 
-- **List items**: `id`, `url`, `method`, `quarantinedAt`, `queuedAt`, `acceptedAt` (all ISO 8601 in UTC), `reason`, `statusCode`, `errorMessage` and `pendingMigration`, ordered by quarantine time, oldest first
+- **List items**: `id`, `url`, `method`, `quarantinedAt`, `queuedAt`, `acceptedAt` (all ISO 8601 in UTC), `reason`, `statusCode`, `errorMessage`, `pendingMigration` and `idempotencyKey` (`null` when there is none), ordered by quarantine time, oldest first
 - **Responses**: `200` with `{"retried": true}` for a resend and `{"discarded": true}` for a discard
 - **Failure responses**: `404` when no item matches, and `409` when the item is still waiting for migration from a legacy plain box. Both set `retried` or `discarded` to `false` and carry the reason in `error`. `500` (`text/plain`) when the quarantine lock cannot be acquired within 30 seconds
 
@@ -790,6 +851,7 @@ A queued request is resent without knowing whether the upstream already received
 - **Where it applies**: Both the forwarded attempt and every queue resend carry the same key
 - **Queue deduplication**: Resubmitting the same key does not add a second queue entry
 - **Skipping delivered requests**: A key already known to have reached the upstream within the retention period is not resent
+- **Looking up the state**: A page can look up a request by the key it attached (section [5], "Looking Up a Request's State" under Status Endpoint)
 
 ### Division of Responsibility
 
@@ -2150,6 +2212,24 @@ if (stats.unacknowledgedDroppedCount > 0) {
 }
 ```
 
+#### `Future<List<RequestStatus>> getRequestStatuses(List<String> idempotencyKeys)`
+
+Returns where each update request stands, looked up by its idempotency key. The decision is the same as the status endpoint lookup (section [5], "Looking Up a Request's State").
+
+- **Parameters**:
+  - `idempotencyKeys`: Keys to look up. Matched with surrounding whitespace removed; empty keys are ignored. No limit on count or length
+- **Returns**: A list of `RequestStatus` in the order given (empty keys left out)
+- **Exceptions**:
+  - `QueueOperationException`: When a store is not open or cannot be read. `RequestState.unknown` is never returned in that case, because the proxy cannot tell whether the request is gone
+- **Note**: Read-only; the queue and the quarantine store are never changed
+
+```dart
+final statuses = await proxy.getRequestStatuses([requestId]);
+if (statuses.single.state == RequestState.quarantined) {
+  // Tell the operator the upstream rejected it and ask for it again
+}
+```
+
 ### Quarantine Management
 
 When `ProxyConfig.dropPolicy` is `DropPolicy.quarantine` (the default), a request rejected by the upstream is moved to a quarantine store with its body intact. The following APIs let an operator inspect it and choose between resending and discarding.
@@ -2350,6 +2430,7 @@ class QueuedRequest {
   final int retryCount; // Current retry count
   final DateTime nextRetryAt; // Next retry scheduled date/time
   final bool pendingMigration; // Waiting for migration from a legacy plain box (default: false)
+  final String? idempotencyKey; // Idempotency key (null when accepted while enableIdempotencyKey was false)
 }
 ```
 
@@ -2367,6 +2448,8 @@ class DroppedRequest {
   final String errorMessage; // Detailed error message
   final bool acknowledged; // Whether it has been shown to the operator (default: false)
   final bool pendingMigration; // Waiting for migration from a legacy plain box (default: false)
+  final String? idempotencyKey; // Idempotency key (null for entries recorded before 0.19.0)
+  final DateTime? acceptedAt; // First accepted (null for entries recorded before 0.19.0)
 }
 ```
 
@@ -2386,6 +2469,7 @@ class QuarantinedRequest {
   final int statusCode; // HTTP status code returned by the upstream
   final String errorMessage; // Detailed error message
   final bool pendingMigration; // Waiting for migration from a legacy plain box; cannot be resent or discarded (default: false)
+  final String? idempotencyKey; // Idempotency key (null when accepted while enableIdempotencyKey was false)
 }
 ```
 
@@ -2417,6 +2501,22 @@ class QueueResendResult {
   final String? dropReason; // Why it left the queue
   final bool willRetry; // Whether it stays queued for another attempt
   final DateTime attemptedAt; // When the attempt finished (UTC)
+}
+```
+
+#### `RequestStatus` and `RequestState`
+
+State of an update request, looked up by its idempotency key. Carries no body, headers or URL.
+
+```dart
+enum RequestState { queued, quarantined, delivered, dropped, unknown }
+
+class RequestStatus {
+  final String idempotencyKey; // Key that was looked up (surrounding whitespace removed)
+  final RequestState state; // Where the request stands
+  final DateTime? acceptedAt; // When first accepted (UTC; null when unknown)
+  final int? statusCode; // Upstream status code (quarantined and dropped only)
+  Map<String, dynamic> toMap(); // Same shape as one item of the status endpoint's requests
 }
 ```
 

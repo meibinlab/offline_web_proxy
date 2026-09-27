@@ -43,6 +43,11 @@ class QuarantinedRequest {
   /// `discardQuarantinedRequest()` は `false` を返します）。
   final bool pendingMigration;
 
+  /// 上流へ送っていたべき等性キー
+  ///
+  /// `enableIdempotencyKey` が `false` の間に受け付けたリクエストでは `null` です。
+  final String? idempotencyKey;
+
   const QuarantinedRequest({
     required this.id,
     required this.url,
@@ -54,6 +59,7 @@ class QuarantinedRequest {
     required this.statusCode,
     required this.errorMessage,
     this.pendingMigration = false,
+    this.idempotencyKey,
   });
 
   @override
