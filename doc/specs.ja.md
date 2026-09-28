@@ -33,11 +33,12 @@ proxy は Hive の Box と secure storage にデータを保存します。暗�
 | `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
 | `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限（【5】の「保持上限」） |
 | `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか、べき等性キー、受け付けた日時）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
-| `proxy_cache` | 応答キャッシュ（ステータスコード、ヘッダ、本文、有効期限）。キーは正規化した URL の SHA-256 | なし | stale 期間を過ぎたものを 1 時間ごとに削除 |
+| `proxy_cache` | 応答キャッシュ（ステータスコード、ヘッダ、本文、有効期限）。キーは正規化した URL の SHA-256。`encryptResponseCache` が `false`（既定）の場合に使う | なし | stale 期間を過ぎたものと、`cacheMaxSize` を超えた分を削除。`encryptResponseCache` を有効にすると、`proxy_cache_secure` へ移して削除 |
+| `proxy_cache_secure` | `encryptResponseCache` を有効にした場合の応答キャッシュ。内容とキーは `proxy_cache` と同じ | 値のみ（AES-256） | `proxy_cache` と同じ。`encryptResponseCache` を無効に戻すと、平文へ戻さずに削除 |
 | `proxy_web_storage` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット | なし | 次のスナップショットで上書きされるまで |
 | `proxy_idempotency` | 上流へ届いたべき等性キーと、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
 | `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号 | なし | 次のバインドで上書きされるまで |
-| secure storage の `offline_web_proxy.cookie_box_encryption_key` | 暗号化 Box の鍵。Cookie、キュー、隔離、ドロップ履歴で共有 | secure storage に保存 | `recoverEncryptedStorage()` が削除するか、判定表に従って作り直すまで（【4】の「判定表」） |
+| secure storage の `offline_web_proxy.cookie_box_encryption_key` | 暗号化 Box の鍵。Cookie、キュー、隔離、ドロップ履歴（と、有効にした場合の応答キャッシュ）で共有 | secure storage に保存 | `recoverEncryptedStorage()` が削除するか、判定表に従って作り直すまで（【4】の「判定表」） |
 | `proxy_queue`、`proxy_quarantined_requests`、`proxy_dropped_requests`、`proxy_cookies` | 0.14.0 以前（Cookie は 0.4.0 より前）が平文で保存した内容 | なし | 暗号化 Box へ移行した後に削除。キュー・隔離・ドロップ履歴の旧 Box は、削除の前に空にする |
 
 ### プロキシ対象
@@ -351,7 +352,7 @@ flowchart TD
 
 ### 暗号化鍵の管理と照合
 
-Hive は鍵が合わない暗号化 Box を開くと、先頭フレームの CRC 不一致を破損とみなしてファイルを切り詰めます。そのため proxy は、暗号化 Box（Cookie・キュー・隔離・ドロップ履歴）を開かずにファイルを読んで鍵と照合し、判定表に従って、そのまま開く・Cookie Box を破棄する・起動を失敗させる、のいずれかを選びます。
+Hive は鍵が合わない暗号化 Box を開くと、先頭フレームの CRC 不一致を破損とみなしてファイルを切り詰めます。そのため proxy は、暗号化 Box（Cookie・キュー・隔離・ドロップ履歴）を開かずにファイルを読んで鍵と照合し、判定表に従って、そのまま開く・Cookie Box を破棄する・起動を失敗させる、のいずれかを選びます。暗号化した応答キャッシュ（`encryptResponseCache`）は照合しません。上流から取り直せるため、鍵と合わなければ Hive の切り詰めに任せて空にし、鍵を作り直すときと復旧 API が鍵を削除するときは削除します（【16】の「応答キャッシュの暗号化」）
 
 #### 初期化の直列化
 
@@ -359,8 +360,8 @@ Hive は鍵が合わない暗号化 Box を開くと、先頭フレームの CRC
 
 | 段階 | 処理 | 実行する API |
 | --- | --- | --- |
-| 段階 1（鍵） | 保存先の特定、鍵の読み取りと照合、判定表に従う鍵の生成と Cookie Box の破棄、Cookie Box のオープン、旧平文 Cookie Box の移行 | `start()` と Cookie API（起動前・停止後にも呼べる） |
-| 段階 2（業務データ） | キャッシュ・Web ストレージ・べき等性キーの Box と、キュー・隔離・ドロップ履歴の暗号化 Box のオープン、旧平文 Box の移行（【5】） | `start()` だけ |
+| 段階 1（鍵） | 保存先の特定、鍵の読み取りと照合、判定表に従う鍵の生成と Cookie Box の破棄（鍵を作り直す場合は暗号化した応答キャッシュも削除）、Cookie Box のオープン、旧平文 Cookie Box の移行 | `start()` と Cookie API（起動前・停止後にも呼べる） |
+| 段階 2（業務データ） | キャッシュ（`encryptResponseCache` に従って平文か暗号化かを選び、切り替えた場合は移すか削除する）・Web ストレージ・べき等性キーの Box と、キュー・隔離・ドロップ履歴の暗号化 Box のオープン、旧平文 Box の移行（【5】） | `start()` だけ |
 
 - 失敗した段階は、その段階で開いた Box を閉じ、結果を共有せずに次の呼び出しで再試行する。段階 2 の失敗後も、段階 1 の結果（Cookie Box）は使える
 - `stop()` は段階 1・段階 2 の結果を捨てる。停止後に呼んだ Cookie API と次の `start()` は、段階 1 から照合し直す
@@ -423,7 +424,7 @@ secure storage から鍵を読んだ結果は、次のように区分します�
 | --- | --- |
 | 一時的に読めない | 起動失敗（`temporarilyUnavailable`） |
 | あり | そのまま開く |
-| なし・形式不正・読み取り不能 | 鍵を作り直して書き込む（暗号化データが無いため失うものは無い）。書き込みに失敗した場合は、Box を作らずに起動失敗（`keyWriteFailed`） |
+| なし・形式不正・読み取り不能 | 鍵を作り直して書き込む（業務データの暗号化 Box に中身が無いため失うものは無い。暗号化した応答キャッシュは削除する）。書き込みに失敗した場合は、Box を作らずに起動失敗（`keyWriteFailed`） |
 
 中身のある暗号化 Box がある場合は、次のとおりです。
 
@@ -469,7 +470,7 @@ secure storage から鍵を読んだ結果は、次のように区分します�
 | 鍵を一時的に読めない（読み直しの規則による場合を含む） | 何もしない | `rejection: temporarilyUnavailable` |
 | 鍵があり、キュー・隔離・ドロップ履歴の Box に不一致・破損・照合打ち切りが無い | 何もしない（Cookie Box だけの問題は `start()` が破棄して続けるため） | `rejection: startWillSucceed` |
 | 鍵があり、キュー・隔離・ドロップ履歴の Box に不一致・破損・照合打ち切りがある（Cookie Box も同じ規則で扱う） | 鍵を残し、Box ごとに扱う（下の表） | `performed: true` |
-| 形式不正、または なし・読み取り不能（読み直しても続く）で、キュー・隔離・ドロップ履歴の Box に中身がある | 暗号化 Box（Cookie・キュー・隔離・ドロップ履歴）をすべて削除してから、鍵を削除する | `performed: true`、`keyDeleted: true` |
+| 形式不正、または なし・読み取り不能（読み直しても続く）で、キュー・隔離・ドロップ履歴の Box に中身がある | 暗号化 Box（Cookie・キュー・隔離・ドロップ履歴と、暗号化した応答キャッシュ）をすべて削除してから、鍵を削除する | `performed: true`、`keyDeleted: true` |
 | 形式不正、または なし・読み取り不能で、キュー・隔離・ドロップ履歴の Box に中身が無い | 何もしない | `rejection: startWillSucceed` |
 
 - 鍵を書き込めずに起動に失敗した場合（`keyWriteFailed`）も、消す必要のある Box が無いため `startWillSucceed` になる。時間をおいて `start()` を再試行する
@@ -948,7 +949,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 
 **有効期限の扱い**: `no-store` を返すサーバは `no-store, max-age=0, must-revalidate` のように、保存させない意図の指示を併記することが一般的です。これをそのまま採用すると保存直後に stale となり、オフラインで使える期間が stale 期間だけになります。保存可否を設定側で上書きした以上、有効期限も設定側に従うのが一貫するため、一致したパスでは `s-maxage`、`max-age`、`Expires` を使わず `cacheTtl` の値を適用します。
 
-**保存領域の注意**: `no-store` は本来「保存しないこと」を求めるヘッダです。応答キャッシュは暗号化していないため、指定したパスの応答本文は端末内に平文で残ります。画面が含む情報と端末紛失時の影響を踏まえて指定してください。
+**保存領域の注意**: `no-store` は本来「保存しないこと」を求めるヘッダです。応答キャッシュは既定では暗号化しないため、指定したパスの応答本文は端末内に平文で残ります。画面が含む情報と端末紛失時の影響を踏まえて指定してください。個人情報や業務データを保存する場合は、`encryptResponseCache` を有効にしてください（【16】の「応答キャッシュの暗号化」）。
 
 #### ウォームアップ
 
@@ -1411,6 +1412,25 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 - **判定の時機**: 応答を保存したとき（転送とウォームアップ）と、1 時間ごとの purge です。前回の起動までに上限を超えていた分も、次に保存したときに削除します
 - **静的リソースと API の区別**: 行いません。すべて保存した日時の順です
 
+### 応答キャッシュの暗号化
+
+`ProxyConfig.encryptResponseCache`（既定 `false`）を有効にすると、応答キャッシュ（ステータスコード、ヘッダ、本文）を、Cookie・キュー・隔離と同じ鍵で AES-256 の暗号化 Box（`proxy_cache_secure`）へ保存します。`forceCachePaths` で個人情報や業務データの API を保存する場合に有効にしてください。
+
+- **暗号化されないもの**: Box のキー（正規化した URL の SHA-256）は平文のままです。URL を推測できれば、その URL が保存されているかどうかは確かめられます
+- **負荷**: Hive は暗号化 Box を開くときに全件を復号するため、キャッシュが大きいほど `start()` が遅くなります。パソコン（AOT）での測定では、本文 30 KB の応答を並べた場合、Box を開く時間が次のとおりでした。スマートフォンでは数倍かかる見込みです（実機では未計測）。保存 1 件あたりは約 0.3 ms 増えます。有効にする場合は `cacheMaxSize` を控えめにしてください
+
+| キャッシュの合計 | 平文 | 暗号化 |
+| --- | --- | --- |
+| 29 MB | 94 ms | 436 ms |
+| 88 MB | 282 ms | 1,319 ms |
+| 199 MB | 656 ms | 3,170 ms |
+
+- **有効にしたとき**: 平文の `proxy_cache` があれば、1 件ずつ読んで暗号化 Box へ移し、平文のファイルを削除します。移せなかった記録は捨てて残りを移し続け、最後に件数を知らせます（`ProxyEventType.errorOccurred`、`phase: cacheEncryptionMigration`、`failedCount`）。平文のファイルを残さないことを優先するためです
+  - 移すのは `start()` の中（保存領域の初期化の中）で、その間は Cookie API も待ちます。パソコンでの測定では、本文 30 KB の応答で 29 MB に約 0.7 秒、199 MB に約 7 秒かかりました
+  - 削除は通常のファイル削除で、フラッシュストレージ上の領域の消去は保証しません。削除に失敗した場合は、次の起動で移し直します
+- **無効に戻したとき**: 暗号化 Box を平文へ戻さずに削除します。キャッシュは空から始まります。削除に失敗しても起動は続けます（`ProxyEventType.errorOccurred`、`phase: cacheEncryptionCleanup`）
+- **鍵との照合**: 起動時の照合（【4】の「判定表」）の対象にしません。鍵と合わない場合は、起動を失敗させずにキャッシュを空にして続けます。応答は上流から取り直せるためです。鍵を作り直した場合と、`recoverEncryptedStorage()` が鍵を削除した場合は、暗号化 Box を削除します（`recoverEncryptedStorage()` の結果の一覧には含めません）
+
 ### TTL（生存時間）と Stale 期間の管理
 
 Cache-Control ヘッダを考慮した TTL 計算と stale 期間の設定を、フォールバック判定用の内部状態として管理します：
@@ -1645,6 +1665,7 @@ proxy:
 - 保存領域の初期化（【4】の段階 1・段階 2）と復旧 API は、同じ isolate の中ではインスタンスをまたいで直列化する
 - キュー消化の排他、隔離のロック、ドロップ履歴のロック（保持上限と移行を含む）はインスタンスごとで、インスタンスをまたいで直列化しない
 - 複数の isolate から同時に使う場合は、保存領域の初期化と復旧も直列化の対象外になる
+- `encryptResponseCache` の設定が異なるインスタンスを同時に動かすと、後から起動した側が、先に起動した側の応答キャッシュの Box を閉じたり削除したりする
 
 ## 【18】ログと個人情報保護
 
@@ -2327,7 +2348,7 @@ await proxy.clearQuarantinedRequests();
   - この isolate の proxy が稼働中または起動処理中の場合は、何もせずに `proxyActive` を返す
   - 先頭側が壊れた Box を作り直すと、先頭側の記録が件数不明のまま失われる（`rebuiltBoxes`）
   - 照合が時間の上限を超えた Box は、Box を閉じた後に時間の上限を設けずに照合し直し、その結果で扱う。鍵と一致しなければ削除（`deletedBoxes`）、先頭側が壊れていれば作り直し（`rebuiltBoxes`）。先頭の記録が書きかけで鍵と一致する記録も無ければ 0 バイトに切り詰め、失うものは無い（`rebuiltBoxes`）
-  - 鍵を削除した場合は、Cookie（ログイン状態）も消える
+  - 鍵を削除した場合は、Cookie（ログイン状態）も消える。暗号化した応答キャッシュ（`encryptResponseCache`）も削除する（結果の一覧には含めない）
   - `StorageIntegrityException` で起動に失敗した後の `getStats()` は 0 件を返すため、確認画面の根拠に使わない
 
 ```dart
@@ -2632,6 +2653,7 @@ class ProxyConfig {
   final bool enableReplayHeader; // キューからの送信の通知（既定: true）
   final String replayHeaderName; // キューからの送信を示すヘッダ名（既定: "X-Offline-Replay"）
   final bool enableUpstreamCompression; // 上流との通信の圧縮（gzip）（既定: true）
+  final bool encryptResponseCache; // 応答キャッシュの暗号化（既定: false）
   final DropPolicy dropPolicy; // 再送を打ち切った要求の扱い（既定: quarantine）
   final int quarantineMaxCount; // 隔離の件数の上限（既定: 1000、0=上限なし）
   final Duration quarantineRetention; // 隔離の保持期間（既定: 30 日、Duration.zero=上限なし）

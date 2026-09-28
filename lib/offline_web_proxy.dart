@@ -153,6 +153,15 @@ typedef WarmupProgressCallback = void Function(int completed, int total);
 typedef WarmupErrorCallback = void Function(String path, String error);
 
 const String _encryptedCookieBoxName = 'proxy_cookies_secure';
+
+/// 平文で保存する応答キャッシュの Box 名。
+const String _plainCacheBoxName = 'proxy_cache';
+
+/// 暗号化して保存する応答キャッシュの Box 名。
+///
+/// 鍵の照合（[_encryptedBoxNames]）には含めない。鍵と合わない場合は、上流から
+/// 取り直せるため空にして続ける。
+const String _encryptedCacheBoxName = 'proxy_cache_secure';
 const String _legacyCookieBoxName = 'proxy_cookies';
 const String _portPreferenceBoxName = 'proxy_port_preferences';
 const String _webStorageBoxName = 'proxy_web_storage';
@@ -4037,7 +4046,11 @@ class OfflineWebProxy {
 
     final openedBoxes = <Box>[];
     try {
-      _cacheBox = await _openBoxTracked('proxy_cache', openedBoxes);
+      _cacheBox = await _openCacheBox(
+        directoryPath,
+        encryptionKey,
+        openedBoxes,
+      );
       _cacheTotalBytes = null;
       _webStorageBox = await _openBoxTracked(_webStorageBoxName, openedBoxes);
       _idempotencyBox = await _openBoxTracked('proxy_idempotency', openedBoxes);
@@ -5063,6 +5076,8 @@ class OfflineWebProxy {
         }
         await Hive.deleteBoxFromDisk(entry.value, path: directoryPath);
       }
+      // 応答キャッシュは結果の一覧に含めないが、鍵と一緒に使えなくなるため消す
+      await _deleteEncryptedCacheBox(directoryPath);
       // 暗号化 Box を消し終えてから鍵を消し、鍵だけが無い状態を作らない
       await _keyStorage.delete(_cookieEncryptionKeyStorageKey);
 
@@ -5101,7 +5116,10 @@ class OfflineWebProxy {
       }
     }
 
-    for (final boxName in _encryptedBoxNames.values) {
+    for (final boxName in [
+      ..._encryptedBoxNames.values,
+      _encryptedCacheBoxName,
+    ]) {
       if (Hive.isBoxOpen(boxName)) {
         await Hive.box(boxName).close();
       }
@@ -5363,6 +5381,7 @@ class OfflineWebProxy {
           encryptionKey = inspection.keyRead.key!;
         case StorageIntegrityAction.regenerateKey:
           encryptionKey = await _writeNewEncryptionKey(inspection);
+          await _deleteEncryptedCacheBox(directoryPath);
         case StorageIntegrityAction.discardCookies:
           encryptionKey = inspection.keyRead.key!;
           await _discardCookieStorage(directoryPath, decision.failure!);
@@ -5370,6 +5389,7 @@ class OfflineWebProxy {
           // 書き込みに失敗した場合に何も消さないよう、鍵を先に書く
           encryptionKey = await _writeNewEncryptionKey(inspection);
           await _discardCookieStorage(directoryPath, decision.failure!);
+          await _deleteEncryptedCacheBox(directoryPath);
       }
 
       final cookieBox = await _openBoxTracked(
@@ -5420,6 +5440,132 @@ class OfflineWebProxy {
       openedBoxes.add(box);
     }
     return box;
+  }
+
+  /// 応答キャッシュの Box を、[ProxyConfig.encryptResponseCache] に従って開きます。
+  ///
+  /// 暗号化する場合は、平文の Box が残っていれば暗号化した Box へ移してから
+  /// 平文のファイルを削除します。暗号化しない場合は、暗号化した Box が
+  /// 残っていても平文へ戻さずに削除します。暗号化した内容を平文で書き出さない
+  /// ためで、キャッシュは空から始まります。
+  ///
+  /// 段階 2 の中で、初期化のロックを保持したまま呼びます。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  /// [encryptionKey] 暗号化 Box の鍵。
+  /// [openedBoxes] この呼び出しで開いた Box を加える一覧。
+  ///
+  /// Returns: 開いた応答キャッシュの Box。
+  Future<Box> _openCacheBox(
+    String directoryPath,
+    Uint8List encryptionKey,
+    List<Box> openedBoxes,
+  ) async {
+    if (!(_config?.encryptResponseCache ?? false)) {
+      await _deleteEncryptedCacheBox(directoryPath);
+      return _openBoxTracked(_plainCacheBoxName, openedBoxes);
+    }
+
+    // 鍵と合わない Box は、Hive が開くときに空へ切り詰める
+    final box = await _openBoxTracked(
+      _encryptedCacheBoxName,
+      openedBoxes,
+      encryptionKey: encryptionKey,
+    );
+    await _movePlainCacheInto(box, directoryPath);
+    return box;
+  }
+
+  /// 平文の応答キャッシュを暗号化した Box へ移し、平文のファイルを削除します。
+  ///
+  /// 平文の Box は 1 件ずつ読む形で開き、キャッシュ全体を二重にメモリへ
+  /// 載せないようにします。移せなかった記録は捨てて残りを移し続け、最後に
+  /// 件数を [ProxyEventType.errorOccurred] で知らせます。キャッシュは上流から
+  /// 取り直せるうえ、平文のファイルを残さないことを優先するためです。
+  /// 平文のファイルを削除できなかった場合は、次の起動で移し直します。
+  /// 例外は送出しません。
+  ///
+  /// [encryptedBox] 移し先の、暗号化した応答キャッシュの Box。
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  Future<void> _movePlainCacheInto(
+      Box encryptedBox, String directoryPath) async {
+    try {
+      if (!await Hive.boxExists(_plainCacheBoxName, path: directoryPath)) {
+        return;
+      }
+
+      // 別のインスタンスが平文のまま開いていれば、閉じてから移す
+      if (Hive.isBoxOpen(_plainCacheBoxName)) {
+        await Hive.box(_plainCacheBoxName).close();
+      }
+
+      final plainBox = await Hive.openLazyBox(
+        _plainCacheBoxName,
+        path: directoryPath,
+      );
+      var failedCount = 0;
+      Object? lastError;
+      try {
+        for (final key in plainBox.keys.toList(growable: false)) {
+          try {
+            await _storageTestHooks?.beforePlainCacheEntryMoved?.call(key);
+            final value = await plainBox.get(key);
+            if (value != null) {
+              await encryptedBox.put(key, value);
+            }
+          } catch (error) {
+            failedCount++;
+            lastError = error;
+          }
+        }
+      } finally {
+        await plainBox.close();
+      }
+      if (failedCount > 0) {
+        _emitEvent(ProxyEventType.errorOccurred, '', {
+          'phase': 'cacheEncryptionMigration',
+          'failedCount': failedCount,
+          'error': lastError.toString(),
+        });
+      }
+    } catch (error) {
+      _emitEvent(ProxyEventType.errorOccurred, '', {
+        'phase': 'cacheEncryptionMigration',
+        'error': error.toString(),
+      });
+    } finally {
+      try {
+        await Hive.deleteBoxFromDisk(_plainCacheBoxName, path: directoryPath);
+      } catch (error) {
+        _emitEvent(ProxyEventType.errorOccurred, '', {
+          'phase': 'cacheEncryptionMigration',
+          'error': error.toString(),
+        });
+      }
+    }
+  }
+
+  /// 暗号化した応答キャッシュの Box をファイルごと削除します。
+  ///
+  /// 開いている場合は Hive が閉じてから削除します。捨ててよいキャッシュの
+  /// 削除に失敗しただけで起動を止めないよう、失敗は
+  /// [ProxyEventType.errorOccurred]（`phase: cacheEncryptionCleanup`）で
+  /// 知らせて続けます。残ったファイルは暗号化されており、鍵と合わなければ
+  /// Hive が開くときに空にします。例外は送出しません。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  Future<void> _deleteEncryptedCacheBox(String directoryPath) async {
+    try {
+      await Hive.deleteBoxFromDisk(
+        _encryptedCacheBoxName,
+        path: directoryPath,
+      );
+    } catch (error) {
+      _emitEvent(ProxyEventType.errorOccurred, '', {
+        'phase': 'cacheEncryptionCleanup',
+        'error': error.toString(),
+      });
+    }
   }
 
   /// 開いている Box のファイルの場所から、Hive の保存先ディレクトリを求めます。
