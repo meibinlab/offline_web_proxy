@@ -217,6 +217,7 @@ const config = ProxyConfig(
   enableReplayHeader: true,
   replayHeaderName: 'X-Offline-Replay',
   enableUpstreamCompression: true,
+  encryptResponseCache: false,
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -276,7 +277,7 @@ Notes:
   - Even on a match, a response carrying `Set-Cookie`, a response carrying `Vary` (unless it names `Accept-Encoding` alone), or a request carrying `Authorization`, is not stored. A skipped response raises `ProxyEventType.cacheSkipped` with the reason, so a path that never becomes available offline can be diagnosed.
   - A `Vary` naming `Accept-Encoding` alone is stored because the proxy sends the same `Accept-Encoding` on every upstream route and decompresses gzip before storing, so the response cannot vary. Tomcat, nginx and Apache all add that `Vary` by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A `Vary` naming `*` or any other header is still skipped.
   - For a matching path the upstream `max-age` and `Expires` are ignored and `cacheTtl` decides the expiry, because `no-store` is usually paired with `max-age=0`, which would make the entry stale the moment it is stored.
-  - **The response cache is not encrypted.** The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.
+  - **The response cache is not encrypted by default.** The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it. Enable `encryptResponseCache` when it holds personal or business data.
 - `mirroredOrigins` lists other origins fetched through the proxy. On a screen that loads its UI library from a CDN, the absolute URL in the HTML never passes through 127.0.0.1, so caching, fallback and warmup all miss it. A listed origin is relayed by the proxy and joins the ordinary cache and offline fallback. Empty by default.
   - A matching absolute URL is rewritten to `/__offline_web_proxy/ext/<scheme>/<host>[:port]/<original path>` in `<script src>`, `<link href>`, `<img src>` and `<style>` elements of a `text/html` response, and in the `url()` and `@import` references of a `text/css` response. A `<link>` counts only when its `rel` names a resource, such as `stylesheet`.
   - When a stylesheet loads its font files from another origin, as Google Fonts does, list both origins (for example `https://fonts.googleapis.com` and `https://fonts.gstatic.com`).
@@ -302,6 +303,10 @@ Notes:
   - A body that cannot be decompressed (corrupt, truncated, or larger than 64 MB once decompressed) is returned as is and not cached. Codings other than gzip, such as br, are passed through as before. A request carrying `Range` is sent `identity`.
   - Set it to `false` to send `Accept-Encoding: identity`, as 0.19.0 and earlier did.
 - `cacheMaxSize` caps the total body size of the response cache (200 MB by default, `0` for no limit). Beyond it, entries are removed oldest stored first until the total fits within 90% of the limit, and `ProxyEventType.cacheEvicted` is raised. A response whose body alone exceeds the limit is not stored.
+- `encryptResponseCache` stores the response cache encrypted with the same key as the cookies, the queue and the quarantine store (off by default).
+  - The box is decrypted in full when it opens, so `start()` takes longer as the cache grows (about 0.4 s for 30 MB and 3.2 s for 200 MB on a desktop CPU; a phone is expected to be several times slower). Keep `cacheMaxSize` modest when enabling it.
+  - Switching it on moves the plain cache over inside `start()` and deletes the plain file (about 0.7 s for 30 MB and 7 s for 200 MB on a desktop CPU). The deletion is an ordinary file deletion and does not guarantee that the storage is erased. Switching it off deletes the encrypted cache without restoring it in plain form. When the key does not match, the cache is emptied instead of failing startup.
+  - The box keys (the SHA-256 of the normalized URL) stay readable.
 - `cacheTtl` and `cacheStale` **replace** the default maps rather than merging with them. Always keep a `default` entry so that unlisted content types still resolve.
 - `text/html` defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. **Long offline operation requires tuning both `cacheTtl` and `cacheStale`.** `cacheStale` has no JavaScript entry, so scripts fall back to `default` (3 days).
 
@@ -763,11 +768,12 @@ The proxy stores data in Hive boxes and in secure storage. In an encrypted box o
 | `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
 | `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default |
 | `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
-| `proxy_cache` | Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL | None | Entries past their stale period are removed every hour |
+| `proxy_cache` | Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL. Used while `encryptResponseCache` is `false` (the default) | None | Entries past their stale period and entries beyond `cacheMaxSize` are removed. Moved into `proxy_cache_secure` and deleted once `encryptResponseCache` is enabled |
+| `proxy_cache_secure` | Response cache when `encryptResponseCache` is enabled. Same content and keys as `proxy_cache` | Values only (AES-256) | Same as `proxy_cache`. Deleted, never restored in plain form, when `encryptResponseCache` is switched off again |
 | `proxy_web_storage` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on | None | Until the next snapshot overwrites it |
 | `proxy_idempotency` | Idempotency keys that reached the upstream, with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
 | `proxy_port_preferences` | The port last bound for each host | None | Until the next bind overwrites it |
-| `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store and the dropped history | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or an unusable key (missing, unreadable or invalid) is replaced by a new one. A new key is written when no queue, quarantine or dropped-history box has content (see [When the encryption key is lost](#when-the-encryption-key-is-lost)) |
+| `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store, the dropped history (and the response cache when encrypted) | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or an unusable key (missing, unreadable or invalid) is replaced by a new one. A new key is written when no queue, quarantine or dropped-history box has content (see [When the encryption key is lost](#when-the-encryption-key-is-lost)) |
 | `proxy_queue`, `proxy_quarantined_requests`, `proxy_dropped_requests`, `proxy_cookies` | Content stored in the clear by 0.14.0 or earlier (cookies: before 0.4.0) | None | Deleted after migration to the encrypted boxes. The old queue, quarantine and dropped-history boxes are emptied before deletion |
 
 ### Retention limits for quarantine and dropped history

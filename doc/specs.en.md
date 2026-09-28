@@ -33,11 +33,12 @@ The proxy stores data in Hive boxes and in secure storage. In an encrypted box o
 | `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
 | `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default (see "Retention Limits" in [5]) |
 | `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged, idempotency key, time first accepted). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
-| `proxy_cache` | Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL | None | Entries past their stale period are removed every hour |
+| `proxy_cache` | Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL. Used while `encryptResponseCache` is `false` (the default) | None | Entries past their stale period and entries beyond `cacheMaxSize` are removed. Moved into `proxy_cache_secure` and deleted once `encryptResponseCache` is enabled |
+| `proxy_cache_secure` | Response cache when `encryptResponseCache` is enabled. Same content and keys as `proxy_cache` | Values only (AES-256) | Same as `proxy_cache`. Deleted, never restored in plain form, when `encryptResponseCache` is switched off again |
 | `proxy_web_storage` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on | None | Until the next snapshot overwrites it |
 | `proxy_idempotency` | Idempotency keys that reached the upstream, with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
 | `proxy_port_preferences` | The port last bound for each host | None | Until the next bind overwrites it |
-| `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store and the dropped history | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or a new key replaces it as the decision tables say (see "Decision Tables" in [4]) |
+| `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store, the dropped history (and the response cache when encrypted) | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or a new key replaces it as the decision tables say (see "Decision Tables" in [4]) |
 | `proxy_queue`, `proxy_quarantined_requests`, `proxy_dropped_requests`, `proxy_cookies` | Content stored in the clear by 0.14.0 or earlier (cookies: before 0.4.0) | None | Deleted after migration to the encrypted boxes. The old queue, quarantine and dropped-history boxes are emptied before deletion |
 
 ### Proxy Target
@@ -351,7 +352,7 @@ Automatic Content-Type setting based on extensions:
 
 ### Encryption Key Management and Verification
 
-Hive treats a CRC mismatch in the first frame of an encrypted box opened with the wrong key as corruption and truncates the file. The proxy therefore reads the files of the encrypted boxes (cookies, queue, quarantine, dropped history) without opening them, checks them against the key, and follows the decision tables to open them as they are, discard the cookie box, or fail startup.
+Hive treats a CRC mismatch in the first frame of an encrypted box opened with the wrong key as corruption and truncates the file. The proxy therefore reads the files of the encrypted boxes (cookies, queue, quarantine, dropped history) without opening them, checks them against the key, and follows the decision tables to open them as they are, discard the cookie box, or fail startup. The encrypted response cache (`encryptResponseCache`) is not checked. Its responses can be fetched again, so a mismatched cache is left to Hive to truncate, and it is deleted when the key is regenerated and when the recovery API deletes the key (section [16], "Encrypting the Response Cache").
 
 #### Serialized Initialization
 
@@ -359,8 +360,8 @@ Storage initialization runs in two stages, inside one serialization shared by ev
 
 | Stage | Work | Run by |
 | --- | --- | --- |
-| Stage 1 (key) | Locate the storage, read and verify the key, generate the key and discard the cookie box as the decision tables say, open the cookie box, migrate the legacy plain cookie box | `start()` and cookie APIs (callable before startup and after `stop()`) |
-| Stage 2 (business data) | Open the cache, web storage and idempotency boxes and the encrypted queue, quarantine and dropped-history boxes, migrate the legacy plain boxes (section [5]) | `start()` only |
+| Stage 1 (key) | Locate the storage, read and verify the key, generate the key and discard the cookie box as the decision tables say (deleting the encrypted response cache when the key is regenerated), open the cookie box, migrate the legacy plain cookie box | `start()` and cookie APIs (callable before startup and after `stop()`) |
+| Stage 2 (business data) | Open the cache box (plain or encrypted as `encryptResponseCache` says, moving or deleting it when the setting changed), the web storage and idempotency boxes and the encrypted queue, quarantine and dropped-history boxes, migrate the legacy plain boxes (section [5]) | `start()` only |
 
 - A failed stage closes the boxes it opened, is not shared, and is retried by the next call. The result of stage 1 (the cookie box) stays usable after stage 2 fails
 - `stop()` discards the results of both stages, so a cookie API called after `stop()` and the next `start()` check again from stage 1
@@ -423,7 +424,7 @@ When no encrypted box has content:
 | --- | --- |
 | Temporarily unavailable | Fail startup (`temporarilyUnavailable`) |
 | Present | Open as is |
-| Missing, invalid or unreadable | Write a new key (no encrypted data exists, so nothing is lost). If the write fails, fail startup (`keyWriteFailed`) without creating any box |
+| Missing, invalid or unreadable | Write a new key (the encrypted business boxes are empty, so nothing is lost; the encrypted response cache is deleted). If the write fails, fail startup (`keyWriteFailed`) without creating any box |
 
 When an encrypted box has content:
 
@@ -469,7 +470,7 @@ What the recovery does:
 | The key is temporarily unavailable (including by the rereading rules) | Nothing | `rejection: temporarilyUnavailable` |
 | The key is present and no queue, quarantine or dropped-history box is mismatched, corrupted or aborted | Nothing (`start()` discards a problematic cookie box on its own) | `rejection: startWillSucceed` |
 | The key is present and a queue, quarantine or dropped-history box is mismatched, corrupted or aborted (the cookie box is handled by the same rules) | Keep the key and handle each box (table below) | `performed: true` |
-| The key is invalid, or missing or unreadable after rereading, and a queue, quarantine or dropped-history box has content | Delete every encrypted box (cookies, queue, quarantine, dropped history), then the key | `performed: true`, `keyDeleted: true` |
+| The key is invalid, or missing or unreadable after rereading, and a queue, quarantine or dropped-history box has content | Delete every encrypted box (cookies, queue, quarantine, dropped history, and the encrypted response cache), then the key | `performed: true`, `keyDeleted: true` |
 | The key is invalid, or missing or unreadable, and no queue, quarantine or dropped-history box has content | Nothing | `rejection: startWillSucceed` |
 
 - A startup that failed because the key could not be written (`keyWriteFailed`) also gets `startWillSucceed`, since there is no box to delete. Retry `start()` later
@@ -948,7 +949,7 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
 
 **Freshness**: A server that sends `no-store` usually sends something like `no-store, max-age=0, must-revalidate`. Honouring those directives would make the entry stale the moment it is stored, leaving only the stale window for offline use. Since the decision to store was already overridden by configuration, the expiry follows configuration too: for a matching path, `s-maxage`, `max-age` and `Expires` are ignored and `cacheTtl` decides the TTL.
 
-**Storage note**: `no-store` exists to ask that a response never be written to storage. The response cache is not encrypted, so the body of a listed path stays on the device in the clear. Weigh what the screen contains, and the impact of a lost device, before listing it.
+**Storage note**: `no-store` exists to ask that a response never be written to storage. The response cache is not encrypted by default, so the body of a listed path stays on the device in the clear. Weigh what the screen contains, and the impact of a lost device, before listing it. Enable `encryptResponseCache` when it holds personal or business data (section [16], "Encrypting the Response Cache").
 
 #### Warmup
 
@@ -1411,6 +1412,25 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **When it is checked**: When a response is stored (forwarding and warmup) and in the hourly purge. Entries over the limit from a previous run are removed the next time something is stored
 - **Static resources and API responses**: Not told apart; everything follows the time of storing
 
+### Encrypting the Response Cache
+
+With `ProxyConfig.encryptResponseCache` (default `false`) enabled, the response cache (status code, headers and body) is stored in an AES-256 encrypted box (`proxy_cache_secure`) with the same key as the cookies, the queue and the quarantine store. Enable it when `forceCachePaths` keeps APIs that return personal or business data.
+
+- **Not encrypted**: The box keys (the SHA-256 of the normalized URL) stay readable. Anyone who can guess a URL can tell whether it is cached
+- **Cost**: Hive decrypts every entry when it opens an encrypted box, so `start()` takes longer as the cache grows. Measured on a desktop CPU (AOT) with 30 KB bodies, opening the box took the times below; a phone is expected to take several times longer (not measured on a device). Each store takes about 0.3 ms longer. Keep `cacheMaxSize` modest when enabling it
+
+| Cache total | Plain | Encrypted |
+| --- | --- | --- |
+| 29 MB | 94 ms | 436 ms |
+| 88 MB | 282 ms | 1,319 ms |
+| 199 MB | 656 ms | 3,170 ms |
+
+- **When switched on**: An existing plain `proxy_cache` is read one entry at a time into the encrypted box, and the plain file is deleted. An entry that cannot be moved is dropped and the rest keep moving; the count is reported at the end (`ProxyEventType.errorOccurred`, `phase: cacheEncryptionMigration`, `failedCount`), since leaving no plain file behind comes first
+  - The move runs inside `start()` (inside storage initialization), and cookie APIs wait for it. On a desktop CPU with 30 KB bodies it took about 0.7 s for 29 MB and 7 s for 199 MB
+  - The file is deleted the ordinary way; erasing the underlying flash storage is not guaranteed. If the deletion fails, the move is retried at the next startup
+- **When switched off**: The encrypted box is deleted without being restored in plain form; the cache starts empty. A failed deletion does not stop startup (`ProxyEventType.errorOccurred`, `phase: cacheEncryptionCleanup`)
+- **Key check**: The cache is not part of the startup check (section [4], "Decision Tables"). When the key does not match, the cache is emptied rather than failing startup, because the responses can be fetched again. The encrypted box is deleted when the key is regenerated and when `recoverEncryptedStorage()` deletes the key (it is not listed in the result of `recoverEncryptedStorage()`)
+
 ### TTL (Time to Live) and Stale Period Management
 
 Manage TTL and stale periods as internal state for fallback decisions while considering Cache-Control headers:
@@ -1644,6 +1664,7 @@ Using several `OfflineWebProxy` instances at the same time in one app is not sup
 
 - Storage initialization (stages 1 and 2 in [4]) and the recovery API are serialized across instances within one isolate
 - The queue-drain exclusion, the quarantine lock and the history lock (retention limits and migration included) belong to each instance and are not serialized across instances
+- Running instances with different `encryptResponseCache` settings at the same time lets the one started later close or delete the response cache box of the other
 - When the proxy is used from several isolates at once, even storage initialization and recovery are not serialized
 
 ## [18] Logging and Personal Information Protection
@@ -2327,7 +2348,7 @@ Call it when `start()` or a cookie API fails with `StorageIntegrityException` an
   - While a proxy in the isolate is running or starting, nothing is done and `proxyActive` is returned
   - Rebuilding a box damaged at its head loses the records at its head, and how many is unknown (`rebuiltBoxes`)
   - A box whose check exceeded the time limit is checked again without a time limit after the boxes are closed, and handled by that result: deleted when it does not match the key (`deletedBoxes`), rebuilt when it is damaged at its head (`rebuiltBoxes`). When its first record is only partly written and no record matches the key, it is truncated to 0 bytes, losing nothing (`rebuiltBoxes`)
-  - Deleting the key also removes cookies, and with them the sign-in state
+  - Deleting the key also removes cookies, and with them the sign-in state. The encrypted response cache (`encryptResponseCache`) is deleted too (not listed in the result)
   - After startup fails with `StorageIntegrityException`, `getStats()` returns zero, so do not base a confirmation screen on it
 
 ```dart
@@ -2632,6 +2653,7 @@ class ProxyConfig {
   final bool enableReplayHeader; // Mark requests sent from the queue (default: true)
   final String replayHeaderName; // Header marking requests sent from the queue (default: "X-Offline-Replay")
   final bool enableUpstreamCompression; // Compress the upstream link with gzip (default: true)
+  final bool encryptResponseCache; // Encrypt the response cache (default: false)
   final DropPolicy dropPolicy; // How a request that stopped retrying is handled (default: quarantine)
   final int quarantineMaxCount; // Maximum number of quarantined requests (default: 1000, 0 = no limit)
   final Duration quarantineRetention; // Retention of quarantined requests (default: 30 days, Duration.zero = no limit)

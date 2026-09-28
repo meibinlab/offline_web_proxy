@@ -610,6 +610,35 @@ class ProxyConfig {
   /// **Default**: `true`
   final bool enableUpstreamCompression;
 
+  /// Whether to encrypt the response cache on the device.
+  ///
+  /// When enabled, cached responses (status, headers and body) are stored in
+  /// an AES-256 encrypted Hive box with the same key as the cookies, the queue
+  /// and the quarantine store. Enable it when [forceCachePaths] keeps personal
+  /// or business data, since the cache otherwise stays on the device in plain
+  /// form for as long as it is kept. The box keys stay readable; they are the
+  /// SHA-256 of the normalized URL, so anyone who can guess a URL can tell
+  /// whether it is cached.
+  ///
+  /// **Cost**: Hive decrypts the whole box when it opens it, so `start()`
+  /// takes longer as the cache grows. On a desktop CPU, opening took about
+  /// 0.4 s for 30 MB and 3.2 s for 200 MB (0.1 s and 0.7 s without
+  /// encryption); a phone is expected to be several times slower. Each store
+  /// takes about 0.3 ms longer. Keep [cacheMaxSize] modest when enabling it.
+  ///
+  /// Switching it on moves an existing plain cache into the encrypted box and
+  /// deletes the plain file, inside `start()` (about 0.7 s for 30 MB and 7 s
+  /// for 200 MB on a desktop CPU). The file is deleted the ordinary way, which
+  /// does not guarantee that the flash storage is erased; a failed deletion is
+  /// retried at the next startup. Switching it off deletes the encrypted box
+  /// without restoring it in plain form, so the cache starts empty. The cache
+  /// is not checked against the key at startup: when the key no longer
+  /// matches, the cache is emptied rather than failing `start()`, because the
+  /// responses can be fetched again.
+  ///
+  /// **Default**: `false`
+  final bool encryptResponseCache;
+
   /// Name of the header that marks update requests sent from the queue.
   ///
   /// The value is always `1`. Change the name when the upstream expects a
@@ -893,6 +922,7 @@ class ProxyConfig {
     this.acceptedAtHeaderName = 'X-Offline-Accepted-At',
     this.enableReplayHeader = true,
     this.enableUpstreamCompression = true,
+    this.encryptResponseCache = false,
     this.replayHeaderName = 'X-Offline-Replay',
     this.dropPolicy = DropPolicy.quarantine,
     this.quarantineMaxCount = 1000,
