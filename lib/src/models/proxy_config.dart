@@ -143,9 +143,10 @@ class ProxyConfig {
   /// * the response carries `Set-Cookie`, which would persist a session on the
   ///   device and replay it later
   /// * the response carries `Vary`, which the URL-only cache key cannot
-  ///   honour, unless it names `Accept-Encoding` alone: the proxy pins
-  ///   `Accept-Encoding: identity` on every upstream request, so such a
-  ///   response cannot vary
+  ///   honour, unless it names `Accept-Encoding` alone: the proxy sends the
+  ///   same `Accept-Encoding` on every upstream request and decompresses gzip
+  ///   before storing (see [enableUpstreamCompression]), so such a response
+  ///   cannot vary
   /// * the request carried `Authorization`, so the response belongs to one user
   ///
   /// A skipped response raises `ProxyEventType.cacheSkipped` with the reason,
@@ -582,6 +583,33 @@ class ProxyConfig {
   /// **Default**: `true`
   final bool enableReplayHeader;
 
+  /// Whether to ask the upstream for gzip-compressed responses.
+  ///
+  /// When enabled, every request the proxy sends upstream — forwarded
+  /// requests, requests sent from the queue, warmup and mirrored origins —
+  /// carries `Accept-Encoding: gzip`, so the upstream link carries compressed
+  /// bodies. A gzip body is decompressed before it is cached, rewritten or
+  /// returned to the WebView: `Content-Encoding` is removed and
+  /// `Content-Length` follows the decompressed body. The WebView always
+  /// receives an uncompressed body, because the loopback link gains nothing
+  /// from compression.
+  ///
+  /// A response without a body (`HEAD`, `204`, `304`) only loses its
+  /// `Content-Encoding`. A body that cannot be decompressed — corrupt,
+  /// truncated, or larger than 64 MB once decompressed — is passed through
+  /// unchanged, with its `Content-Encoding`, and is not cached. A coding the
+  /// proxy does not ask for, such as `br`, is passed through as before. A
+  /// request carrying `Range` is sent `identity`, because a range of a
+  /// compressed representation cannot be decompressed on its own.
+  ///
+  /// When disabled, the proxy sends `Accept-Encoding: identity`, as 0.19.0
+  /// and earlier did. The same value is sent on every route in both cases,
+  /// which keeps caching a response whose `Vary` names `Accept-Encoding`
+  /// alone safe.
+  ///
+  /// **Default**: `true`
+  final bool enableUpstreamCompression;
+
   /// Name of the header that marks update requests sent from the queue.
   ///
   /// The value is always `1`. Change the name when the upstream expects a
@@ -864,6 +892,7 @@ class ProxyConfig {
     this.enableAcceptedAtHeader = true,
     this.acceptedAtHeaderName = 'X-Offline-Accepted-At',
     this.enableReplayHeader = true,
+    this.enableUpstreamCompression = true,
     this.replayHeaderName = 'X-Offline-Replay',
     this.dropPolicy = DropPolicy.quarantine,
     this.quarantineMaxCount = 1000,

@@ -294,6 +294,23 @@ const String _defaultAcceptedAtHeaderName = 'X-Offline-Accepted-At';
 /// 設定が読み込めない場合に使う既定の再送ヘッダ名。
 const String _defaultReplayHeaderName = 'X-Offline-Replay';
 
+/// 上流へ圧縮を求める場合に送る `Accept-Encoding` の値。
+///
+/// dart:io で解凍できる方式に限る。deflate は zlib 形式と生の deflate が
+/// 混在して判別の手間に見合わず、brotli は解凍できないため求めない。
+const String _compressedAcceptEncoding = 'gzip';
+
+/// 上流の gzip を解凍するときの、解凍後の大きさの上限。
+///
+/// 解凍すると大きく膨らむ本文で、メモリを使い尽くさないための安全装置。
+/// 超えた本文は解凍に失敗した場合と同じく、そのまま返して保存しない。
+const int _maxDecompressedBodyBytes = 64 * 1024 * 1024;
+
+/// gzip を解凍するときに、解凍器へ一度に渡す大きさ。
+///
+/// 上限を超えたことを早めに検知できるよう、本文を分けて渡す。
+const int _gzipDecodeChunkBytes = 64 * 1024;
+
 /// [ProxyConfig.cacheMaxSize] を超えたときに、合計を下げる先の上限に対する割合。
 ///
 /// 上限ちょうどまでしか下げないと、上限に張り付いたまま保存のたびに全件を
@@ -6534,8 +6551,8 @@ class OfflineWebProxy {
 
   /// 応答 HTML / CSS 内のミラー対象 origin の URL を proxy 経路へ書き換えます。
   ///
-  /// 保存時ではなく応答時に書き換えます。キャッシュには上流が返したバイト列を
-  /// そのまま残せるため、オンラインとオフラインのどちらの経路でも同じ変換を
+  /// 保存時ではなく応答時に書き換えます。キャッシュには書き換える前の本文
+  /// （gzip は解凍した本文）を残せるため、オンラインとオフラインのどちらの経路でも同じ変換を
   /// 通せます。設定から origin を外せば、保存済みの応答も元の URL に戻ります。
   ///
   /// 本文は `latin1` で読み書きします。URL と対象の構文は ASCII の範囲に
@@ -6566,7 +6583,8 @@ class OfflineWebProxy {
       return response;
     }
 
-    // 上流が identity を無視して圧縮した本文は解釈できない
+    // 解凍できなかった本文や、proxy が求めない方式（br など）で圧縮された
+    // 本文は解釈できない
     final contentEncoding =
         (response.headers['content-encoding'] ?? '').trim().toLowerCase();
     if (contentEncoding.isNotEmpty && contentEncoding != 'identity') {
@@ -6835,6 +6853,14 @@ class OfflineWebProxy {
       return response;
     }
 
+    // 解凍できなかった本文や、proxy が求めない方式で圧縮された本文は
+    // 文字列として読めない
+    final contentEncoding =
+        (response.headers['content-encoding'] ?? '').trim().toLowerCase();
+    if (contentEncoding.isNotEmpty && contentEncoding != 'identity') {
+      return response;
+    }
+
     final responseBody = await response.readAsString();
     final script = '''
 <script id="__offline_web_proxy_web_storage_bridge">
@@ -6942,7 +6968,9 @@ window.__offline_web_proxy_web_storage_bridge = {
       // 複数の Set-Cookie は 1 行へ連結すると先頭しか効かないため、行を分けて返す
       final response = shelf.Response(
         result.statusCode,
-        body: Uint8List.fromList(result.bodyBytes),
+        body: result.bodyBytes is Uint8List
+            ? result.bodyBytes
+            : Uint8List.fromList(result.bodyBytes),
         headers: _withSeparateSetCookieHeaders(
           result.headers,
           result.setCookieHeaders,
@@ -7662,14 +7690,19 @@ window.__offline_web_proxy_web_storage_bridge = {
         setCookieHeaders: headerSnapshot.setCookieHeaders,
       );
 
-      final sanitizedHeaders =
-          _sanitizeResponseHeaders(headerSnapshot.flattenedHeaders);
+      // キャッシュ・書き換え・WebView への応答は、すべて解凍後の本文で扱う
+      final decoded = _decodeUpstreamBody(
+        method: request.method,
+        statusCode: ioResponse.statusCode,
+        headers: _sanitizeResponseHeaders(headerSnapshot.flattenedHeaders),
+        body: bodyBytes,
+      );
 
       return (
         statusCode: ioResponse.statusCode,
-        headers: sanitizedHeaders,
+        headers: decoded.headers,
         setCookieHeaders: headerSnapshot.setCookieHeaders,
-        bodyBytes: bodyBytes,
+        bodyBytes: decoded.body,
         upstreamUri: uri,
       );
     } finally {
@@ -7720,8 +7753,14 @@ window.__offline_web_proxy_web_storage_bridge = {
       ioRequest.headers.set('cookie', mergedCookieHeader);
     }
 
-    // 非圧縮レスポンスを要求
-    ioRequest.headers.set('accept-encoding', 'identity');
+    // 範囲の要求を圧縮した表現で受けると、範囲の位置が圧縮後のバイト列を指し、
+    // 解凍できない。範囲の応答は保存しないため、経路で値を揃える前提も崩れない
+    final hasRange =
+        request.headers.keys.any((key) => key.toLowerCase() == 'range');
+    ioRequest.headers.set(
+      'accept-encoding',
+      hasRange ? 'identity' : _upstreamAcceptEncoding,
+    );
   }
 
   /// キュー再送時の保存済みヘッダを上流リクエストへ反映します。
@@ -7753,7 +7792,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       ioRequest.headers.set('cookie', mergedCookieHeader);
     }
 
-    ioRequest.headers.set('accept-encoding', 'identity');
+    // 本文は読み捨てるが、転送と同じ値を送って上流から見た扱いを揃える
+    ioRequest.headers.set('accept-encoding', _upstreamAcceptEncoding);
   }
 
   /// 上流送信用の Cookie ヘッダを構築します。
@@ -8443,6 +8483,12 @@ window.__offline_web_proxy_web_storage_bridge = {
       return false;
     }
 
+    // 圧縮を求めた場合、gzip のまま残るのは解凍できなかった本文だけで、
+    // 壊れている可能性があるため保存しない
+    if (_isUpstreamCompressionEnabled && _isGzipOnlyContentEncoding(headers)) {
+      return false;
+    }
+
     if (allowNoStore) {
       return true;
     }
@@ -8551,9 +8597,9 @@ window.__offline_web_proxy_web_storage_bridge = {
 
   /// `Vary` が `Accept-Encoding` だけを指しているかどうかを返します。
   ///
-  /// proxy は転送、キュー再送、ウォームアップのいずれでも上流へ
-  /// `Accept-Encoding: identity` を固定で送るため、受け取る応答は常に
-  /// 非圧縮の 1 種類です。`Accept-Encoding` だけを理由に保存を見送っても
+  /// proxy は転送、キュー再送、ウォームアップのいずれでも上流へ同じ
+  /// `Accept-Encoding` を送り、gzip は解凍してから保存するため、受け取る
+  /// 応答は常に 1 種類です。`Accept-Encoding` だけを理由に保存を見送っても
   /// 守れるものが無く、圧縮を有効にしたサーバでは画面の HTML や JS が
   /// まとめて保存対象から外れてしまいます。
   ///
@@ -8935,7 +8981,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       final request =
           await client.getUrl(uri).timeout(_remainingUntil(deadline));
       // 転送経路と同じ値を送り、保存する応答が経路によって割れないようにする
-      request.headers.set('accept-encoding', 'identity');
+      request.headers.set('accept-encoding', _upstreamAcceptEncoding);
 
       // 転送経路と同じく Cookie Jar を送る。認証が必要な資源を
       // ウォームアップで取得できるようにするために必要。
@@ -8962,13 +9008,17 @@ window.__offline_web_proxy_web_storage_bridge = {
         setCookieHeaders: headerSnapshot.setCookieHeaders,
       );
 
-      final sanitizedHeaders =
-          _sanitizeResponseHeaders(headerSnapshot.flattenedHeaders);
+      final decoded = _decodeUpstreamBody(
+        method: 'GET',
+        statusCode: response.statusCode,
+        headers: _sanitizeResponseHeaders(headerSnapshot.flattenedHeaders),
+        body: bodyBytes,
+      );
 
       return http.Response.bytes(
-        bodyBytes,
+        decoded.body,
         response.statusCode,
-        headers: sanitizedHeaders,
+        headers: decoded.headers,
       );
     } finally {
       // 共有クライアントをここで閉じない
@@ -9468,6 +9518,139 @@ window.__offline_web_proxy_web_storage_bridge = {
       await subscription.cancel();
       rethrow;
     }
+  }
+
+  /// 上流へ圧縮を求めるかどうかです。
+  bool get _isUpstreamCompressionEnabled =>
+      _config?.enableUpstreamCompression ?? true;
+
+  /// 上流へ送る `Accept-Encoding` の値を返します。
+  ///
+  /// 転送・キュー再送・ウォームアップ・別 origin の中継で同じ値を送り、
+  /// `Vary: Accept-Encoding` の応答を保存しても、経路によって応答が
+  /// 割れないようにします。
+  String get _upstreamAcceptEncoding =>
+      _isUpstreamCompressionEnabled ? _compressedAcceptEncoding : 'identity';
+
+  /// `Content-Encoding` が gzip だけを指しているかどうかを返します。
+  ///
+  /// [headers] 上流の応答ヘッダ。
+  ///
+  /// Returns: `identity` を除いた方式が `gzip`（`x-gzip`）1 つだけの場合は
+  ///   `true`。
+  bool _isGzipOnlyContentEncoding(Map<String, String> headers) {
+    final value = _getHeaderValueIgnoreCase(headers, 'content-encoding');
+    if (value == null) {
+      return false;
+    }
+
+    final codings = value
+        .split(',')
+        .map((coding) => coding.trim().toLowerCase())
+        .where((coding) => coding.isNotEmpty && coding != 'identity')
+        .toList(growable: false);
+    return codings.length == 1 &&
+        (codings.single == 'gzip' || codings.single == 'x-gzip');
+  }
+
+  /// 上流が gzip で圧縮した応答本文を解凍します。
+  ///
+  /// 解凍した場合は `Content-Encoding` と `Content-Length` を外します。長さは
+  /// shelf が解凍後の本文から決めます。本文を持たない応答（`HEAD`・`204`・
+  /// `304`・空の本文）は、解凍せずにヘッダだけを外します。同じ URL の `GET`
+  /// の応答と見え方を揃えるためです。
+  ///
+  /// 圧縮を求めていない場合、`Content-Encoding` が gzip だけを指していない
+  /// 場合（br など proxy が求めない方式）、解凍に失敗した場合は、ヘッダも
+  /// 本文も変えずに返します。解凍に失敗した本文は [_shouldPersistResponse] が
+  /// 保存しません。状態コードを変えないのは、更新系の応答を 5xx と誤って
+  /// キューへ入れないためです。
+  ///
+  /// [method] 要求のメソッド。
+  /// [statusCode] 上流の状態コード。
+  /// [headers] サニタイズ済みの上流の応答ヘッダ。
+  /// [body] 受け取った本文。
+  ///
+  /// Returns: WebView へ返し、キャッシュへ保存するヘッダと本文。
+  ({Map<String, String> headers, Uint8List body}) _decodeUpstreamBody({
+    required String method,
+    required int statusCode,
+    required Map<String, String> headers,
+    required Uint8List body,
+  }) {
+    if (!_isUpstreamCompressionEnabled ||
+        !_isGzipOnlyContentEncoding(headers)) {
+      return (headers: headers, body: body);
+    }
+
+    // 範囲の応答は圧縮後のバイト列の一部で、単独では解凍できない
+    if (statusCode == HttpStatus.partialContent ||
+        _getHeaderValueIgnoreCase(headers, 'content-range') != null) {
+      return (headers: headers, body: body);
+    }
+
+    final decodedHeaders = Map<String, String>.from(headers)
+      ..removeWhere((key, _) {
+        final lowerKey = key.toLowerCase();
+        return lowerKey == 'content-encoding' || lowerKey == 'content-length';
+      });
+
+    if (method.toUpperCase() == 'HEAD' ||
+        statusCode == HttpStatus.noContent ||
+        statusCode == HttpStatus.notModified ||
+        body.isEmpty) {
+      return (headers: decodedHeaders, body: body);
+    }
+
+    final decoded = _tryDecodeGzip(body);
+    if (decoded == null) {
+      return (headers: headers, body: body);
+    }
+    return (headers: decodedHeaders, body: decoded);
+  }
+
+  /// gzip の本文を、大きさの上限と末尾の検証付きで解凍します。
+  ///
+  /// dart:io の解凍器は、途中で切れた gzip を例外なく途中まで解凍して返すため、
+  /// 末尾の ISIZE（解凍後の長さの下位 32 ビット）と解凍した長さを照らし合わせ、
+  /// 切れた本文を見分けます。ISIZE は最後のメンバーの長さのため、複数の
+  /// メンバーを連ねた gzip は一致せず、解凍しない扱いになります。
+  ///
+  /// 解凍は呼び出した isolate で同期的に行います。
+  ///
+  /// [body] gzip の本文。
+  ///
+  /// Returns: 解凍した本文。壊れている、途中で切れている、解凍後の大きさが
+  ///   [_maxDecompressedBodyBytes] を超える場合は `null`。
+  Uint8List? _tryDecodeGzip(Uint8List body) {
+    // ヘッダ 10 バイトと末尾 8 バイトに満たないものは gzip ではない
+    if (body.length < 18) {
+      return null;
+    }
+
+    final output = _LimitedBytesSink(_maxDecompressedBodyBytes);
+    try {
+      final input = gzip.decoder.startChunkedConversion(output);
+      for (var offset = 0;
+          offset < body.length;
+          offset += _gzipDecodeChunkBytes) {
+        final end = offset + _gzipDecodeChunkBytes < body.length
+            ? offset + _gzipDecodeChunkBytes
+            : body.length;
+        input.add(Uint8List.sublistView(body, offset, end));
+      }
+      input.close();
+    } catch (_) {
+      return null;
+    }
+
+    final decoded = output.takeBytes();
+    final trailer = ByteData.sublistView(body, body.length - 4);
+    final expectedSize = trailer.getUint32(0, Endian.little);
+    if (decoded.length & 0xffffffff != expectedSize) {
+      return null;
+    }
+    return decoded;
   }
 
   /// 内部で再利用するHttpClientインスタンスを返却します。
@@ -10808,3 +10991,36 @@ typedef _DroppedRequestRecord = ({
 
 /// 隔離から取り除く記録と、ドロップ履歴に残す理由の組です。
 typedef _QuarantineEviction = ({StoredEntry entry, String dropReason});
+
+/// 受け取ったバイト列を、合計の大きさの上限を確かめながら貯める受け口。
+///
+/// gzip の解凍器の出力先に使い、上限を超えた時点で例外を送出して解凍を
+/// 打ち切ります。
+class _LimitedBytesSink implements Sink<List<int>> {
+  /// 上限を [maxBytes] として作ります。
+  ///
+  /// [maxBytes] 貯められる合計の大きさ。
+  _LimitedBytesSink(this.maxBytes);
+
+  /// 貯められる合計の大きさ。
+  final int maxBytes;
+
+  /// 貯めたバイト列。
+  final BytesBuilder _builder = BytesBuilder(copy: false);
+
+  @override
+  void add(List<int> data) {
+    if (_builder.length + data.length > maxBytes) {
+      throw StateError('decompressed body exceeds $maxBytes bytes');
+    }
+    _builder.add(data);
+  }
+
+  @override
+  void close() {}
+
+  /// 貯めたバイト列を取り出します。
+  ///
+  /// Returns: 貯めたバイト列。
+  Uint8List takeBytes() => _builder.takeBytes();
+}

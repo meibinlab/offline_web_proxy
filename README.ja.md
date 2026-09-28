@@ -216,6 +216,7 @@ const config = ProxyConfig(
   acceptedAtHeaderName: 'X-Offline-Accepted-At',
   enableReplayHeader: true,
   replayHeaderName: 'X-Offline-Replay',
+  enableUpstreamCompression: true,
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -273,7 +274,7 @@ const config = ProxyConfig(
 - `enableIdempotencyKey` は更新系リクエストへのべき等性キー付与です。最初の転送と再送で同じキーを送るため、応答を受け取れなかったリクエストが再送で二重に適用されることを上流側で防げます。**重複の排除自体は上流サーバでの実装が必要です。**
 - `forceCachePaths` は `Cache-Control: no-store` を無視して保存するパスです。全応答に `no-store` を付与するサーバでは、既定のままだとオフラインで返せる応答が残りません。既定は空で、指定が無い限り従来どおり保存しません。全体を一括で無効化する設定は用意していません。
   - 一致しても、応答に `Set-Cookie` がある場合、応答に `Vary` がある場合（`Accept-Encoding` だけを指す場合を除く）、またはリクエストに `Authorization` がある場合は保存しません。除外したときは `ProxyEventType.cacheSkipped` を理由付きで発行するため、オフラインで使えない原因を追跡できます。
-  - `Vary` が `Accept-Encoding` だけを指す場合に保存するのは、proxy が上流へ `Accept-Encoding: identity` を固定で送るため応答が割れないからです。Tomcat、nginx、Apache は圧縮を有効にするとこの `Vary` を既定で付けるため、除外すると画面の HTML、JS、CSS がまとめて対象外になります。`*` や他のヘッダ名を含む場合は除外します。
+  - `Vary` が `Accept-Encoding` だけを指す場合に保存するのは、proxy が上流へ送る `Accept-Encoding` をすべての経路で揃え、gzip は解凍してから保存するため応答が割れないからです。Tomcat、nginx、Apache は圧縮を有効にするとこの `Vary` を既定で付けるため、除外すると画面の HTML、JS、CSS がまとめて対象外になります。`*` や他のヘッダ名を含む場合は除外します。
   - 一致したパスでは上流の `max-age` や `Expires` を使わず、`cacheTtl` の値を有効期限に使います。`no-store` は `max-age=0` と併記されることが多く、そのまま採用すると保存直後に stale になるためです。
   - **応答キャッシュは暗号化していません。** 指定したパスの応答本文は端末内に平文で残るため、画面が含む情報を踏まえて指定してください。
 - `mirroredOrigins` は、proxy 経由で取得する別 origin の一覧です。CDN から UI ライブラリを読み込む画面では、HTML 内の絶対 URL が 127.0.0.1 を経由せず、キャッシュもフォールバックもウォームアップも効きません。列挙した origin は proxy が中継し、通常のキャッシュとオフライン代替の対象になります。既定は空です。
@@ -296,6 +297,10 @@ const config = ProxyConfig(
   - 最初の転送を拒否する場合は 4xx を返してください。5xx を返すとキューへ入り、このヘッダを付けて送り直されます。4xx でも、タイムアウトなどで応答が proxy へ届かなければ同じく送り直されるため、同じべき等性キーで一度拒否した要求には、キューからの送信でも同じ判定を返してください。
   - 画面が送った同名のヘッダは、画面から受けて上流へ転送する要求（read 系を含む）からは取り除き、キューからの送信では proxy の値で上書きします。
   - **認証の代わりにはなりません。** 上流へ直接届く要求は、proxy を通らずにこのヘッダを付けられます。
+- `enableUpstreamCompression` を有効にすると（既定）、上流へ `Accept-Encoding: gzip` を送り、gzip の本文を proxy で解凍してから WebView へ返します。上流との通信量が減ります。
+  - 転送、キューからの送信、ウォームアップ、別 origin の中継のすべてで同じ値を送ります。キャッシュ・HTML と CSS の書き換え・WebView への応答は、解凍後の本文で扱います。
+  - 解凍できない本文（壊れている、途中で切れている、解凍後に 64 MB を超える）は、そのまま返して保存しません。br など gzip 以外の方式は、従来どおりそのまま返します。`Range` を付けた要求には `identity` を送ります。
+  - `false` にすると、0.19.0 以前と同じく `Accept-Encoding: identity` を送ります。
 - `cacheMaxSize` は、応答キャッシュの本文の合計の上限です（既定 200 MB、`0` で上限なし）。超えた場合は、保存した日時の古いものから、上限の 9 割に収まるまで削除し、`ProxyEventType.cacheEvicted` を発行します。本文だけで上限を超える応答は保存しません。
 - `cacheTtl` と `cacheStale` は、指定すると既定のマップとマージされず**丸ごと置き換わります**。未掲載の Content-Type が `default` へ落ちるよう、`default` は必ず含めてください。
 - `text/html` の既定は TTL 1 時間、stale 1 日です。最後にオンラインで取得してから約 25 時間でフォールバック対象から外れるため、**長期のオフライン運用では `cacheTtl` と `cacheStale` の設定が必要です**。`cacheStale` には JavaScript のキーが無く、スクリプトは `default`（3 日）になります。

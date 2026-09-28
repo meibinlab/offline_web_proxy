@@ -614,7 +614,7 @@ void main() {
 
           expect(replayBodies, equals(['hello-queue']));
           expect(replayConnectionHeaders, equals([null]));
-          expect(replayAcceptEncodingHeaders, equals(['identity']));
+          expect(replayAcceptEncodingHeaders, equals(['gzip']));
           expect(replayCookieHeaders, equals(['SESSION=abc123']));
           expect(replayHostHeaders, equals(['127.0.0.1']));
           expect(replayDebugHeaders, equals([null]));
