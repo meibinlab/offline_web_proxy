@@ -69,9 +69,9 @@ proxy が返す `text/html` と `text/css` の応答について、`mirroredOrig
 - CSS の対象は `url()`（引用符なし、`"`、`'` のいずれも）と `@import "..."` / `@import url(...)` です。`@import` と引用符の間の空白は省略できます。コメント（`/* */`）内の URL は書き換えません。`content: "/*"` のような文字列はコメントの開始とみなしません。Google Fonts のように、CSS が別 origin のフォント本体を `@font-face { src: url(...) }` で参照する構成では、CSS とフォント本体の両方の origin を列挙するとフォントもオフラインで使えます
 - ウォームアップの参照抽出と同じ判定を使うため、**書き換えた資源は必ず `warmupCache(followReferences: true)` の対象になります**
 - 相対 URL は応答の URL を基準に解決してから判定します。設定済み origin から返した HTML / CSS 内の相対 URL は書き換えません。中継した CSS 内では、`/img/x.png` のように `/` で始まるルート相対 URL を中継用のパスへ書き換えます。そのまま残すと、ブラウザが proxy 経由で設定済み origin へ要求してしまうためです。`../img/x.png` のようなパス相対 URL は、中継用のパスの下でブラウザが正しく解決するため書き換えません（本文を変えず `integrity` を保つため）
-- 書き換えは保存時ではなく応答時に行います。キャッシュには上流が返したバイト列をそのまま保持するため、オンラインとオフラインのどちらの経路でも同じ変換を通せます。設定から origin を外せば、保存済みの応答も元の URL に戻ります
+- 書き換えは保存時ではなく応答時に行います。キャッシュには書き換える前の本文（gzip は解凍した本文）を保持するため、オンラインとオフラインのどちらの経路でも同じ変換を通せます。設定から origin を外せば、保存済みの応答も元の URL に戻ります
 - 本文は `latin1` で読み書きします。対象の構文と URL は ASCII の範囲に収まるため、文字コードが何であってもバイト列を保てます
-- 対象は 200 応答かつ `Content-Encoding` を持たない場合に限ります。上流が `identity` を無視して圧縮した本文は解釈できません
+- 対象は 200 応答かつ `Content-Encoding` を持たない場合に限ります。上流が gzip で圧縮した本文は、解凍してから書き換えます（【7】）。解凍できなかった本文と、proxy が求めない方式（br など）で圧縮された本文は解釈できません
 
 #### 中継の扱い
 
@@ -872,16 +872,30 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 
 ### 上流サーバとの連携
 
-- **Accept-Encoding 管理**: クライアントの圧縮対応状況を上流サーバに適切に伝達
-- **解凍処理**: 上流サーバからの圧縮レスポンス（gzip、deflate）をプロキシで解凍してクライアントに転送
-  - 上流サーバとの通信は圧縮のまま行い、帯域を節約
-  - クライアントへは非圧縮で転送（ローカル通信のため帯域は問題にならない）
-  - Content-Encoding ヘッダを削除し、Content-Length を更新
+上流との通信は圧縮したまま行い、帯域を節約します。WebView へは解凍して返します。WebView との間はループバックのため、圧縮しても得るものがありません。
+
+- **設定**: `ProxyConfig.enableUpstreamCompression`（既定 `true`）
+- **送る値**: 上流へ送るすべての要求に `Accept-Encoding: gzip` を付けます。WebView が送った `Accept-Encoding` は上流へ渡しません
+  - 対象は、転送、キューからの送信、ウォームアップ、別 origin の中継（`mirroredOrigins`）です。経路によって保存する応答が割れないよう、すべて同じ値にします（【8】の「`Vary: Accept-Encoding` を除外しない理由」）
+  - 求めるのは gzip だけです。deflate は zlib 形式と生の deflate が混在して判別の手間に見合わず、brotli（`br`）は dart:io で解凍できないためです
+  - 例外として、`Range` を付けた要求には `identity` を送ります。圧縮した表現の範囲は圧縮後のバイト列の位置を指し、解凍できないためです。範囲の応答は保存しないため、経路で値を揃える前提は崩れません
+- **解凍**: `Content-Encoding` が gzip だけを指す応答は、本文を読み終えた時点で解凍し、`Content-Encoding` を取り除きます。`Content-Length` は解凍後の本文の長さになります
+  - キャッシュへの保存、HTML・CSS の書き換え（【1】の「HTML と CSS の書き換え」）、ウォームアップの参照の抽出、WebView への応答は、すべて解凍後の本文で行います
+  - 本文を持たない応答（`HEAD`、`204`、`304`、空の本文）は、解凍せずに `Content-Encoding` だけを取り除きます。同じ URL の `GET` と見え方を揃えるためです
+  - `206` と `Content-Range` を持つ応答は解凍しません
+  - 解凍は、本文を受け取った isolate で同期的に行います
+- **解凍できない場合**: 状態コード・ヘッダ・本文を変えずに返し、キャッシュへは保存しません。状態コードを `502` などへ変えないのは、上流が処理を終えた更新系を 5xx と見なしてキューへ入れないためです。次の場合を解凍できないものとして扱います
+  - gzip として読めない本文
+  - 途中で切れた本文。dart:io は切れた gzip を例外なく途中まで解凍するため、末尾の ISIZE（解凍後の長さ）と照らし合わせて見分けます。そのため、複数のメンバーを連ねた gzip も解凍しません
+  - 解凍後の大きさが 64 MB を超える本文。メモリを使い尽くさないための安全装置です
+- **求めていない方式**: `br` など、gzip 以外で圧縮された応答は、従来どおりそのまま返して保存します
+- **ETag**: nginx や Apache は、圧縮した表現に別の ETag を付けます。この版へ更新した直後の最初の再検証は、`304` ではなく `200` になることがあります。サーバによっては（Apache の mod_deflate の一部の版など）、圧縮した表現の ETag と `If-None-Match` が一致せず、その後も `304` が返らない場合があります。再検証の通信量が気になる場合は、上流の設定を見直すか、`enableUpstreamCompression: false` にしてください（未検証）
+- **CPU**: 解凍は dart:io の zlib（ネイティブ実装）で行います
 
 ### 非圧縮オプション
 
-- **identity 指定**: `Accept-Encoding: identity` を指定することで、非圧縮レスポンスを強制取得可能
-- **用途**: デバッグやレスポンス内容の直接確認時に有用
+- **無効化**: `enableUpstreamCompression: false` にすると、上流へ `Accept-Encoding: identity` を送り、0.19.0 以前と同じ挙動になります。上流が `identity` を無視して圧縮した応答は、宣言どおりの `Content-Encoding` のまま返して保存します
+- **用途**: 上流の圧縮に不具合がある場合や、通信内容を直接確かめたい場合
 
 ## 【8】キャッシュ整合性
 
@@ -930,7 +944,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 
 除外した場合は `ProxyEventType.cacheSkipped` を理由（`set-cookie` / `vary` / `authorization`）付きで発行します。指定したパスがオフラインで使えない原因を追跡できるようにするためです。`no-store` が付いていない応答は従来の保存判定で足りるため、この判定も通知も行いません。
 
-**`Vary: Accept-Encoding` を除外しない理由**: proxy は転送、キュー再送、ウォームアップのいずれでも上流へ `Accept-Encoding: identity` を固定で送るため、受け取る応答は常に 1 種類です。`Accept-Encoding` だけを理由に保存を見送っても守れるものがありません。一方 Tomcat、nginx、Apache はいずれも圧縮を有効にすると `Vary: Accept-Encoding` を既定で付けるため、除外条件に含めると画面の HTML、JS、CSS がまとめて保存対象から外れます。判定は `,` で分解し、前後の空白と大文字小文字を無視して行います。`*` や他のヘッダ名を 1 つでも含む場合は従来どおり除外します。
+**`Vary: Accept-Encoding` を除外しない理由**: proxy は転送、キュー再送、ウォームアップのいずれでも上流へ同じ `Accept-Encoding`（既定は `gzip`、圧縮を無効にした場合は `identity`）を送り、gzip は解凍してから保存するため、受け取る応答は常に 1 種類です。`Accept-Encoding` だけを理由に保存を見送っても守れるものがありません。一方 Tomcat、nginx、Apache はいずれも圧縮を有効にすると `Vary: Accept-Encoding` を既定で付けるため、除外条件に含めると画面の HTML、JS、CSS がまとめて保存対象から外れます。判定は `,` で分解し、前後の空白と大文字小文字を無視して行います。`*` や他のヘッダ名を 1 つでも含む場合は従来どおり除外します。
 
 **有効期限の扱い**: `no-store` を返すサーバは `no-store, max-age=0, must-revalidate` のように、保存させない意図の指示を併記することが一般的です。これをそのまま採用すると保存直後に stale となり、オフラインで使える期間が stale 期間だけになります。保存可否を設定側で上書きした以上、有効期限も設定側に従うのが一貫するため、一致したパスでは `s-maxage`、`max-age`、`Expires` を使わず `cacheTtl` の値を適用します。
 
@@ -939,7 +953,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 #### ウォームアップ
 
 - **Cookie の付与**: 転送経路と同じく Cookie Jar の内容を送ります。認証が必要な資源をウォームアップで取得するために必要です
-- **Accept-Encoding**: 転送経路と同じく `identity` を送ります。経路によって保存する応答が割れないようにするためです
+- **Accept-Encoding**: 転送経路と同じ値を送り、gzip の本文は解凍してから保存します（【7】）。経路によって保存する応答が割れないようにするためです
 - **参照資源の連鎖取得**: `warmupCache(followReferences: true)` を指定すると、取得した HTML と CSS が参照する資源も続けて取得します
   - HTML の対象は `<script src>`、`<link href>`、`<img src>` と、`<style>` 要素内の `url()` / `@import` です
   - CSS（`text/css`）の対象は `url()` と `@import` です。コメント内の URL は取得しません
@@ -948,7 +962,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
   - CSS は、HTML から参照されたものも `paths` に指定したものも、`url()` と `@import` を続けて辿ります。HTML → CSS → フォントのように、指定したパスから数えて最大 4 段まで辿ります。`@import` の入れ子が深い場合や、参照ごとに異なる URL を返すサーバで取得が終わらなくならないよう上限を設けています
   - 対象は同一 origin と `mirroredOrigins` に列挙した origin です。ミラー対象の資源は中継用のパスで取得します。それ以外の別 origin、`data:`、`javascript:`、`mailto:`、`blob:` は対象外です
   - 同じ資源は一度だけ取得します
-  - 抽出は正規表現による最善努力です。**実行時に JavaScript が組み立てる URL には届きません**。上流が `identity` を無視して圧縮した本文からも抽出できません（保存自体は正しく行われます）
+  - 抽出は正規表現による最善努力です。**実行時に JavaScript が組み立てる URL には届きません**。解凍できなかった本文と、proxy が求めない方式（br など）で圧縮された本文からも抽出できません（保存自体は正しく行われます）
   - 結果は `WarmupEntry.referencedFrom` で参照元を辿れます。CSS から辿った資源では、参照元は CSS のパスです
 - **既定**: `followReferences` は `false` で、従来どおり指定したパスだけを取得します
 
@@ -1349,9 +1363,8 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ### Accept-Encoding ヘッダ
 
-- **managed**: プロキシが圧縮を管理
-- **passthrough**: クライアントの設定をそのまま転送
-- **identity-downstream**: 下流には非圧縮で送信
+- **上流へ**: WebView が送った値は渡さず、proxy が決めた値を送ります（既定は `gzip`、`enableUpstreamCompression: false` の場合と `Range` を付けた要求は `identity`）。【7】を参照してください
+- **WebView へ**: gzip の本文は解凍し、`Content-Encoding` を取り除いて返します
 
 ### Location ヘッダ
 
@@ -1583,7 +1596,6 @@ proxy:
     # setCookies: "capture"         # 例: capture/passthrough
     # origin: "replace"             # 例: replace/passthrough/remove
     # referer: "replace"            # 例: replace/passthrough/remove
-    # acceptEncoding: "managed"     # 例: managed/passthrough/identity-downstream
     # location: "rewrite"           # 例: rewrite/passthrough
 
   # フォールバック設定
@@ -2613,6 +2625,7 @@ class ProxyConfig {
   final String acceptedAtHeaderName; // 受付時刻のヘッダ名（既定: "X-Offline-Accepted-At"）
   final bool enableReplayHeader; // キューからの送信の通知（既定: true）
   final String replayHeaderName; // キューからの送信を示すヘッダ名（既定: "X-Offline-Replay"）
+  final bool enableUpstreamCompression; // 上流との通信の圧縮（gzip）（既定: true）
   final DropPolicy dropPolicy; // 再送を打ち切った要求の扱い（既定: quarantine）
   final int quarantineMaxCount; // 隔離の件数の上限（既定: 1000、0=上限なし）
   final Duration quarantineRetention; // 隔離の保持期間（既定: 30 日、Duration.zero=上限なし）

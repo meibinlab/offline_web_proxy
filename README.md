@@ -216,6 +216,7 @@ const config = ProxyConfig(
   acceptedAtHeaderName: 'X-Offline-Accepted-At',
   enableReplayHeader: true,
   replayHeaderName: 'X-Offline-Replay',
+  enableUpstreamCompression: true,
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -273,7 +274,7 @@ Notes:
 - `enableIdempotencyKey` attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. **Deduplication itself must be implemented on the upstream server.**
 - `forceCachePaths` lists the paths stored even when the response says `Cache-Control: no-store`. On a server that sends `no-store` everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes `no-store` handling proxy-wide.
   - Even on a match, a response carrying `Set-Cookie`, a response carrying `Vary` (unless it names `Accept-Encoding` alone), or a request carrying `Authorization`, is not stored. A skipped response raises `ProxyEventType.cacheSkipped` with the reason, so a path that never becomes available offline can be diagnosed.
-  - A `Vary` naming `Accept-Encoding` alone is stored because the proxy pins `Accept-Encoding: identity` on every upstream request, so the response cannot vary. Tomcat, nginx and Apache all add that `Vary` by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A `Vary` naming `*` or any other header is still skipped.
+  - A `Vary` naming `Accept-Encoding` alone is stored because the proxy sends the same `Accept-Encoding` on every upstream route and decompresses gzip before storing, so the response cannot vary. Tomcat, nginx and Apache all add that `Vary` by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A `Vary` naming `*` or any other header is still skipped.
   - For a matching path the upstream `max-age` and `Expires` are ignored and `cacheTtl` decides the expiry, because `no-store` is usually paired with `max-age=0`, which would make the entry stale the moment it is stored.
   - **The response cache is not encrypted.** The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.
 - `mirroredOrigins` lists other origins fetched through the proxy. On a screen that loads its UI library from a CDN, the absolute URL in the HTML never passes through 127.0.0.1, so caching, fallback and warmup all miss it. A listed origin is relayed by the proxy and joins the ordinary cache and offline fallback. Empty by default.
@@ -296,6 +297,10 @@ Notes:
   - Answer 4xx to reject a first forward. A 5xx answer puts the request in the queue, and it is sent again with this header. So is a 4xx answer that never reaches the proxy, for example after a timeout, so give the same answer from the queue to a request already rejected under the same idempotency key.
   - A header of the same name sent by the screen is removed from every request forwarded as the screen sent it (read requests included) and replaced with the proxy's value on requests sent from the queue.
   - **This is not authentication.** Any request that reaches the upstream without the proxy can carry the header.
+- With `enableUpstreamCompression` on (the default), the proxy sends `Accept-Encoding: gzip` upstream and decompresses a gzip body before returning it to the WebView, which cuts the traffic on the upstream link.
+  - The same value is sent on every route: forwarding, requests sent from the queue, warmup and mirrored origins. Caching, HTML and CSS rewriting and the response to the WebView all use the decompressed body.
+  - A body that cannot be decompressed (corrupt, truncated, or larger than 64 MB once decompressed) is returned as is and not cached. Codings other than gzip, such as br, are passed through as before. A request carrying `Range` is sent `identity`.
+  - Set it to `false` to send `Accept-Encoding: identity`, as 0.19.0 and earlier did.
 - `cacheTtl` and `cacheStale` **replace** the default maps rather than merging with them. Always keep a `default` entry so that unlisted content types still resolve.
 - `text/html` defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. **Long offline operation requires tuning both `cacheTtl` and `cacheStale`.** `cacheStale` has no JavaScript entry, so scripts fall back to `default` (3 days).
 

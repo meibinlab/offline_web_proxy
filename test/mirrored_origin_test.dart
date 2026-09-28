@@ -944,8 +944,10 @@ void main() {
       });
     });
 
-    /// 圧縮された本文は書き換えずにそのまま返すこと
-    test('leaves a compressed html untouched', () async {
+    /// 上流との圧縮を無効にした場合、圧縮された本文は書き換えずにそのまま
+    /// 返すこと（有効な場合は upstream_encoding_test.dart で確かめる）
+    test('leaves a compressed html untouched when compression is disabled',
+        () async {
       await withRealHttpClient(() async {
         await startServers();
 
@@ -963,6 +965,7 @@ void main() {
           config: ProxyConfig(
             origin: upstream!.origin,
             mirroredOrigins: <String>[cdn!.origin],
+            enableUpstreamCompression: false,
           ),
         );
 

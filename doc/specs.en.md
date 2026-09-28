@@ -69,9 +69,9 @@ In a `text/html` or `text/css` response the proxy serves, an absolute URL matchi
 - In CSS, the targets are `url()` (unquoted, `"` or `'`) and `@import "..."` / `@import url(...)`. The whitespace between `@import` and the quote may be omitted. A URL inside a comment (`/* */`) is left alone, and a string such as `content: "/*"` is not taken for the start of a comment. When a stylesheet loads its font files from another origin through `@font-face { src: url(...) }`, as Google Fonts does, listing both origins makes the fonts available offline too
 - The decision reuses the warmup reference scan, so **a rewritten resource is always collected by `warmupCache(followReferences: true)`**
 - A relative URL is resolved against the response URL before the decision. Inside HTML or CSS returned from the configured origin it is left alone. Inside a relayed stylesheet, a root-relative URL such as `/img/x.png` is rewritten to the relay path, because left as is it would make the browser ask the configured origin through the proxy. A path-relative URL such as `../img/x.png` already resolves correctly under the relay path and is left alone, which keeps the body, and therefore `integrity`, intact
-- Rewriting happens on the way out, not on the way in. The cache keeps the bytes the upstream returned, so the online path and the offline path go through the same transformation, and removing an origin from the configuration restores the original URLs even in stored responses
+- Rewriting happens on the way out, not on the way in. The cache keeps the body before rewriting (decompressed when it was gzip), so the online path and the offline path go through the same transformation, and removing an origin from the configuration restores the original URLs even in stored responses
 - The body is read and written as `latin1`. The target syntax and URLs stay within ASCII, so the bytes are preserved whatever the document's character encoding is
-- Only a 200 response without a `Content-Encoding` is rewritten. A body an upstream compressed despite the `identity` request cannot be interpreted
+- Only a 200 response without a `Content-Encoding` is rewritten. A body the upstream compressed with gzip is decompressed first (section [7]). A body that cannot be decompressed, or one compressed with a coding the proxy does not ask for (such as br), cannot be interpreted
 
 #### Relay Behaviour
 
@@ -872,16 +872,30 @@ The proxy guarantees only that the same operation carries the same key. **Dedupl
 
 ### Coordination with Upstream Server
 
-- **Accept-Encoding Management**: Properly convey client's compression support status to upstream server
-- **Decompression Processing**: Decompress compressed responses (gzip, deflate) from upstream server at the proxy and forward to client
-  - Communication with upstream server remains compressed to save bandwidth
-  - Forward uncompressed to client (local communication, so bandwidth is not an issue)
-  - Remove Content-Encoding header and update Content-Length
+The upstream link stays compressed to save bandwidth, and the WebView receives the body decompressed. The WebView link is loopback, so compressing it gains nothing.
+
+- **Setting**: `ProxyConfig.enableUpstreamCompression` (default `true`)
+- **Value sent**: Every request the proxy sends upstream carries `Accept-Encoding: gzip`. The `Accept-Encoding` sent by the WebView is not passed on
+  - This covers forwarding, requests sent from the queue, warmup and relays to `mirroredOrigins`. All of them send the same value so that the stored response cannot differ between routes (section [8], "Why `Vary: Accept-Encoding` is not a skip condition")
+  - Only gzip is requested. HTTP deflate mixes the zlib format and raw deflate, which is not worth telling apart, and dart:io cannot decompress brotli (`br`)
+  - The exception is a request carrying `Range`, which is sent `identity`: a range of a compressed representation points into the compressed bytes and cannot be decompressed. Range responses are never stored, so keeping the value the same on every route still holds
+- **Decompression**: A response whose `Content-Encoding` names gzip alone is decompressed once the body has been read, and `Content-Encoding` is removed. `Content-Length` follows the decompressed body
+  - Caching, HTML and CSS rewriting (section [1], "HTML and CSS Rewriting"), warmup reference extraction and the response to the WebView all use the decompressed body
+  - A response without a body (`HEAD`, `204`, `304`, or an empty body) only loses its `Content-Encoding`, so it looks the same as a `GET` for the same URL
+  - A `206` response, or one carrying `Content-Range`, is not decompressed
+  - Decompression runs synchronously on the isolate that received the body
+- **When decompression fails**: The status, headers and body are returned unchanged and the response is not cached. The status is not turned into `502` or similar, so that an update the upstream has already processed is not mistaken for a 5xx and queued. The following count as failures:
+  - A body that is not readable as gzip
+  - A truncated body. dart:io decompresses a truncated gzip up to where it ends without raising an error, so the trailing ISIZE (the decompressed length) is checked against the result. As a consequence, a gzip made of several members is not decompressed either
+  - A body larger than 64 MB once decompressed, a safeguard against running out of memory
+- **Codings not asked for**: A response compressed with anything but gzip, such as `br`, is returned and stored as before
+- **ETag**: nginx and Apache give the compressed representation a different ETag. Right after upgrading to this version, the first revalidation may answer `200` instead of `304`. On some servers (some versions of Apache mod_deflate, for example) the ETag of the compressed representation never matches `If-None-Match`, so `304` may not come back afterwards either. If the revalidation traffic matters, review the upstream settings or set `enableUpstreamCompression: false` (not verified)
+- **CPU**: Decompression uses the native zlib in dart:io
 
 ### Uncompressed Option
 
-- **identity Specification**: Can force uncompressed response by specifying `Accept-Encoding: identity`
-- **Use Case**: Useful for debugging or direct examination of response content
+- **Disabling**: With `enableUpstreamCompression: false`, the proxy sends `Accept-Encoding: identity`, as 0.19.0 and earlier did. A response the upstream compresses anyway is returned and stored with its declared `Content-Encoding`
+- **Use case**: When the upstream's compression misbehaves, or to inspect the traffic directly
 
 ## [8] Cache Consistency
 
@@ -930,7 +944,7 @@ Even on a match, a response is skipped when keeping it would leak or corrupt per
 
 A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-cookie` / `vary` / `authorization`), so a path that never becomes available offline can be diagnosed. A response without `no-store` is decided by the ordinary storage policy, so neither the check nor the event applies to it.
 
-**Why `Vary: Accept-Encoding` is not a skip condition**: the proxy pins `Accept-Encoding: identity` on every upstream request it makes — forwarding, queue resend and warmup alike — so only one variant can ever come back and skipping on `Accept-Encoding` protects nothing. Tomcat, nginx and Apache, meanwhile, all add that `Vary` by default once compression is enabled, so treating it as a skip condition removes the screen's HTML, JS and CSS from storage in one go. The value is split on `,` and compared without surrounding whitespace or case; a `Vary` naming `*` or any other header is still skipped.
+**Why `Vary: Accept-Encoding` is not a skip condition**: the proxy sends the same `Accept-Encoding` (`gzip` by default, `identity` when compression is disabled) on every upstream request it makes — forwarding, queue resend and warmup alike — and decompresses gzip before storing, so only one variant can ever come back and skipping on `Accept-Encoding` protects nothing. Tomcat, nginx and Apache, meanwhile, all add that `Vary` by default once compression is enabled, so treating it as a skip condition removes the screen's HTML, JS and CSS from storage in one go. The value is split on `,` and compared without surrounding whitespace or case; a `Vary` naming `*` or any other header is still skipped.
 
 **Freshness**: A server that sends `no-store` usually sends something like `no-store, max-age=0, must-revalidate`. Honouring those directives would make the entry stale the moment it is stored, leaving only the stale window for offline use. Since the decision to store was already overridden by configuration, the expiry follows configuration too: for a matching path, `s-maxage`, `max-age` and `Expires` are ignored and `cacheTtl` decides the TTL.
 
@@ -939,7 +953,7 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
 #### Warmup
 
 - **Cookies**: The cookie jar is sent, exactly as on the forwarding path. Without it, a resource that requires authentication cannot be warmed up
-- **Accept-Encoding**: `identity` is sent, exactly as on the forwarding path, so that the stored response cannot differ between the two routes
+- **Accept-Encoding**: The same value as on the forwarding path is sent, and a gzip body is decompressed before it is stored (section [7]), so that the stored response cannot differ between the two routes
 - **Following references**: `warmupCache(followReferences: true)` also fetches the resources referenced by the warmed HTML and CSS
   - In HTML, `<script src>`, `<link href>`, `<img src>` and the `url()` / `@import` references inside `<style>` elements are covered
   - In CSS (`text/css`), `url()` and `@import` are covered. A URL inside a comment is not fetched
@@ -948,7 +962,7 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
   - A stylesheet is followed further, whether HTML referenced it or it was listed in `paths`. Chains such as HTML → CSS → font are followed up to 4 levels counted from the listed path. The limit keeps deep `@import` nesting, or a server that answers every reference with a new URL, from making the warmup endless
   - Same-origin resources and resources on an origin listed in `mirroredOrigins` are covered; a listed origin's resource is fetched through the relay path. Any other origin, `data:`, `javascript:`, `mailto:` and `blob:` are skipped
   - A shared resource is requested only once
-  - Extraction is a best-effort regular expression scan. **A URL assembled by JavaScript at runtime is out of reach**, and nothing is extracted from a body an upstream compressed despite the `identity` request (the entry itself is still stored intact)
+  - Extraction is a best-effort regular expression scan. **A URL assembled by JavaScript at runtime is out of reach**, and nothing is extracted from a body that cannot be decompressed or is compressed with a coding the proxy does not ask for, such as br (the entry itself is still stored intact)
   - `WarmupEntry.referencedFrom` names the HTML or CSS that referenced each entry
 - **Default**: `followReferences` is `false`, keeping the previous behaviour of fetching only the listed paths
 
@@ -1349,9 +1363,8 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 ### Accept-Encoding Header
 
-- **managed**: Proxy manages compression
-- **passthrough**: Forward client settings as-is
-- **identity-downstream**: Send uncompressed to downstream
+- **Upstream**: The value sent by the WebView is not passed on; the proxy sends its own (`gzip` by default; `identity` with `enableUpstreamCompression: false` and for a request carrying `Range`). See section [7]
+- **To the WebView**: A gzip body is decompressed and returned without `Content-Encoding`
 
 ### Location Header
 
@@ -1583,7 +1596,6 @@ proxy:
     # setCookies: "capture"         # Example: capture/passthrough
     # origin: "replace"             # Example: replace/passthrough/remove
     # referer: "replace"            # Example: replace/passthrough/remove
-    # acceptEncoding: "managed"     # Example: managed/passthrough/identity-downstream
     # location: "rewrite"           # Example: rewrite/passthrough
 
   # Fallback settings
@@ -2613,6 +2625,7 @@ class ProxyConfig {
   final String acceptedAtHeaderName; // Acceptance time header (default: "X-Offline-Accepted-At")
   final bool enableReplayHeader; // Mark requests sent from the queue (default: true)
   final String replayHeaderName; // Header marking requests sent from the queue (default: "X-Offline-Replay")
+  final bool enableUpstreamCompression; // Compress the upstream link with gzip (default: true)
   final DropPolicy dropPolicy; // How a request that stopped retrying is handled (default: quarantine)
   final int quarantineMaxCount; // Maximum number of quarantined requests (default: 1000, 0 = no limit)
   final Duration quarantineRetention; // Retention of quarantined requests (default: 30 days, Duration.zero = no limit)
