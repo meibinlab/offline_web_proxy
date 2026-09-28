@@ -94,7 +94,7 @@
     final normalizedUrl = _normalizeUrl(url);
     final cacheKey = _generateCacheKey(normalizedUrl);
     await _cacheWriteLock.synchronized(() async {
-      await _cacheBox?.delete(cacheKey);
+      await _cacheStore?.delete(cacheKey);
       _cacheTotalBytes = null;
     });
   } catch (e) {

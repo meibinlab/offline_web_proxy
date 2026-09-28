@@ -91,9 +91,10 @@
     int expiredEntries = 0;
     int totalSize = 0;
 
-    if (_cacheBox != null) {
-      for (final key in _cacheBox!.keys) {
-        final entry = _cacheBox!.get(key) as Map?;
+    final store = _cacheStore;
+    if (store != null) {
+      for (final key in store.keys) {
+        final entry = store.metadata(key as Object);
         if (entry != null) {
           totalEntries++;
           totalSize += (entry[&#39;sizeBytes&#39;] as int? ?? 0);

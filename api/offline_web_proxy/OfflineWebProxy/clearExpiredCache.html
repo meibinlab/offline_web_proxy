@@ -87,11 +87,12 @@
   try {
     final keysToDelete = &lt;String&gt;[];
 
-    if (_cacheBox != null) {
-      final keys = _cacheBox!.keys.toList(growable: false);
+    final store = _cacheStore;
+    if (store != null) {
+      final keys = store.keys.toList(growable: false);
       for (var i = 0; i &lt; keys.length; i++) {
         final key = keys[i];
-        final entry = _cacheBox!.get(key) as Map?;
+        final entry = store.metadata(key as Object);
         if (entry != null) {
           if (_determineStatus(entry) == CacheStatus.expired) {
             keysToDelete.add(key as String);
@@ -107,16 +108,16 @@
         &#47;&#47; 保存と交互に進むと合計の控えがずれるため、ロックの中で消す。
         &#47;&#47; 走査の後に保存し直された記録は、期限を確かめ直して残す
         await _cacheWriteLock.synchronized(() async {
-          final box = _cacheBox;
-          if (box == null || !box.isOpen) {
+          final store = _cacheStore;
+          if (store == null || !store.isOpen) {
             return;
           }
           final expiredKeys = keysToDelete.where((key) {
-            final entry = box.get(key);
-            return entry is Map &amp;&amp;
+            final entry = store.metadata(key);
+            return entry != null &amp;&amp;
                 _determineStatus(entry) == CacheStatus.expired;
           }).toList(growable: false);
-          await box.deleteAll(expiredKeys);
+          await store.deleteAll(expiredKeys);
           _cacheTotalBytes = null;
         });
       }

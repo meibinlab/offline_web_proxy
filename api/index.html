@@ -251,7 +251,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
   enableReplayHeader: true,
   replayHeaderName: 'X-Offline-Replay',
   enableUpstreamCompression: true,
-  encryptResponseCache: false,
+  encryptResponseCache: true,
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -320,7 +320,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li>Even on a match, a response carrying <code>Set-Cookie</code>, a response carrying <code>Vary</code> (unless it names <code>Accept-Encoding</code> alone), or a request carrying <code>Authorization</code>, is not stored. A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason, so a path that never becomes available offline can be diagnosed.</li>
 <li>A <code>Vary</code> naming <code>Accept-Encoding</code> alone is stored because the proxy sends the same <code>Accept-Encoding</code> on every upstream route and decompresses gzip before storing, so the response cannot vary. Tomcat, nginx and Apache all add that <code>Vary</code> by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A <code>Vary</code> naming <code>*</code> or any other header is still skipped.</li>
 <li>For a matching path the upstream <code>max-age</code> and <code>Expires</code> are ignored and <code>cacheTtl</code> decides the expiry, because <code>no-store</code> is usually paired with <code>max-age=0</code>, which would make the entry stale the moment it is stored.</li>
-<li><strong>The response cache is not encrypted by default.</strong> The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it. Enable <code>encryptResponseCache</code> when it holds personal or business data.</li>
+<li>The response cache is encrypted by default. With <code>encryptResponseCache</code> switched off, the body of a listed path stays on the device in the clear. Even when encrypted, the box keys (the SHA-256 of the URL) stay readable, so weigh what the screen contains before listing it.</li>
 </ul>
 </li>
 <li><code>mirroredOrigins</code> lists other origins fetched through the proxy. On a screen that loads its UI library from a CDN, the absolute URL in the HTML never passes through 127.0.0.1, so caching, fallback and warmup all miss it. A listed origin is relayed by the proxy and joins the ordinary cache and offline fallback. Empty by default.
@@ -363,10 +363,11 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 </ul>
 </li>
 <li><code>cacheMaxSize</code> caps the total body size of the response cache (200 MB by default, <code>0</code> for no limit). Beyond it, entries are removed oldest stored first until the total fits within 90% of the limit, and <code>ProxyEventType.cacheEvicted</code> is raised. A response whose body alone exceeds the limit is not stored.</li>
-<li><code>encryptResponseCache</code> stores the response cache encrypted with the same key as the cookies, the queue and the quarantine store (off by default).
+<li>While <code>encryptResponseCache</code> is on (the default), the response cache is stored encrypted with the same key as the cookies, the queue and the quarantine store.
 <ul>
-<li>The box is decrypted in full when it opens, so <code>start()</code> takes longer as the cache grows (about 0.4 s for 30 MB and 3.2 s for 200 MB on a desktop CPU; a phone is expected to be several times slower). Keep <code>cacheMaxSize</code> modest when enabling it.</li>
-<li>Switching it on moves the plain cache over inside <code>start()</code> and deletes the plain file (about 0.7 s for 30 MB and 7 s for 200 MB on a desktop CPU). The deletion is an ordinary file deletion and does not guarantee that the storage is erased. Switching it off deletes the encrypted cache without restoring it in plain form. When the key does not match, the cache is emptied instead of failing startup.</li>
+<li>Bodies are read one at a time when served, so startup neither decrypts every entry nor loads the whole cache into memory. On a desktop CPU, opening a 200 MB cache took about 0.75 s encrypted (about 0.66 s plain) and added a few megabytes of memory. A phone is expected to be several times slower.</li>
+<li>After an update from 0.21.0 or earlier, the first <code>start()</code> moves the cache in the old format (such as a plain <code>proxy_cache</code>) into the encrypted pair and then deletes the old files (about 1.1 s for 30 MB and 7.5 s for 200 MB on a desktop CPU). The deletion is an ordinary file deletion and does not guarantee that the storage is erased.</li>
+<li>Set it to <code>false</code> to store the cache in plain form; the encrypted cache is then deleted without being restored in plain form. When the key does not match, the cache is emptied instead of failing startup.</li>
 <li>The box keys (the SHA-256 of the normalized URL) stay readable.</li>
 </ul>
 </li>
@@ -829,16 +830,22 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 <td>30 days by default. The count limit (1000 by default) applies to acknowledged entries only</td>
 </tr>
 <tr>
-<td><code>proxy_cache</code></td>
-<td>Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL. Used while <code>encryptResponseCache</code> is <code>false</code> (the default)</td>
-<td>None</td>
-<td>Entries past their stale period and entries beyond <code>cacheMaxSize</code> are removed. Moved into <code>proxy_cache_secure</code> and deleted once <code>encryptResponseCache</code> is enabled</td>
+<td><code>proxy_cache_index_secure</code>, <code>proxy_cache_body_secure</code></td>
+<td>Response cache (the default). The metadata box (<code>proxy_cache_index_secure</code>) holds the status code, stored time, expiry, Content-Type and body size; the body box (<code>proxy_cache_body_secure</code>) holds the headers and body. Keys are the SHA-256 of the normalized URL</td>
+<td>Values only (AES-256)</td>
+<td>Entries past their stale period and entries beyond <code>cacheMaxSize</code> are removed. Deleted, never restored in plain form, when <code>encryptResponseCache</code> is switched off</td>
 </tr>
 <tr>
-<td><code>proxy_cache_secure</code></td>
-<td>Response cache when <code>encryptResponseCache</code> is enabled. Same content and keys as <code>proxy_cache</code></td>
-<td>Values only (AES-256)</td>
-<td>Same as <code>proxy_cache</code>. Deleted, never restored in plain form, when <code>encryptResponseCache</code> is switched off again</td>
+<td><code>proxy_cache_index</code>, <code>proxy_cache_body</code></td>
+<td>Response cache when <code>encryptResponseCache</code> is <code>false</code>. Same content and keys as the encrypted pair</td>
+<td>None</td>
+<td>Same as the encrypted pair. Moved into the encrypted pair and deleted once <code>encryptResponseCache</code> is enabled</td>
+</tr>
+<tr>
+<td><code>proxy_cache</code>, <code>proxy_cache_secure</code></td>
+<td>Response cache of 0.21.0 and earlier, holding the metadata and body in one value. <code>proxy_cache_secure</code> is the one written by 0.21.0 with <code>encryptResponseCache</code> enabled</td>
+<td><code>proxy_cache</code>: none; <code>proxy_cache_secure</code>: values only (AES-256)</td>
+<td>Moved into the new pair and deleted at startup. With <code>encryptResponseCache</code> off, <code>proxy_cache_secure</code> is deleted without being moved</td>
 </tr>
 <tr>
 <td><code>proxy_web_storage</code></td>

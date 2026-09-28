@@ -80,9 +80,10 @@ purge applies the same limit. A response whose body alone exceeds the limit is n
 Removals raise <code>ProxyEventType.cacheEvicted</code>, whose <code>data</code> holds
 <code>reason</code>, <code>evictedCount</code> and <code>evictedBytes</code>.</p>
 <p>Only bodies count; headers and storage overhead do not, so the file on
-disk can be somewhat larger. Hive keeps the whole cache box in memory,
-so this limit also bounds that memory. <code>0</code> disables the limit; negative
-values are rejected by <code>start()</code> with a <code>ProxyStartException</code>.</p>
+disk can be somewhat larger. Only the metadata of each entry (a few
+hundred bytes) stays in memory; bodies are read from disk when served.
+<code>0</code> disables the limit; negative values are rejected by <code>start()</code> with a
+<code>ProxyStartException</code>.</p>
 <p><strong>Default</strong>: <code>200 * 1024 * 1024</code> (200 MB)</p>
 </section>
 

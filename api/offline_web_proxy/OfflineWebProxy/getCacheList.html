@@ -91,7 +91,8 @@
   <pre class="language-dart"><code class="language-dart">Future&lt;List&lt;CacheEntry&gt;&gt; getCacheList({int? limit, int? offset}) async {
   try {
     final entries = &lt;CacheEntry&gt;[];
-    final keys = _cacheBox?.keys.toList() ?? [];
+    final store = _cacheStore;
+    final keys = store?.keys.toList() ?? [];
 
     final startIndex = offset ?? 0;
     final endIndex = limit != null
@@ -100,7 +101,7 @@
 
     for (int i = startIndex; i &lt; endIndex; i++) {
       final key = keys[i];
-      final data = _cacheBox!.get(key) as Map?;
+      final data = store!.metadata(key as Object);
       if (data != null) {
         entries.add(_mapToCacheEntry(data));
       }
