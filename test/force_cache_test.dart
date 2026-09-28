@@ -12,8 +12,8 @@ const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
 };
 
-/// 応答キャッシュの保存領域名。保存に失敗する状況を作るために使用する。
-const String _cacheBoxName = 'proxy_cache';
+/// 既定（暗号化）の応答キャッシュの本文の Box 名。保存に失敗する状況を作るために使用する。
+const String _cacheBodyBoxName = 'proxy_cache_body_secure';
 
 /// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
 class _RealHttpOverrides extends HttpOverrides {
@@ -726,7 +726,7 @@ void main() {
             .listen((event) => errorPhases.add('${event.data['phase']}'));
 
         // 保存領域が使えない状況を作る（容量不足や停止処理との競合に相当）
-        await Hive.box(_cacheBoxName).close();
+        await Hive.lazyBox(_cacheBodyBoxName).close();
 
         final response = await _performGet(
           Uri.parse('http://127.0.0.1:$port/app/index.html'),

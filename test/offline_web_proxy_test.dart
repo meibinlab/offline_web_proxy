@@ -62,6 +62,29 @@ class _RealHttpOverrides extends HttpOverrides {
   }
 }
 
+/// 平文で保存する応答キャッシュの、メタデータの Box 名。
+const String _plainCacheIndexBoxName = 'proxy_cache_index';
+
+/// 平文で保存する応答キャッシュの、本文の Box 名。
+const String _plainCacheBodyBoxName = 'proxy_cache_body';
+
+/// 起動中の proxy が開いている平文の応答キャッシュへ、記録を直接書き込む。
+///
+/// proxy と同じく、本文の Box にヘッダと本文を、メタデータの Box に残りを書く。
+///
+/// [key] 記録のキー。
+/// [data] 0.21.0 以前と同じ形の記録。
+Future<void> _putPlainCacheEntry(String key, Map<String, Object?> data) async {
+  await Hive.lazyBox(_plainCacheBodyBoxName).put(key, {
+    'headers': data['headers'],
+    'body': data['body'],
+  });
+  await Hive.box(_plainCacheIndexBoxName).put(key, {
+    for (final entry in data.entries)
+      if (entry.key != 'headers' && entry.key != 'body') entry.key: entry.value,
+  });
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -1970,15 +1993,17 @@ void main() {
     /// （doc/specs.ja.md 【20】API リファレンス / キャッシュ管理）
     test('returns every cache entry when limit is omitted', () async {
       await proxy.start(
-        config: const ProxyConfig(origin: 'https://example.com'),
+        config: const ProxyConfig(
+          origin: 'https://example.com',
+          encryptResponseCache: false,
+        ),
       );
 
       // 「省略時は 100 件」のような上限が入っていないことを確かめるため、
       // 100 件を超える件数を用意する。
-      final cacheBox = Hive.box('proxy_cache');
       final now = DateTime.now();
       for (var i = 0; i < 120; i++) {
-        await cacheBox.put('list-entry-$i', {
+        await _putPlainCacheEntry('list-entry-$i', {
           'url': 'https://example.com/list/$i',
           'statusCode': HttpStatus.ok,
           'headers': {'content-type': 'application/json'},
@@ -2013,12 +2038,12 @@ void main() {
         config: const ProxyConfig(
           origin: 'https://example.com',
           cacheStale: {'default': 3600},
+          encryptResponseCache: false,
         ),
       );
 
-      final cacheBox = Hive.box('proxy_cache');
       final now = DateTime.now();
-      await cacheBox.put('stale-entry', {
+      await _putPlainCacheEntry('stale-entry', {
         'statusCode': HttpStatus.ok,
         'headers': {'content-type': 'application/json'},
         'body': Uint8List.fromList(utf8.encode('{"status":"stale"}')),
@@ -2028,7 +2053,7 @@ void main() {
         'contentType': 'application/json',
         'sizeBytes': 18,
       });
-      await cacheBox.put('expired-entry', {
+      await _putPlainCacheEntry('expired-entry', {
         'statusCode': HttpStatus.ok,
         'headers': {'content-type': 'application/json'},
         'body': Uint8List.fromList(utf8.encode('{"status":"expired"}')),
@@ -2041,8 +2066,13 @@ void main() {
       await proxy.clearExpiredCache();
       final cacheStats = await proxy.getCacheStats();
 
-      expect(cacheBox.containsKey('stale-entry'), isTrue);
-      expect(cacheBox.containsKey('expired-entry'), isFalse);
+      final cacheIndex = Hive.box(_plainCacheIndexBoxName);
+      expect(cacheIndex.containsKey('stale-entry'), isTrue);
+      expect(cacheIndex.containsKey('expired-entry'), isFalse);
+      expect(
+        Hive.lazyBox(_plainCacheBodyBoxName).containsKey('expired-entry'),
+        isFalse,
+      );
       expect(cacheStats.staleEntries, equals(1));
       expect(cacheStats.expiredEntries, equals(0));
     });

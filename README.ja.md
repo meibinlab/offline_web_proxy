@@ -217,7 +217,7 @@ const config = ProxyConfig(
   enableReplayHeader: true,
   replayHeaderName: 'X-Offline-Replay',
   enableUpstreamCompression: true,
-  encryptResponseCache: false,
+  encryptResponseCache: true,
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -277,7 +277,7 @@ const config = ProxyConfig(
   - 一致しても、応答に `Set-Cookie` がある場合、応答に `Vary` がある場合（`Accept-Encoding` だけを指す場合を除く）、またはリクエストに `Authorization` がある場合は保存しません。除外したときは `ProxyEventType.cacheSkipped` を理由付きで発行するため、オフラインで使えない原因を追跡できます。
   - `Vary` が `Accept-Encoding` だけを指す場合に保存するのは、proxy が上流へ送る `Accept-Encoding` をすべての経路で揃え、gzip は解凍してから保存するため応答が割れないからです。Tomcat、nginx、Apache は圧縮を有効にするとこの `Vary` を既定で付けるため、除外すると画面の HTML、JS、CSS がまとめて対象外になります。`*` や他のヘッダ名を含む場合は除外します。
   - 一致したパスでは上流の `max-age` や `Expires` を使わず、`cacheTtl` の値を有効期限に使います。`no-store` は `max-age=0` と併記されることが多く、そのまま採用すると保存直後に stale になるためです。
-  - **応答キャッシュは既定では暗号化しません。** 指定したパスの応答本文は端末内に平文で残るため、画面が含む情報を踏まえて指定してください。個人情報や業務データを保存する場合は、`encryptResponseCache` を有効にしてください。
+  - 応答キャッシュは既定で暗号化して保存します。`encryptResponseCache` を無効にすると、指定したパスの応答本文が端末内に平文で残ります。暗号化しても Box のキー（URL の SHA-256）は平文のため、画面が含む情報を踏まえて指定してください。
 - `mirroredOrigins` は、proxy 経由で取得する別 origin の一覧です。CDN から UI ライブラリを読み込む画面では、HTML 内の絶対 URL が 127.0.0.1 を経由せず、キャッシュもフォールバックもウォームアップも効きません。列挙した origin は proxy が中継し、通常のキャッシュとオフライン代替の対象になります。既定は空です。
   - proxy が返す `text/html` の `<script src>`、`<link href>`、`<img src>` と `<style>` 要素内、および `text/css` の `url()` と `@import` のうち、一致する絶対 URL を `/__offline_web_proxy/ext/<scheme>/<host>[:port]/<元のパス>` へ書き換えます。`<link>` は `stylesheet` など資源を指す `rel` だけが対象です。
   - Google Fonts のように CSS が別 origin のフォント本体を参照する場合は、CSS とフォント本体の両方の origin（例: `https://fonts.googleapis.com` と `https://fonts.gstatic.com`）を列挙します。
@@ -303,9 +303,10 @@ const config = ProxyConfig(
   - 解凍できない本文（壊れている、途中で切れている、解凍後に 64 MB を超える）は、そのまま返して保存しません。br など gzip 以外の方式は、従来どおりそのまま返します。`Range` を付けた要求には `identity` を送ります。
   - `false` にすると、0.19.0 以前と同じく `Accept-Encoding: identity` を送ります。
 - `cacheMaxSize` は、応答キャッシュの本文の合計の上限です（既定 200 MB、`0` で上限なし）。超えた場合は、保存した日時の古いものから、上限の 9 割に収まるまで削除し、`ProxyEventType.cacheEvicted` を発行します。本文だけで上限を超える応答は保存しません。
-- `encryptResponseCache` を有効にすると、応答キャッシュを Cookie・キュー・隔離と同じ鍵で暗号化して保存します（既定は無効）。
-  - Box を開くときに全件を復号するため、キャッシュが大きいほど `start()` が遅くなります（パソコンでの測定で、30 MB で約 0.4 秒、200 MB で約 3.2 秒。スマートフォンでは数倍かかる見込み）。有効にする場合は `cacheMaxSize` を控えめにしてください。
-  - 有効にすると、`start()` の中で平文のキャッシュを移してから平文のファイルを削除します（パソコンでの測定で、30 MB で約 0.7 秒、200 MB で約 7 秒）。削除は通常のファイル削除で、ストレージ上の領域の消去は保証しません。無効に戻すと、暗号化したキャッシュを平文へ戻さずに削除します。鍵と合わない場合は、起動を失敗させずにキャッシュを空にします。
+- `encryptResponseCache` が有効な間は（既定）、応答キャッシュを Cookie・キュー・隔離と同じ鍵で暗号化して保存します。
+  - 本文は返すときに 1 件ずつ読むため、起動時に全件を復号せず、キャッシュ全体をメモリに載せません。パソコンでの測定では、200 MB のキャッシュを開く時間は暗号化しても約 0.75 秒（平文で約 0.66 秒）で、メモリの増加は数 MB でした。スマートフォンでは数倍かかる見込みです。
+  - 0.21.0 以前から更新すると、最初の `start()` の中で古い形式のキャッシュ（平文の `proxy_cache` など）を暗号化した組へ移してから、古いファイルを削除します（パソコンでの測定で、30 MB で約 1.1 秒、200 MB で約 7.5 秒）。削除は通常のファイル削除で、ストレージ上の領域の消去は保証しません。
+  - `false` にすると平文で保存し、暗号化したキャッシュは平文へ戻さずに削除します。鍵と合わない場合は、起動を失敗させずにキャッシュを空にします。
   - Box のキー（正規化した URL の SHA-256）は平文のままです。
 - `cacheTtl` と `cacheStale` は、指定すると既定のマップとマージされず**丸ごと置き換わります**。未掲載の Content-Type が `default` へ落ちるよう、`default` は必ず含めてください。
 - `text/html` の既定は TTL 1 時間、stale 1 日です。最後にオンラインで取得してから約 25 時間でフォールバック対象から外れるため、**長期のオフライン運用では `cacheTtl` と `cacheStale` の設定が必要です**。`cacheStale` には JavaScript のキーが無く、スクリプトは `default`（3 日）になります。
@@ -768,8 +769,9 @@ proxy は Hive の Box と secure storage にデータを保存します。暗�
 | `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
 | `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限 |
 | `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
-| `proxy_cache` | 応答キャッシュ（ステータスコード、ヘッダ、本文、有効期限）。キーは正規化した URL の SHA-256。`encryptResponseCache` が `false`（既定）の場合に使う | なし | stale 期間を過ぎたものと、`cacheMaxSize` を超えた分を削除。`encryptResponseCache` を有効にすると、`proxy_cache_secure` へ移して削除 |
-| `proxy_cache_secure` | `encryptResponseCache` を有効にした場合の応答キャッシュ。内容とキーは `proxy_cache` と同じ | 値のみ（AES-256） | `proxy_cache` と同じ。`encryptResponseCache` を無効に戻すと、平文へ戻さずに削除 |
+| `proxy_cache_index_secure`、`proxy_cache_body_secure` | 応答キャッシュ（既定）。メタデータの Box（`proxy_cache_index_secure`）にステータスコード・保存日時・有効期限・Content-Type・本文の大きさを、本文の Box（`proxy_cache_body_secure`）にヘッダと本文を保存する。キーは正規化した URL の SHA-256 | 値のみ（AES-256） | stale 期間を過ぎたものと、`cacheMaxSize` を超えた分を削除。`encryptResponseCache` を無効にすると、平文へ戻さずに削除 |
+| `proxy_cache_index`、`proxy_cache_body` | `encryptResponseCache` を `false` にした場合の応答キャッシュ。内容とキーは暗号化した組と同じ | なし | 暗号化した組と同じ。`encryptResponseCache` を有効にすると、暗号化した組へ移して削除 |
+| `proxy_cache`、`proxy_cache_secure` | 0.21.0 以前の応答キャッシュ。1 件の値にメタデータと本文をまとめた形式。`proxy_cache_secure` は 0.21.0 で `encryptResponseCache` を有効にした場合 | `proxy_cache` はなし、`proxy_cache_secure` は値のみ（AES-256） | 起動時に新しい組へ移して削除。`encryptResponseCache` を無効にした場合、`proxy_cache_secure` は移さずに削除 |
 | `proxy_web_storage` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット | なし | 次のスナップショットで上書きされるまで |
 | `proxy_idempotency` | 上流へ届いたべき等性キー（UTF-8 で 255 バイトを超える場合は SHA-256）と、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
 | `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号 | なし | 次のバインドで上書きされるまで |

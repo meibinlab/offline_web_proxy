@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,11 +15,19 @@ const Map<String, List<String>> _mockAssetManifest = <String, List<String>>{};
 /// secure storage に置く暗号化鍵の名前。
 const String _keyName = 'offline_web_proxy.cookie_box_encryption_key';
 
-/// 平文の応答キャッシュの Box 名。
-const String _plainBoxName = 'proxy_cache';
+/// 平文の応答キャッシュの、メタデータと本文の Box 名。
+const ({String index, String body}) _plainPair =
+    (index: 'proxy_cache_index', body: 'proxy_cache_body');
 
-/// 暗号化した応答キャッシュの Box 名。
-const String _encryptedBoxName = 'proxy_cache_secure';
+/// 暗号化した応答キャッシュの、メタデータと本文の Box 名。
+const ({String index, String body}) _encryptedPair =
+    (index: 'proxy_cache_index_secure', body: 'proxy_cache_body_secure');
+
+/// 0.21.0 以前が平文で保存した応答キャッシュの Box 名。
+const String _legacyPlainBoxName = 'proxy_cache';
+
+/// 0.21.0 が暗号化して保存した応答キャッシュの Box 名。
+const String _legacyEncryptedBoxName = 'proxy_cache_secure';
 
 /// ファイルに平文で残っていないかを探す、応答本文の目印。
 const String _marker = 'EMPLOYEE-NAME-YAMADA-TARO';
@@ -172,31 +181,47 @@ void main() {
 
   /// 上流を起動し（起動済みなら使い回し）、proxy を起動する。
   ///
-  /// [encrypt] は応答キャッシュを暗号化するかどうかです。
-  /// 戻り値は proxy のポートです。
+  /// [encrypt] は応答キャッシュを暗号化するかどうかです。`null` の場合は
+  /// 指定せず、既定値を使います。
   /// [cacheMaxSize] は応答キャッシュの上限です（`0` で上限なし）。
-  Future<int> startProxy({required bool encrypt, int cacheMaxSize = 0}) async {
+  ///
+  /// Returns: proxy のポート。
+  Future<int> startProxy({bool? encrypt, int cacheMaxSize = 0}) async {
     upstream ??= _MockUpstream(
       await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
     );
     return proxy.start(
-      config: ProxyConfig(
-        origin: upstream!.origin,
-        encryptResponseCache: encrypt,
-        cacheMaxSize: cacheMaxSize,
-      ),
+      config: encrypt == null
+          ? ProxyConfig(
+              origin: upstream!.origin,
+              cacheMaxSize: cacheMaxSize,
+            )
+          : ProxyConfig(
+              origin: upstream!.origin,
+              encryptResponseCache: encrypt,
+              cacheMaxSize: cacheMaxSize,
+            ),
     );
   }
 
-  /// 平文の応答キャッシュの Box のファイル（.hive・.hivec・.lock）が
-  /// 1 つでも残っているかを返す。
-  bool plainFilesExist() => ['hive', 'hivec', 'lock'].any((extension) => File(
-          '$hiveTestDirectory${Platform.pathSeparator}$_plainBoxName.$extension')
-      .existsSync());
+  /// Box のファイル（.hive・.hivec・.lock）が 1 つでも残っているかを返す。
+  ///
+  /// [name] Box の名前。
+  bool filesExist(String name) => ['hive', 'hivec', 'lock'].any((extension) =>
+      File('$hiveTestDirectory${Platform.pathSeparator}$name.$extension')
+          .existsSync());
+
+  /// Box の組（メタデータと本文）のファイルが 1 つでも残っているかを返す。
+  ///
+  /// [pair] Box の組。
+  bool pairFilesExist(({String index, String body}) pair) =>
+      filesExist(pair.index) || filesExist(pair.body);
 
   /// proxy を止め、次の起動に備えて作り直す。
   Future<void> restartProxy() async {
-    await proxy.stop();
+    if (proxy.isRunning) {
+      await proxy.stop();
+    }
     await Hive.close();
     proxy = OfflineWebProxy();
   }
@@ -206,6 +231,14 @@ void main() {
   /// [name] Box の名前。
   File boxFile(String name) =>
       File('$hiveTestDirectory${Platform.pathSeparator}$name.hive');
+
+  /// Box のファイルに、応答本文の目印が平文で入っているかを返す。
+  ///
+  /// [name] Box の名前。
+  bool containsMarker(String name) => _containsBytes(
+        boxFile(name).readAsBytesSync(),
+        utf8.encode(_marker),
+      );
 
   /// オフラインのときに、キャッシュから返せるかどうかを返す。
   ///
@@ -219,74 +252,105 @@ void main() {
         response.body.contains(_marker);
   }
 
-  group('応答キャッシュの暗号化（doc/specs.ja.md 【16】キャッシュ容量・TTL）', () {
-    /// 既定では従来どおり平文の Box に保存すること
-    test('keeps the plain box by default', () async {
-      await withRealHttpClient(() async {
-        final port = await startProxy(encrypt: false);
-
-        await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
-        await restartProxy();
-
-        expect(boxFile(_plainBoxName).existsSync(), isTrue);
-        expect(boxFile(_encryptedBoxName).existsSync(), isFalse);
-        expect(
-          _containsBytes(
-            boxFile(_plainBoxName).readAsBytesSync(),
-            utf8.encode(_marker),
-          ),
-          isTrue,
-        );
-      });
+  /// 0.21.0 以前の形式（1 件の値にメタデータと本文をまとめた Box）で、
+  /// proxy が保存するのと同じ記録を書く。
+  ///
+  /// 記録のキーは、proxy と同じく正規化した URL の SHA-256 を使う。そのため、
+  /// proxy を起動する前に上流を起動しておく。
+  ///
+  /// [name] Box の名前。
+  /// [path] 記録する要求のパス。
+  /// [key] 暗号化 Box の場合の鍵。
+  Future<void> writeLegacyEntry(
+    String name,
+    String path, {
+    List<int>? key,
+  }) async {
+    upstream ??= _MockUpstream(
+      await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+    );
+    final url = '${upstream!.origin}$path';
+    final cacheKey = sha256.convert(utf8.encode(url)).toString();
+    final now = DateTime.now();
+    final body = '{"name":"$_marker","path":"$path"}';
+    final box = await Hive.openBox(
+      name,
+      path: hiveTestDirectory,
+      encryptionCipher: key == null ? null : HiveAesCipher(key),
+    );
+    await box.put(cacheKey, <String, Object?>{
+      'statusCode': HttpStatus.ok,
+      'headers': {
+        'content-type': 'application/json',
+        'cache-control': 'max-age=3600',
+      },
+      'body': Uint8List.fromList(utf8.encode(body)),
+      'createdAt': now.toIso8601String(),
+      'expiresAt': now.add(const Duration(hours: 1)).toIso8601String(),
+      'contentType': 'application/json',
+      'sizeBytes': body.length,
     });
+    await box.close();
+  }
 
-    /// 有効にすると、本文を平文でファイルに残さず、再起動後も使えること
-    test('stores responses encrypted and serves them after a restart',
-        () async {
+  group('応答キャッシュの暗号化（doc/specs.ja.md 【16】キャッシュ容量・TTL）', () {
+    /// 既定では暗号化した組に保存し、本文を平文でファイルに残さないこと
+    test('encrypts the cache by default', () async {
       await withRealHttpClient(() async {
-        var port = await startProxy(encrypt: true);
+        var port = await startProxy();
         await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
         await restartProxy();
 
-        expect(boxFile(_plainBoxName).existsSync(), isFalse);
-        final bytes = boxFile(_encryptedBoxName).readAsBytesSync();
-        expect(bytes, isNotEmpty);
-        expect(_containsBytes(bytes, utf8.encode(_marker)), isFalse);
+        expect(pairFilesExist(_plainPair), isFalse);
+        expect(boxFile(_encryptedPair.body).readAsBytesSync(), isNotEmpty);
+        expect(containsMarker(_encryptedPair.body), isFalse);
+        expect(containsMarker(_encryptedPair.index), isFalse);
 
-        port = await startProxy(encrypt: true);
+        port = await startProxy();
         expect(await servedFromCache(port, '/api/employees'), isTrue);
       });
     });
 
-    /// 有効にしたとき、平文のキャッシュを移してから平文のファイルを消すこと
-    test('moves an existing plain cache into the encrypted box', () async {
+    /// 無効にすると平文の組に保存し、本文はメタデータの Box に入れないこと
+    test('keeps the plain pair when disabled', () async {
+      await withRealHttpClient(() async {
+        var port = await startProxy(encrypt: false);
+        await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
+        await restartProxy();
+
+        expect(pairFilesExist(_encryptedPair), isFalse);
+        expect(containsMarker(_plainPair.body), isTrue);
+        // 走査で読むメタデータの Box には本文を置かない
+        expect(containsMarker(_plainPair.index), isFalse);
+
+        port = await startProxy(encrypt: false);
+        expect(await servedFromCache(port, '/api/employees'), isTrue);
+      });
+    });
+
+    /// 有効にしたとき、平文の組を移してから平文のファイルを消すこと
+    test('moves an existing plain cache into the encrypted pair', () async {
       await withRealHttpClient(() async {
         var port = await startProxy(encrypt: false);
         await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
         await restartProxy();
         // 前提: 平文で保存されていること
-        expect(boxFile(_plainBoxName).existsSync(), isTrue);
+        expect(containsMarker(_plainPair.body), isTrue);
 
         port = await startProxy(encrypt: true);
 
-        expect(plainFilesExist(), isFalse);
+        expect(pairFilesExist(_plainPair), isFalse);
         expect((await proxy.getCacheStats()).totalEntries, equals(1));
         expect(await servedFromCache(port, '/api/employees'), isTrue);
 
         // 移した後の暗号化ファイルにも、本文が平文で入っていないこと
         await restartProxy();
-        expect(
-          _containsBytes(
-            boxFile(_encryptedBoxName).readAsBytesSync(),
-            utf8.encode(_marker),
-          ),
-          isFalse,
-        );
+        expect(containsMarker(_encryptedPair.body), isFalse);
       });
     });
 
     /// 移せなかった記録は捨てて残りを移し、平文のファイルは必ず消すこと
-    test('drops an entry it cannot move and still deletes the plain file',
+    test('drops an entry it cannot move and still deletes the plain files',
         () async {
       await withRealHttpClient(() async {
         var port = await startProxy(encrypt: false);
@@ -297,7 +361,7 @@ void main() {
         var failed = false;
         proxy = OfflineWebProxy.withStorageTestHooks(
           ProxyStorageTestHooks(
-            beforePlainCacheEntryMoved: (key) async {
+            beforeCacheEntryMoved: (key) async {
               // 最初の 1 件だけ移せなかったことにする
               if (!failed) {
                 failed = true;
@@ -314,7 +378,7 @@ void main() {
         port = await startProxy(encrypt: true);
         await Future<void>.delayed(Duration.zero);
 
-        expect(plainFilesExist(), isFalse);
+        expect(pairFilesExist(_plainPair), isFalse);
         expect((await proxy.getCacheStats()).totalEntries, equals(1));
         final error = errors.single;
         expect(error.data['phase'], equals('cacheEncryptionMigration'));
@@ -324,7 +388,7 @@ void main() {
     });
 
     /// 移した後も、キャッシュの上限を合計の数え直しのうえで効かせること
-    test('applies cacheMaxSize to entries moved into the encrypted box',
+    test('applies cacheMaxSize to entries moved into the encrypted pair',
         () async {
       await withRealHttpClient(() async {
         var port = await startProxy(encrypt: false);
@@ -351,18 +415,18 @@ void main() {
       });
     });
 
-    /// 無効に戻したとき、暗号化した Box を平文へ戻さずに消すこと
-    test('deletes the encrypted box when switched off', () async {
+    /// 無効に戻したとき、暗号化した組を平文へ戻さずに消すこと
+    test('deletes the encrypted pair when switched off', () async {
       await withRealHttpClient(() async {
         var port = await startProxy(encrypt: true);
         await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
         await restartProxy();
         // 前提: 暗号化して保存されていること
-        expect(boxFile(_encryptedBoxName).existsSync(), isTrue);
+        expect(pairFilesExist(_encryptedPair), isTrue);
 
         port = await startProxy(encrypt: false);
 
-        expect(boxFile(_encryptedBoxName).existsSync(), isFalse);
+        expect(pairFilesExist(_encryptedPair), isFalse);
         expect((await proxy.getCacheStats()).totalEntries, equals(0));
         expect(await servedFromCache(port, '/api/employees'), isFalse);
       });
@@ -388,21 +452,21 @@ void main() {
       });
     });
 
-    /// 鍵を作り直した場合も、古い鍵の Box を消して続けること
-    test('deletes the encrypted box when the key is regenerated', () async {
+    /// 鍵を作り直した場合も、古い鍵の組を消して続けること
+    test('deletes the encrypted pair when the key is regenerated', () async {
       await withRealHttpClient(() async {
         var port = await startProxy(encrypt: true);
         await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
         await restartProxy();
 
         await const FlutterSecureStorage().delete(key: _keyName);
-        // 前提: 古い鍵の Box が残っていること
-        expect(boxFile(_encryptedBoxName).existsSync(), isTrue);
+        // 前提: 古い鍵の組が残っていること
+        expect(pairFilesExist(_encryptedPair), isTrue);
 
         // 起動前の Cookie API は段階 1（鍵）だけを実行する。Hive の切り詰めでは
         // なく、鍵を作り直した時点で削除していることを確かめる
         await proxy.getCookies();
-        expect(boxFile(_encryptedBoxName).existsSync(), isFalse);
+        expect(pairFilesExist(_encryptedPair), isFalse);
 
         port = await startProxy(encrypt: true);
 
@@ -412,7 +476,7 @@ void main() {
     });
 
     /// 復旧 API が鍵を削除するときは、暗号化したキャッシュも削除すること
-    test('deletes the encrypted box when recovery deletes the key', () async {
+    test('deletes the encrypted pair when recovery deletes the key', () async {
       await withRealHttpClient(() async {
         final port = await startProxy(encrypt: true);
         await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
@@ -441,7 +505,170 @@ void main() {
         final result = await proxy.recoverEncryptedStorage();
 
         expect(result.keyDeleted, isTrue);
-        expect(boxFile(_encryptedBoxName).existsSync(), isFalse);
+        expect(pairFilesExist(_encryptedPair), isFalse);
+      });
+    });
+
+    /// 別の処理が開いている本文の LazyBox も、復旧 API が閉じてから削除すること
+    test('closes a body box opened elsewhere before recovery deletes it',
+        () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(encrypt: true);
+        await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
+        // キューに中身を作る（鍵を失うと起動に失敗する状態）
+        await _emitConnectivity(['none']);
+        final client = HttpClient();
+        try {
+          final request = await client
+              .postUrl(Uri.parse('http://127.0.0.1:$port/api/records'));
+          request.write('{"a":1}');
+          await (await request.close()).drain<void>();
+        } finally {
+          client.close(force: true);
+        }
+        await restartProxy();
+
+        final key = base64Decode(
+          (await const FlutterSecureStorage().read(key: _keyName))!,
+        );
+        // 別の処理が本文の LazyBox を開いたままにしている状態を作る
+        await Hive.openLazyBox(
+          _encryptedPair.body,
+          path: hiveTestDirectory,
+          encryptionCipher: HiveAesCipher(key),
+        );
+        await const FlutterSecureStorage().write(key: _keyName, value: 'x');
+
+        final result = await proxy.recoverEncryptedStorage();
+
+        expect(result.keyDeleted, isTrue);
+        expect(Hive.isBoxOpen(_encryptedPair.body), isFalse);
+        expect(pairFilesExist(_encryptedPair), isFalse);
+      });
+    });
+  });
+
+  group('応答キャッシュの保存形式（doc/specs.ja.md 【8】キャッシュ整合性）', () {
+    /// 0.21.0 以前の平文の記録を、既定の暗号化した組へ移して古いファイルを消すこと
+    test('moves the legacy plain cache into the encrypted pair', () async {
+      await writeLegacyEntry(_legacyPlainBoxName, '/api/employees');
+
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+
+        expect(filesExist(_legacyPlainBoxName), isFalse);
+        expect((await proxy.getCacheStats()).totalEntries, equals(1));
+        expect(await servedFromCache(port, '/api/employees'), isTrue);
+      });
+      await restartProxy();
+      expect(containsMarker(_encryptedPair.body), isFalse);
+    });
+
+    /// 暗号化しない場合も、0.21.0 以前の平文の記録を平文の組へ移すこと
+    test('moves the legacy plain cache into the plain pair', () async {
+      await writeLegacyEntry(_legacyPlainBoxName, '/api/employees');
+
+      await withRealHttpClient(() async {
+        final port = await startProxy(encrypt: false);
+
+        expect(filesExist(_legacyPlainBoxName), isFalse);
+        expect(await servedFromCache(port, '/api/employees'), isTrue);
+      });
+    });
+
+    /// 0.21.0 が暗号化した記録を、同じ鍵の暗号化した組へ移すこと
+    test('moves the 0.21.0 encrypted cache into the encrypted pair', () async {
+      final key = List<int>.generate(32, (index) => (index * 7 + 1) & 0xff);
+      FlutterSecureStorage.setMockInitialValues(
+        <String, String>{_keyName: base64Encode(key)},
+      );
+      await writeLegacyEntry(_legacyEncryptedBoxName, '/api/employees',
+          key: key);
+
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+
+        expect(filesExist(_legacyEncryptedBoxName), isFalse);
+        expect(await servedFromCache(port, '/api/employees'), isTrue);
+      });
+    });
+
+    /// 鍵と合わない 0.21.0 の暗号化した記録は、起動を止めずに空として扱い、消すこと
+    test('drops a 0.21.0 encrypted cache that does not match the key',
+        () async {
+      final key = List<int>.generate(32, (index) => (index * 7 + 1) & 0xff);
+      FlutterSecureStorage.setMockInitialValues(
+        <String, String>{_keyName: base64Encode(key)},
+      );
+      await writeLegacyEntry(
+        _legacyEncryptedBoxName,
+        '/api/employees',
+        key: List<int>.generate(32, (index) => 255 - index),
+      );
+
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+
+        expect(filesExist(_legacyEncryptedBoxName), isFalse);
+        expect((await proxy.getCacheStats()).totalEntries, equals(0));
+        expect(await servedFromCache(port, '/api/employees'), isFalse);
+      });
+    });
+
+    /// 暗号化しない場合は、0.21.0 が暗号化した記録を平文へ戻さずに消すこと
+    test('deletes the 0.21.0 encrypted cache when disabled', () async {
+      final key = List<int>.generate(32, (index) => (index * 7 + 1) & 0xff);
+      FlutterSecureStorage.setMockInitialValues(
+        <String, String>{_keyName: base64Encode(key)},
+      );
+      await writeLegacyEntry(_legacyEncryptedBoxName, '/api/employees',
+          key: key);
+
+      await withRealHttpClient(() async {
+        final port = await startProxy(encrypt: false);
+
+        expect(filesExist(_legacyEncryptedBoxName), isFalse);
+        expect((await proxy.getCacheStats()).totalEntries, equals(0));
+        expect(await servedFromCache(port, '/api/employees'), isFalse);
+      });
+    });
+
+    /// 片方の Box にしかない記録（書き込みの途中で止まった記録など）は、
+    /// 起動時に消すこと
+    test('removes records found in only one of the pair', () async {
+      await withRealHttpClient(() async {
+        var port = await startProxy(encrypt: false);
+        await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
+        await _get(Uri.parse('http://127.0.0.1:$port/api/b'));
+        final keys = Hive.box(_plainPair.index).keys.toList();
+        expect(keys, hasLength(2));
+        // 1 件は本文だけ、もう 1 件はメタデータだけを残す
+        await Hive.box(_plainPair.index).delete(keys[0]);
+        await Hive.lazyBox(_plainPair.body).delete(keys[1]);
+        await restartProxy();
+
+        port = await startProxy(encrypt: false);
+
+        expect(Hive.box(_plainPair.index).keys, isEmpty);
+        expect(Hive.lazyBox(_plainPair.body).keys, isEmpty);
+        expect((await proxy.getCacheStats()).totalEntries, equals(0));
+      });
+    });
+
+    /// 削除と全削除は、メタデータと本文の両方から消すこと
+    test('deletes both halves of a record', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(encrypt: false);
+        await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
+        await _get(Uri.parse('http://127.0.0.1:$port/api/b'));
+
+        await proxy.clearCacheForUrl('${upstream!.origin}/api/a');
+        expect(Hive.box(_plainPair.index).length, equals(1));
+        expect(Hive.lazyBox(_plainPair.body).length, equals(1));
+
+        await proxy.clearCache();
+        expect(Hive.box(_plainPair.index).length, equals(0));
+        expect(Hive.lazyBox(_plainPair.body).length, equals(0));
       });
     });
   });
