@@ -301,6 +301,7 @@ Notes:
   - The same value is sent on every route: forwarding, requests sent from the queue, warmup and mirrored origins. Caching, HTML and CSS rewriting and the response to the WebView all use the decompressed body.
   - A body that cannot be decompressed (corrupt, truncated, or larger than 64 MB once decompressed) is returned as is and not cached. Codings other than gzip, such as br, are passed through as before. A request carrying `Range` is sent `identity`.
   - Set it to `false` to send `Accept-Encoding: identity`, as 0.19.0 and earlier did.
+- `cacheMaxSize` caps the total body size of the response cache (200 MB by default, `0` for no limit). Beyond it, entries are removed oldest stored first until the total fits within 90% of the limit, and `ProxyEventType.cacheEvicted` is raised. A response whose body alone exceeds the limit is not stored.
 - `cacheTtl` and `cacheStale` **replace** the default maps rather than merging with them. Always keep a `default` entry so that unlisted content types still resolve.
 - `text/html` defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. **Long offline operation requires tuning both `cacheTtl` and `cacheStale`.** `cacheStale` has no JavaScript entry, so scripts fall back to `default` (3 days).
 

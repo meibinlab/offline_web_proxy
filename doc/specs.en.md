@@ -1401,9 +1401,15 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 ### Capacity Limit
 
-- **maxCacheBytes**: 200MB (default value)
-- **LRU Deletion**: Delete oldest cache first when capacity exceeded
-- **Priority Management by Importance**: Differentiate deletion priority between static resources and API responses
+- **`ProxyConfig.cacheMaxSize`**: Upper limit on the total size of the response bodies in the cache. 200 MB by default. `0` disables it; a negative value makes `start()` throw `ProxyStartException`
+- **What counts**: Body sizes only (the same as `CacheStats.totalSize`). Headers and storage overhead are not counted, so the file is somewhat larger. Hive keeps the whole box in memory, so the limit also bounds memory use
+- **When exceeded**: Entries are removed in the order they were stored (`createdAt`), oldest first, until the total fits within 90% of the limit. Stopping right at the limit would leave the cache pinned there, removing something on every store. The response just stored is kept
+  - The order follows the time of storing rather than the last use, because recording every use would rewrite each entry, body included. Entries stored at the same time follow their keys
+  - A removal raises `ProxyEventType.cacheEvicted` whose `data` holds `reason` `cacheMaxSize`, `evictedCount` (entries) and `evictedBytes` (body bytes)
+  - Stores and removals run one at a time, never interleaved, so the running total stays accurate and a response just stored is never removed by a concurrent removal
+- **A response whose body alone exceeds the limit**: Not stored, since it would push everything else out and then be removed itself. `ProxyEventType.cacheSkipped` is raised with `reason: cacheMaxSize`
+- **When it is checked**: When a response is stored (forwarding and warmup) and in the hourly purge. Entries over the limit from a previous run are removed the next time something is stored
+- **Static resources and API responses**: Not told apart; everything follows the time of storing
 
 ### TTL (Time to Live) and Stale Period Management
 
@@ -1470,7 +1476,7 @@ cache:
 - **Deletion Target**:
   1. **Expired state** cache (stale period also exceeded)
   2. **Corrupted cache** (consistency check failed)
-  3. **LRU deletion when capacity exceeded** (target for deletion even in stale state)
+  3. **Entries beyond `cacheMaxSize`** (oldest stored first; removed even in stale state)
 
 #### Manual Deletion Methods
 
@@ -1511,7 +1517,7 @@ Decision order during request processing:
 
 ### Maintenance
 
-- **Purge Execution**: Automatically execute Expired cache deletion and LRU cleanup every 1 hour
+- **Purge Execution**: Every hour, remove Expired cache entries and the entries beyond `cacheMaxSize`
 - **State Refresh**: Periodically re-evaluate TTL / stale state of saved cache
 - **Statistics**: Log cache hit rate, stale usage rate, upstream-unreachable fallback count, etc.
 
@@ -2604,7 +2610,7 @@ class ProxyConfig {
   final String origin; // Upstream server URL (required)
   final String host; // Host to bind (default: "127.0.0.1")
   final int port; // Port to bind (0=automatic assignment)
-  final int cacheMaxSize; // Maximum cache capacity (bytes)
+  final int cacheMaxSize; // Upper limit on the total body size of the response cache (bytes, default: 200 MB, 0 = no limit)
   final Map<String, int> cacheTtl; // TTL setting by Content-Type (seconds)
   final Map<String, int> cacheStale; // Stale period setting by Content-Type (seconds)
   final List<String> forceCachePaths; // Paths stored despite no-store (default: empty)
@@ -2716,7 +2722,8 @@ enum ProxyEventType {
   networkOffline, // Network disconnected
   upstreamCircuitOpened, // Upstream considered unreachable and forwarding stopped
   upstreamCircuitClosed, // Upstream confirmed reachable and forwarding resumed
-  cacheCleared, // Cache cleared
+  cacheCleared, // Cache cleared (clearCache())
+  cacheEvicted, // Old responses removed because cacheMaxSize was exceeded
   errorOccurred, // Error occurred
   serverUnavailable, // Responsiveness check failed and recovery was not possible
   serverRecovered, // Recovered by rebinding
@@ -2726,7 +2733,9 @@ enum ProxyEventType {
 
 The `data` of `cacheSkipped` carries why the response was not stored.
 
-- `reason`: One of `set-cookie`, `vary` or `authorization`
+- `reason`: One of `set-cookie`, `vary` or `authorization` (the safety exclusions of `forceCachePaths`), or `cacheMaxSize` when the body alone exceeds `cacheMaxSize`
+
+The `data` of `cacheEvicted` holds `reason` (`cacheMaxSize`), `evictedCount` (entries) and `evictedBytes` (body bytes). `cacheCleared` is raised only when `clearCache()` removes everything.
 
 The `data` of `queueResendAttempted` carries the outcome of one resend. The body is never included.
 

@@ -1401,9 +1401,15 @@ SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ### 容量制限
 
-- **maxCacheBytes**: 200MB（デフォルト値）
-- **LRU 削除**: 容量超過時は最古のキャッシュから順次削除
-- **重要度別管理**: 静的リソースと API レスポンスで削除優先度を差別化
+- **`ProxyConfig.cacheMaxSize`**: 応答キャッシュの本文の大きさの合計の上限。既定は 200 MB。`0` は上限なし、負の値は `start()` が `ProxyStartException` を送出します
+- **数える対象**: 本文の大きさ（`CacheStats.totalSize` と同じ）だけです。ヘッダと保存形式の分は数えないため、ファイルは少し大きくなります。Hive は Box の中身をすべてメモリに持つため、この上限はメモリの使用量の目安にもなります
+- **超えた場合**: 保存した日時（`createdAt`）の古いものから、合計が上限の 9 割に収まるまで削除します。上限ちょうどまでしか下げないと、上限に張り付いたまま保存のたびに削除が起きるためです。いま保存した応答は削除しません
+  - 最後に使った日時ではなく保存した日時で順を決めます。使うたびに日時を記録すると、本文ごと書き直すことになるためです。同じ日時はキーの順です
+  - 削除した場合は `ProxyEventType.cacheEvicted` を発行します。`data` の `reason` は `cacheMaxSize` で、`evictedCount`（件数）と `evictedBytes`（本文の大きさ）が入ります
+  - 保存と削除は 1 つずつ実行し、互いの途中に割り込ませません。合計の控えがずれたり、保存したばかりの応答を消したりしないためです
+- **本文だけで上限を超える応答**: 保存しません。保存しても他の記録ごとすぐ消えるためです。`ProxyEventType.cacheSkipped` を `reason: cacheMaxSize` で発行します
+- **判定の時機**: 応答を保存したとき（転送とウォームアップ）と、1 時間ごとの purge です。前回の起動までに上限を超えていた分も、次に保存したときに削除します
+- **静的リソースと API の区別**: 行いません。すべて保存した日時の順です
 
 ### TTL（生存時間）と Stale 期間の管理
 
@@ -1470,7 +1476,7 @@ cache:
 - **削除対象**:
   1. **Expired 状態**のキャッシュ（stale 期間も超過）
   2. **破損キャッシュ**（整合性チェック失敗）
-  3. **容量超過時の LRU 削除**（stale 状態でも削除対象）
+  3. **`cacheMaxSize` を超えた分**（保存した日時の古いものから。stale 状態でも削除対象）
 
 #### 手動削除メソッド
 
@@ -1511,7 +1517,7 @@ cache:
 
 ### メンテナンス
 
-- **purge 実行**: 1 時間ごとに Expired キャッシュの削除と LRU 整理を自動実行
+- **purge 実行**: 1 時間ごとに Expired キャッシュを削除し、`cacheMaxSize` を超えた分を削除
 - **状態更新**: 保存済みキャッシュの TTL / stale 状態を定期的に再評価
 - **統計情報**: キャッシュヒット率、stale 使用率、上流到達不能時フォールバック件数等をログ出力
 
@@ -2604,7 +2610,7 @@ class ProxyConfig {
   final String origin; // 上流サーバのURL（必須）
   final String host; // バインドするホスト（デフォルト: "127.0.0.1"）
   final int port; // バインドするポート（0=自動割当）
-  final int cacheMaxSize; // キャッシュ最大容量（バイト）
+  final int cacheMaxSize; // 応答キャッシュの本文の合計の上限（バイト、既定: 200 MB、0=上限なし）
   final Map<String, int> cacheTtl; // Content-Type別TTL設定（秒）
   final Map<String, int> cacheStale; // Content-Type別Stale期間設定（秒）
   final List<String> forceCachePaths; // no-store を無視して保存するパス（既定: 空）
@@ -2716,7 +2722,8 @@ enum ProxyEventType {
   networkOffline, // ネットワーク切断
   upstreamCircuitOpened, // 上流断を検知して転送を停止
   upstreamCircuitClosed, // 上流への到達を確認して転送を再開
-  cacheCleared, // キャッシュクリア
+  cacheCleared, // キャッシュクリア（clearCache()）
+  cacheEvicted, // cacheMaxSize を超えたため古い応答を削除した
   errorOccurred, // エラー発生
   serverUnavailable, // 稼働確認に失敗し復旧できなかった
   serverRecovered, // 再バインドにより復旧した
@@ -2726,7 +2733,9 @@ enum ProxyEventType {
 
 `cacheSkipped` の `data` には、保存を見送った理由が入ります。
 
-- `reason`: `set-cookie`、`vary`、`authorization` のいずれか
+- `reason`: `set-cookie`、`vary`、`authorization` のいずれか（`forceCachePaths` の安全側の除外）。または、本文だけで `cacheMaxSize` を超えた場合の `cacheMaxSize`
+
+`cacheEvicted` の `data` には、`reason`（`cacheMaxSize`）、`evictedCount`（件数）、`evictedBytes`（本文の大きさ）が入ります。`cacheCleared` は `clearCache()` で全件を削除したときだけ発行します。
 
 `queueResendAttempted` の `data` には、再送 1 件の結果が入ります。本文は含みません。
 

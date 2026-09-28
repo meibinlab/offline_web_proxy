@@ -311,6 +311,12 @@ const int _maxDecompressedBodyBytes = 64 * 1024 * 1024;
 /// 上限を超えたことを早めに検知できるよう、本文を分けて渡す。
 const int _gzipDecodeChunkBytes = 64 * 1024;
 
+/// [ProxyConfig.cacheMaxSize] を超えたときに、合計を下げる先の上限に対する割合。
+///
+/// 上限ちょうどまでしか下げないと、上限に張り付いたまま保存のたびに全件を
+/// 並べ替えて削除することになるため、少し余裕を残す。
+const double _cacheEvictionTargetRatio = 0.9;
+
 /// 保持するキュー再送結果の件数。
 /// 監視用の直近確認が目的のため、上限を設けてメモリ使用量を抑える。
 const int _recentResendResultCapacity = 20;
@@ -591,6 +597,18 @@ class OfflineWebProxy {
 
   /// キャッシュデータの永続化ボックス。
   Box? _cacheBox;
+
+  /// 応答キャッシュの本文の大きさの合計。分からない場合は `null`。
+  ///
+  /// 保存のたびに全件を数え直さないよう、[_cacheWriteLock] の中で増減させて
+  /// 持ちます。`null` の場合は、次に必要になったときに数え直します。
+  int? _cacheTotalBytes;
+
+  /// 応答キャッシュへの書き込みと削除を直列化するロック。
+  ///
+  /// 保存と削除が互いの途中に割り込むと、合計の控えがずれたり、保存した
+  /// ばかりの記録を上限の処理が消したりするため、1 つずつ実行します。
+  final AsyncLock _cacheWriteLock = AsyncLock();
 
   /// キューデータの永続化ボックス。
   Box? _queueBox;
@@ -2022,7 +2040,7 @@ class OfflineWebProxy {
     }
   }
 
-  /// 隔離とドロップ履歴の保持上限の設定を検証します。
+  /// キャッシュの容量、隔離とドロップ履歴の上限と保持期間の設定を検証します。
   ///
   /// 0 は上限なしとして受け付け、負の値は拒否します。
   ///
@@ -2035,6 +2053,7 @@ class OfflineWebProxy {
     }
 
     final limits = <String, int>{
+      'cacheMaxSize': config.cacheMaxSize,
       'quarantineMaxCount': config.quarantineMaxCount,
       'quarantineMaxBytes': config.quarantineMaxBytes,
       'droppedRequestMaxCount': config.droppedRequestMaxCount,
@@ -2371,7 +2390,10 @@ class OfflineWebProxy {
   ///   * [CacheOperationException] キャッシュ削除に失敗した場合。
   Future<void> clearCache() async {
     try {
-      await _cacheBox?.clear();
+      await _cacheWriteLock.synchronized(() async {
+        await _cacheBox?.clear();
+        _cacheTotalBytes = null;
+      });
       _emitEvent(ProxyEventType.cacheCleared, '', {});
     } catch (e) {
       throw CacheOperationException(
@@ -2405,13 +2427,22 @@ class OfflineWebProxy {
           }
         }
 
-        for (var i = 0; i < keysToDelete.length; i++) {
-          final key = keysToDelete[i];
-          await _cacheBox!.delete(key);
-
-          if (i % 200 == 0) {
-            await Future.delayed(Duration.zero);
-          }
+        if (keysToDelete.isNotEmpty) {
+          // 保存と交互に進むと合計の控えがずれるため、ロックの中で消す。
+          // 走査の後に保存し直された記録は、期限を確かめ直して残す
+          await _cacheWriteLock.synchronized(() async {
+            final box = _cacheBox;
+            if (box == null || !box.isOpen) {
+              return;
+            }
+            final expiredKeys = keysToDelete.where((key) {
+              final entry = box.get(key);
+              return entry is Map &&
+                  _determineStatus(entry) == CacheStatus.expired;
+            }).toList(growable: false);
+            await box.deleteAll(expiredKeys);
+            _cacheTotalBytes = null;
+          });
         }
       }
     } catch (e) {
@@ -2435,7 +2466,10 @@ class OfflineWebProxy {
     try {
       final normalizedUrl = _normalizeUrl(url);
       final cacheKey = _generateCacheKey(normalizedUrl);
-      await _cacheBox?.delete(cacheKey);
+      await _cacheWriteLock.synchronized(() async {
+        await _cacheBox?.delete(cacheKey);
+        _cacheTotalBytes = null;
+      });
     } catch (e) {
       throw CacheOperationException(
           'clearForUrl', 'URLのキャッシュ削除に失敗しました: $e', e is Exception ? e : null);
@@ -2716,6 +2750,7 @@ class OfflineWebProxy {
           response.statusCode,
           response.headers,
           response.bodyBytes,
+          eventUrl: upstreamUri.toString(),
           // ウォームアップも同じ判定で保存し、転送経路と挙動を揃える
           allowNoStore: _resolveForceCacheAllowance(
             path: path,
@@ -4003,6 +4038,7 @@ class OfflineWebProxy {
     final openedBoxes = <Box>[];
     try {
       _cacheBox = await _openBoxTracked('proxy_cache', openedBoxes);
+      _cacheTotalBytes = null;
       _webStorageBox = await _openBoxTracked(_webStorageBoxName, openedBoxes);
       _idempotencyBox = await _openBoxTracked('proxy_idempotency', openedBoxes);
       _queueBox = await _openBoxTracked(
@@ -4026,6 +4062,7 @@ class OfflineWebProxy {
     } catch (_) {
       await _closeBoxesQuietly(openedBoxes);
       _cacheBox = null;
+      _cacheTotalBytes = null;
       _webStorageBox = null;
       _idempotencyBox = null;
       _queueBox = null;
@@ -5071,6 +5108,7 @@ class OfflineWebProxy {
     }
 
     _cacheBox = null;
+    _cacheTotalBytes = null;
     _queueBox = null;
     _cookieBox = null;
     _portPreferenceBox = null;
@@ -6958,6 +6996,7 @@ window.__offline_web_proxy_web_storage_bridge = {
               result.statusCode,
               result.headers,
               result.bodyBytes,
+              eventUrl: request.url.toString(),
               allowNoStore: _resolveForceCacheAllowance(
                 path: request.url.path,
                 requestHeaders: request.headers,
@@ -8221,14 +8260,29 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// [allowNoStore] `Cache-Control: no-store` を無視して保存する場合は `true`。
   ///   [ProxyConfig.forceCachePaths] に一致し、かつ安全側の除外条件に
   ///   該当しない場合にのみ指定します。
+  /// [eventUrl] 保存を見送ったときのイベントに載せる URL。
+  ///
+  /// 本文だけで [ProxyConfig.cacheMaxSize] を超える応答は保存しません。
+  /// 保存した後に合計が上限を超えた場合は、[_evictCacheOverLimit] で
+  /// 保存した日時の古いものから削除します。
   Future<void> _cacheResponseBytes(String cacheKey, int statusCode,
       Map<String, String> headers, List<int> bodyBytes,
-      {bool allowNoStore = false}) async {
+      {bool allowNoStore = false, String eventUrl = ''}) async {
     final sanitizedHeaders = _sanitizeResponseHeaders(headers);
     if (!_shouldPersistResponse(statusCode, sanitizedHeaders,
         allowNoStore: allowNoStore)) {
       return;
     }
+
+    final maxSize = _config?.cacheMaxSize ?? 0;
+    if (maxSize > 0 && bodyBytes.length > maxSize) {
+      // 保存しても上限の処理ですぐ消え、他の記録まで追い出すため保存しない
+      _emitEvent(ProxyEventType.cacheSkipped, eventUrl, {
+        'reason': 'cacheMaxSize',
+      });
+      return;
+    }
+
     final contentType =
         sanitizedHeaders['content-type'] ?? 'application/octet-stream';
     final data = {
@@ -8246,7 +8300,124 @@ window.__offline_web_proxy_web_storage_bridge = {
       'sizeBytes': bodyBytes.length,
     };
 
-    await _cacheBox?.put(cacheKey, data);
+    await _cacheWriteLock.synchronized(() async {
+      // 閉じた Box への書き込みは従来どおり失敗させ、呼び出し側でイベントにする
+      final box = _cacheBox;
+      if (box == null) {
+        return;
+      }
+
+      final previous = box.isOpen ? box.get(cacheKey) : null;
+      await box.put(cacheKey, data);
+      final knownTotal = _cacheTotalBytes;
+      if (knownTotal != null) {
+        final previousSize =
+            previous is Map ? (previous['sizeBytes'] as int? ?? 0) : 0;
+        _cacheTotalBytes = knownTotal - previousSize + bodyBytes.length;
+      }
+
+      await _evictCacheOverLimit(protectedKey: cacheKey);
+    });
+  }
+
+  /// 応答キャッシュの本文の大きさの合計を返します。
+  ///
+  /// 控えた値が無い場合は全件を数え直して控えます。[_cacheWriteLock] の中で
+  /// 呼びます。
+  ///
+  /// [box] 応答キャッシュの Box。
+  ///
+  /// Returns: 本文の大きさ（`sizeBytes`）の合計。
+  int _resolveCacheTotalBytes(Box box) {
+    final known = _cacheTotalBytes;
+    if (known != null) {
+      return known;
+    }
+
+    var total = 0;
+    for (final key in box.keys) {
+      final entry = box.get(key);
+      if (entry is Map) {
+        total += entry['sizeBytes'] as int? ?? 0;
+      }
+    }
+    _cacheTotalBytes = total;
+    return total;
+  }
+
+  /// 応答キャッシュの合計が [ProxyConfig.cacheMaxSize] を超えていれば、
+  /// 保存した日時（`createdAt`）の古いものから削除します。
+  ///
+  /// [_cacheWriteLock] の中で呼びます。削除は上限ちょうどではなく、上限の
+  /// [_cacheEvictionTargetRatio] まで下げます。上限に張り付いたまま保存の
+  /// たびに削除が起きないようにするためです。
+  ///
+  /// 読むたびに記録を書き直すと本文ごと書き込むことになるため、最後に
+  /// 使った日時ではなく保存した日時で順を決めます。同じ日時はキーの順です。
+  /// 削除した場合は [ProxyEventType.cacheEvicted] を発行します。
+  ///
+  /// [protectedKey] 削除しない記録のキー。いま保存した記録を指定します。
+  Future<void> _evictCacheOverLimit({String? protectedKey}) async {
+    final box = _cacheBox;
+    final maxSize = _config?.cacheMaxSize ?? 0;
+    if (box == null || !box.isOpen || maxSize <= 0) {
+      return;
+    }
+
+    if (_resolveCacheTotalBytes(box) <= maxSize) {
+      return;
+    }
+
+    // 控えの合計に頼らず、並べる記録と同じ走査で数え直す
+    var total = 0;
+    final entries = <({String key, DateTime createdAt, int size})>[];
+    for (final key in box.keys) {
+      final entry = box.get(key);
+      if (entry is! Map) {
+        continue;
+      }
+      final size = entry['sizeBytes'] as int? ?? 0;
+      total += size;
+      final keyString = key.toString();
+      if (keyString == protectedKey) {
+        continue;
+      }
+      entries.add((
+        key: keyString,
+        // 保存日時を読めない記録は最も古いものとして先に削除する
+        createdAt: DateTime.tryParse(entry['createdAt'] as String? ?? '') ??
+            DateTime.fromMillisecondsSinceEpoch(0),
+        size: size,
+      ));
+    }
+    entries.sort((a, b) {
+      final byTime = a.createdAt.compareTo(b.createdAt);
+      return byTime != 0 ? byTime : a.key.compareTo(b.key);
+    });
+
+    final target = (maxSize * _cacheEvictionTargetRatio).floor();
+    final evictedKeys = <String>[];
+    var evictedBytes = 0;
+    for (final entry in entries) {
+      if (total <= target) {
+        break;
+      }
+      evictedKeys.add(entry.key);
+      evictedBytes += entry.size;
+      total -= entry.size;
+    }
+    if (evictedKeys.isEmpty) {
+      _cacheTotalBytes = total;
+      return;
+    }
+
+    await box.deleteAll(evictedKeys);
+    _cacheTotalBytes = total;
+    _emitEvent(ProxyEventType.cacheEvicted, '', {
+      'reason': 'cacheMaxSize',
+      'evictedCount': evictedKeys.length,
+      'evictedBytes': evictedBytes,
+    });
   }
 
   /// ヘッダからキャッシュ有効期限を算出します。
@@ -9508,6 +9679,7 @@ window.__offline_web_proxy_web_storage_bridge = {
   Future<void> _purgeExpiredCache() async {
     try {
       await clearExpiredCache();
+      await _cacheWriteLock.synchronized(_evictCacheOverLimit);
     } catch (e) {
       // エラーをログ出力するが例外はスローしない
     }

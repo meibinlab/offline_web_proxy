@@ -67,10 +67,22 @@ class ProxyConfig {
   /// **Default**: `0` (disabled)
   final int preferredPort;
 
-  /// Maximum size of the cache storage in bytes.
+  /// Maximum total size, in bytes, of the response bodies kept in the cache.
   ///
-  /// When cache exceeds this limit, oldest entries are removed (LRU eviction).
-  /// Set based on your app's storage constraints and user expectations.
+  /// When a stored response pushes the total over this limit, entries are
+  /// removed in the order they were stored, oldest first, until the total
+  /// fits within 90% of the limit; the response just stored is kept. The
+  /// order follows the time of storing rather than the last use, because
+  /// recording every use would rewrite each entry, body included. The hourly
+  /// purge applies the same limit. A response whose body alone exceeds the limit is not stored, and
+  /// `ProxyEventType.cacheSkipped` is raised with the reason `cacheMaxSize`.
+  /// Removals raise `ProxyEventType.cacheEvicted`, whose `data` holds
+  /// `reason`, `evictedCount` and `evictedBytes`.
+  ///
+  /// Only bodies count; headers and storage overhead do not, so the file on
+  /// disk can be somewhat larger. Hive keeps the whole cache box in memory,
+  /// so this limit also bounds that memory. `0` disables the limit; negative
+  /// values are rejected by `start()` with a `ProxyStartException`.
   ///
   /// **Default**: `200 * 1024 * 1024` (200 MB)
   final int cacheMaxSize;

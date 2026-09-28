@@ -301,6 +301,7 @@ const config = ProxyConfig(
   - 転送、キューからの送信、ウォームアップ、別 origin の中継のすべてで同じ値を送ります。キャッシュ・HTML と CSS の書き換え・WebView への応答は、解凍後の本文で扱います。
   - 解凍できない本文（壊れている、途中で切れている、解凍後に 64 MB を超える）は、そのまま返して保存しません。br など gzip 以外の方式は、従来どおりそのまま返します。`Range` を付けた要求には `identity` を送ります。
   - `false` にすると、0.19.0 以前と同じく `Accept-Encoding: identity` を送ります。
+- `cacheMaxSize` は、応答キャッシュの本文の合計の上限です（既定 200 MB、`0` で上限なし）。超えた場合は、保存した日時の古いものから、上限の 9 割に収まるまで削除し、`ProxyEventType.cacheEvicted` を発行します。本文だけで上限を超える応答は保存しません。
 - `cacheTtl` と `cacheStale` は、指定すると既定のマップとマージされず**丸ごと置き換わります**。未掲載の Content-Type が `default` へ落ちるよう、`default` は必ず含めてください。
 - `text/html` の既定は TTL 1 時間、stale 1 日です。最後にオンラインで取得してから約 25 時間でフォールバック対象から外れるため、**長期のオフライン運用では `cacheTtl` と `cacheStale` の設定が必要です**。`cacheStale` には JavaScript のキーが無く、スクリプトは `default`（3 日）になります。
 
