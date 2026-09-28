@@ -386,9 +386,10 @@
 
 </dt>
 <dd>
-  <p>暗号化鍵と合わない Cookie の暗号化 Box を破棄した</p>
+  <p>暗号化鍵と合わない、または壊れた Cookie の暗号化 Box を破棄した</p>
 <p><code>data['reason']</code> に <code>StorageIntegrityFailure</code> の名前が入ります。
-破棄した後は再ログインが必要です。</p>
+照合では問題が無くても Hive が開けない Box（途中の記録が壊れている）は、
+<code>corrupted</code> として破棄します。破棄した後は再ログインが必要です。</p>
   
 
 </dd>

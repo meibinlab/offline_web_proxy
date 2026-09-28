@@ -806,7 +806,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 <tbody>
 <tr>
 <td><code>proxy_cookies_secure</code></td>
-<td>Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on</td>
+<td>Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on (the SHA-256 when over 255 bytes in UTF-8)</td>
 <td>Values only (AES-256)</td>
 <td>An expired cookie is removed when the cookies to send are looked up. <code>clearCookies()</code> removes them</td>
 </tr>
@@ -848,7 +848,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 </tr>
 <tr>
 <td><code>proxy_idempotency</code></td>
-<td>Idempotency keys that reached the upstream, with the time they were recorded</td>
+<td>Idempotency keys that reached the upstream (the SHA-256 when over 255 bytes in UTF-8), with the time they were recorded</td>
 <td>None</td>
 <td>Keys older than <code>idempotencyRetention</code> (24 hours by default) are removed every hour</td>
 </tr>
@@ -970,6 +970,11 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 <li>The discard happens inside <code>start()</code> or a cookie API called before <code>start()</code> or after <code>stop()</code>, so an app that subscribes later never receives the event.</li>
 <li>After startup, read <code>lastCookieStorageDiscardedAt</code> and <code>lastCookieStorageDiscardReason</code> from <code>getDiagnostics()</code>.</li>
 <li>Deletion by the recovery API raises no such event and leaves the diagnostics unchanged.</li>
+</ul>
+</li>
+<li>A cookie box that passes the check but that Hive still cannot open, or that holds a value that cannot be read as a cookie (a record in the middle is broken), is discarded as <code>corrupted</code>, and startup continues. This covers records written by 0.21.0 and earlier with a key over 255 bytes in UTF-8. When the idempotency key records (<code>proxy_idempotency</code>) cannot be opened for the same reason, or hold a value that cannot be read as a recorded time, they are rebuilt, startup continues, and <code>errorOccurred</code> (<code>phase: idempotencyStoreRecovery</code>) reports it.
+<ul>
+<li>Hive also reports the failed open as an unhandled error in the zone, even after the proxy catches it. On that start, the app's error reporting (such as Crashlytics) may record a <code>HiveError</code> or a similar error.</li>
 </ul>
 </li>
 <li>When the check fails in a cookie API (such as <code>restoreCookies()</code>) called before <code>start()</code> or after <code>stop()</code>, the API throws <code>CookieOperationException</code> with <code>StorageIntegrityException</code> as its <code>cause</code>. The failure is not kept; the next call or <code>start()</code> checks again.</li>
