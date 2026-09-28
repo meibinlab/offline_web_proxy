@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import '../storage/hive_key.dart';
+
 /// 内部保存用の Cookie レコードを表します。
 ///
 /// 公開 API 用の `CookieInfo` とは異なり、実値を含む Cookie 属性を
@@ -52,8 +54,12 @@ class CookieRecord {
   /// 永続化キーを返します。
   ///
   /// 名前、ドメイン、パス、および hostOnly の組み合わせで一意化します。
+  /// パスや名前が長く UTF-8 で 255 バイトを超える場合は、Hive のキーの上限に
+  /// 収めるため、組み合わせの SHA-256 に置き換えます（[toHiveKey]）。
+  ///
+  /// Returns: Hive のキーの上限に収めた永続化キー。
   String get storageKey =>
-      '$domain\t$path\t$name\t${hostOnly ? 'host' : 'domain'}';
+      toHiveKey('$domain\t$path\t$name\t${hostOnly ? 'host' : 'domain'}');
 
   /// 指定時刻時点で期限切れかどうかを返します。
   ///

@@ -101,6 +101,7 @@ import 'src/storage/encrypted_storage_integrity.dart';
 import 'src/storage/encryption_key_reader.dart';
 import 'src/storage/encryption_key_storage.dart';
 import 'src/storage/hive_frame_inspector.dart';
+import 'src/storage/hive_key.dart';
 import 'src/storage/storage_order.dart';
 
 export 'src/exceptions/exceptions.dart';
@@ -146,6 +147,22 @@ class _UpstreamSlotTimeoutException implements Exception {
   String toString() => 'UpstreamSlotTimeoutException: $message';
 }
 
+/// Box の途中の記録が壊れていることを表す例外。
+///
+/// 保存領域を開く処理の中だけで使い、利用者へは送出しません。
+class _CorruptedBoxException implements Exception {
+  /// 例外を生成します。
+  ///
+  /// [cause] 破損と判定した元の例外やエラー。
+  const _CorruptedBoxException(this.cause);
+
+  /// 破損と判定した元の例外やエラー。
+  final Object cause;
+
+  @override
+  String toString() => 'CorruptedBoxException: $cause';
+}
+
 /// キャッシュ事前更新の進捗を通知するコールバック関数。
 typedef WarmupProgressCallback = void Function(int completed, int total);
 
@@ -165,6 +182,15 @@ const String _encryptedCacheBoxName = 'proxy_cache_secure';
 const String _legacyCookieBoxName = 'proxy_cookies';
 const String _portPreferenceBoxName = 'proxy_port_preferences';
 const String _webStorageBoxName = 'proxy_web_storage';
+
+/// 送信済みのべき等性キーを記録する Box 名。
+const String _idempotencyBoxName = 'proxy_idempotency';
+
+/// 開けなかった Box のファイルを削除する試行の上限回数。
+const int _failedOpenDeleteAttempts = 20;
+
+/// 開けなかった Box のファイルの削除を繰り返す間隔。
+const Duration _failedOpenDeleteRetryDelay = Duration(milliseconds: 50);
 const String _cookieEncryptionKeyStorageKey =
     'offline_web_proxy.cookie_box_encryption_key';
 const int _cookieEncryptionKeyLength = 32;
@@ -4053,7 +4079,7 @@ class OfflineWebProxy {
       );
       _cacheTotalBytes = null;
       _webStorageBox = await _openBoxTracked(_webStorageBoxName, openedBoxes);
-      _idempotencyBox = await _openBoxTracked('proxy_idempotency', openedBoxes);
+      _idempotencyBox = await _openIdempotencyBox(directoryPath, openedBoxes);
       _queueBox = await _openBoxTracked(
         _encryptedQueueBoxName,
         openedBoxes,
@@ -5274,7 +5300,11 @@ class OfflineWebProxy {
   }
 
   /// ホストごとの永続化キーを生成します。
-  String _portPreferenceStorageKey(String host) => 'host:$host';
+  ///
+  /// [host] 待ち受けるホスト。
+  ///
+  /// Returns: Hive のキーの上限に収めた永続化キー。
+  String _portPreferenceStorageKey(String host) => toHiveKey('host:$host');
 
   /// Cookie 用ストレージを必要時に初期化します。
   ///
@@ -5392,10 +5422,10 @@ class OfflineWebProxy {
           await _deleteEncryptedCacheBox(directoryPath);
       }
 
-      final cookieBox = await _openBoxTracked(
-        _encryptedCookieBoxName,
+      final cookieBox = await _openCookieBox(
+        directoryPath,
+        encryptionKey,
         openedBoxes,
-        encryptionKey: encryptionKey,
       );
       await _migrateLegacyCookieBoxIfNeeded(cookieBox);
 
@@ -5440,6 +5470,203 @@ class OfflineWebProxy {
       openedBoxes.add(box);
     }
     return box;
+  }
+
+  /// Cookie の暗号化 Box を開きます。
+  ///
+  /// 鍵との照合を済ませた後に呼びます。それでも開けない場合や、開けても
+  /// Cookie として読めない値がある場合は、途中の記録が壊れています
+  /// （[_openIntactBox]）。開けないままでは起動できないため、先頭側が壊れた
+  /// 場合と同じく [StorageIntegrityFailure.corrupted] として Cookie を破棄し、
+  /// 作り直します。鍵と他の暗号化 Box はそのまま使います。
+  ///
+  /// 段階 1 の中で、初期化のロックを保持したまま呼びます。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  /// [encryptionKey] 照合済みの鍵。
+  /// [openedBoxes] この呼び出しで開いた Box を加える一覧。
+  ///
+  /// Returns: 開いた Cookie の暗号化 Box。
+  ///
+  /// Throws:
+  ///   * [FileSystemException] ファイルを開けない場合。
+  ///   * [HiveError] 作り直した Box も開けない場合。
+  Future<Box> _openCookieBox(
+    String directoryPath,
+    Uint8List encryptionKey,
+    List<Box> openedBoxes,
+  ) async {
+    try {
+      return await _openIntactBox(
+        _encryptedCookieBoxName,
+        openedBoxes,
+        encryptionKey: encryptionKey,
+        isValidValue: _isStoredCookieRecord,
+      );
+    } on _CorruptedBoxException {
+      await _deleteBoxAfterFailedOpen(_encryptedCookieBoxName, directoryPath);
+      // 削除済みでも、破棄の記録（イベントと診断情報）は同じ経路で残す
+      await _discardCookieStorage(
+        directoryPath,
+        StorageIntegrityFailure.corrupted,
+      );
+      return _openBoxTracked(
+        _encryptedCookieBoxName,
+        openedBoxes,
+        encryptionKey: encryptionKey,
+      );
+    }
+  }
+
+  /// 送信済みのべき等性キーを記録する Box を開きます。
+  ///
+  /// 開けない場合や、記録日時として読めない値がある場合は、途中の記録が
+  /// 壊れています（[_openIntactBox]）。開けないままでは起動できないため、
+  /// Box を作り直し、[ProxyEventType.errorOccurred]（phase は
+  /// `idempotencyStoreRecovery`）で知らせます。作り直すと、保持期間内に届いた
+  /// 記録が失われます。その間は同じキーの要求を送信済みとして止められず、
+  /// 状態の照会も [RequestState.delivered] ではなく [RequestState.unknown] を
+  /// 返します。
+  ///
+  /// 段階 2 の中で、初期化のロックを保持したまま呼びます。
+  ///
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  /// [openedBoxes] この呼び出しで開いた Box を加える一覧。
+  ///
+  /// Returns: 開いた Box。
+  ///
+  /// Throws:
+  ///   * [FileSystemException] ファイルを開けない場合。
+  ///   * [HiveError] 作り直した Box も開けない場合。
+  Future<Box> _openIdempotencyBox(
+    String directoryPath,
+    List<Box> openedBoxes,
+  ) async {
+    try {
+      return await _openIntactBox(
+        _idempotencyBoxName,
+        openedBoxes,
+        isValidValue: (value) => value is String,
+      );
+    } on _CorruptedBoxException catch (corruption) {
+      await _deleteBoxAfterFailedOpen(_idempotencyBoxName, directoryPath);
+      _emitEvent(ProxyEventType.errorOccurred, '', {
+        'phase': 'idempotencyStoreRecovery',
+        'error': corruption.cause.toString(),
+      });
+      return _openBoxTracked(_idempotencyBoxName, openedBoxes);
+    }
+  }
+
+  /// Box を開き、途中の記録が壊れていないかを確かめます。
+  ///
+  /// 0.21.0 以前の版は、UTF-8 で 255 バイトを超えるキーを、長さの欄を
+  /// 桁あふれさせたまま書いていました（Hive は長さを 1 バイトに書き、
+  /// リリースビルドでは拒否しないため）。CRC は正しいため Hive は破損として
+  /// 切り詰めず、キーの続きを値として読みます。その結果は値の先頭の 1 バイトで
+  /// 決まり、[HiveError] のほか [RangeError] などで開けないか、別の型の値として
+  /// 開けてしまいます（暗号化 Box では復号した値の先頭が鍵ごとに変わるため、
+  /// どちらも起こります）。そのため、ファイルを開けない場合
+  /// （[FileSystemException]）を除くすべての失敗と、[isValidValue] を満たさない
+  /// 値を破損として扱います。
+  ///
+  /// 既に開いていた Box は、開いたときに確かめているため確かめ直しません。
+  /// 破損と判定した場合は、この呼び出しで開いた Box を閉じてから例外を送出します。
+  ///
+  /// [name] Box の名前。
+  /// [openedBoxes] この呼び出しで開いた Box を加える一覧。
+  /// [encryptionKey] 暗号化 Box の場合の鍵。平文の Box では `null`。
+  /// [isValidValue] 保存した値として正しいかを判定する関数。
+  ///
+  /// Returns: 開いた Box。
+  ///
+  /// Throws:
+  ///   * [_CorruptedBoxException] 途中の記録が壊れている場合。
+  ///   * [FileSystemException] ファイルを開けない場合。
+  Future<Box> _openIntactBox(
+    String name,
+    List<Box> openedBoxes, {
+    Uint8List? encryptionKey,
+    required bool Function(Object? value) isValidValue,
+  }) async {
+    final wasOpen = Hive.isBoxOpen(name);
+    final Box box;
+    try {
+      box = await _openBoxTracked(
+        name,
+        openedBoxes,
+        encryptionKey: encryptionKey,
+      );
+    } on FileSystemException {
+      rethrow;
+    } catch (error) {
+      throw _CorruptedBoxException(error);
+    }
+
+    if (wasOpen || box.values.every(isValidValue)) {
+      return box;
+    }
+
+    openedBoxes.remove(box);
+    await box.close();
+    throw _CorruptedBoxException(
+      StateError('Box $name holds a value that it never stores'),
+    );
+  }
+
+  /// Cookie の暗号化 Box に保存した値として読めるかを返します。
+  ///
+  /// [value] Box から読んだ値。
+  ///
+  /// Returns: [CookieRecord] として読める場合は `true`。
+  bool _isStoredCookieRecord(Object? value) {
+    if (value is! Map) {
+      return false;
+    }
+    try {
+      CookieRecord.fromMap(value);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 開けなかった、または壊れていた Box のファイルを削除します。
+  ///
+  /// Hive は開けなかった Box を、完了を待たずに閉じます。閉じる処理は最後に
+  /// ロックファイルを削除するため、それが消えるのを待ってから削除します。
+  /// 待たずに作り直すと、古い閉じる処理が作り直した Box のロックファイルを
+  /// 消してしまいます。また Windows では、閉じ終えるまでファイルを削除できません。
+  /// 待つ時間と削除の試行には上限を設け、上限を超えた場合も削除を試みます。
+  ///
+  /// [name] Box の名前。
+  /// [directoryPath] Hive の保存先ディレクトリ。
+  ///
+  /// Throws:
+  ///   * [FileSystemException] 上限回数まで繰り返しても削除できない場合。
+  Future<void> _deleteBoxAfterFailedOpen(
+    String name,
+    String directoryPath,
+  ) async {
+    final lockFile = File(
+      '$directoryPath${Platform.pathSeparator}${name.toLowerCase()}.lock',
+    );
+    for (var attempt = 1;; attempt++) {
+      final isLast = attempt >= _failedOpenDeleteAttempts;
+      if (!isLast && await lockFile.exists()) {
+        await Future<void>.delayed(_failedOpenDeleteRetryDelay);
+        continue;
+      }
+      try {
+        await Hive.deleteBoxFromDisk(name, path: directoryPath);
+        return;
+      } on FileSystemException {
+        if (isLast) {
+          rethrow;
+        }
+        await Future<void>.delayed(_failedOpenDeleteRetryDelay);
+      }
+    }
   }
 
   /// 応答キャッシュの Box を、[ProxyConfig.encryptResponseCache] に従って開きます。
@@ -9047,7 +9274,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       return false;
     }
 
-    final completedAt = box.get(idempotencyKey) as String?;
+    final completedAt = box.get(toHiveKey(idempotencyKey)) as String?;
     if (completedAt == null) {
       return false;
     }
@@ -9071,7 +9298,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       return;
     }
 
-    await box.put(idempotencyKey, DateTime.now().toIso8601String());
+    // 画面が送るキーは長さが決まっていないため、Hive の上限に合わせる
+    await box.put(toHiveKey(idempotencyKey), DateTime.now().toIso8601String());
   }
 
   /// 保持期間を過ぎたべき等性キーを削除します。

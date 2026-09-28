@@ -25,18 +25,18 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 ### 端末に保存するデータ
 
-proxy は Hive の Box と secure storage にデータを保存します。暗号化 Box で暗号化されるのは値だけで、Box のキーは平文のまま保存されます（キュー・隔離・ドロップ履歴は保存した時刻から採番した ID、Cookie はドメイン・パス・名前など）。**キューと隔離は、要求のヘッダと本文をそのまま保持します。** 保存先ごとの内容、暗号化の有無、保持期間は次のとおりです。
+proxy は Hive の Box と secure storage にデータを保存します。暗号化 Box で暗号化されるのは値だけで、Box のキーは平文のまま保存されます（キュー・隔離・ドロップ履歴は保存した時刻から採番した ID、Cookie はドメイン・パス・名前など）。Hive はキーの長さを 1 バイトの欄に書くため、UTF-8 で 255 バイトを超えるキー（長いパスや名前の Cookie、画面が付けた長いべき等性キー）は、`sha256:` に続く SHA-256 の 16 進に置き換えて保存します。**キューと隔離は、要求のヘッダと本文をそのまま保持します。** 保存先ごとの内容、暗号化の有無、保持期間は次のとおりです。
 
 | 保存先 | 内容 | 暗号化 | 保持期間 |
 | --- | --- | --- | --- |
-| `proxy_cookies_secure` | Cookie（名前、値、ドメイン、パス、有効期限、属性）。キーはドメイン、パス、名前など | 値のみ（AES-256） | 有効期限を過ぎたものは、送信する Cookie を探すときに削除。`clearCookies()` で削除 |
+| `proxy_cookies_secure` | Cookie（名前、値、ドメイン、パス、有効期限、属性）。キーはドメイン、パス、名前など（UTF-8 で 255 バイトを超える場合は SHA-256） | 値のみ（AES-256） | 有効期限を過ぎたものは、送信する Cookie を探すときに削除。`clearCookies()` で削除 |
 | `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
 | `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限（【5】の「保持上限」） |
 | `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか、べき等性キー、受け付けた日時）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
 | `proxy_cache` | 応答キャッシュ（ステータスコード、ヘッダ、本文、有効期限）。キーは正規化した URL の SHA-256。`encryptResponseCache` が `false`（既定）の場合に使う | なし | stale 期間を過ぎたものと、`cacheMaxSize` を超えた分を削除。`encryptResponseCache` を有効にすると、`proxy_cache_secure` へ移して削除 |
 | `proxy_cache_secure` | `encryptResponseCache` を有効にした場合の応答キャッシュ。内容とキーは `proxy_cache` と同じ | 値のみ（AES-256） | `proxy_cache` と同じ。`encryptResponseCache` を無効に戻すと、平文へ戻さずに削除 |
 | `proxy_web_storage` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット | なし | 次のスナップショットで上書きされるまで |
-| `proxy_idempotency` | 上流へ届いたべき等性キーと、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
+| `proxy_idempotency` | 上流へ届いたべき等性キー（UTF-8 で 255 バイトを超える場合は SHA-256）と、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
 | `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号 | なし | 次のバインドで上書きされるまで |
 | secure storage の `offline_web_proxy.cookie_box_encryption_key` | 暗号化 Box の鍵。Cookie、キュー、隔離、ドロップ履歴（と、有効にした場合の応答キャッシュ）で共有 | secure storage に保存 | `recoverEncryptedStorage()` が削除するか、判定表に従って作り直すまで（【4】の「判定表」） |
 | `proxy_queue`、`proxy_quarantined_requests`、`proxy_dropped_requests`、`proxy_cookies` | 0.14.0 以前（Cookie は 0.4.0 より前）が平文で保存した内容 | なし | 暗号化 Box へ移行した後に削除。キュー・隔離・ドロップ履歴の旧 Box は、削除の前に空にする |
@@ -443,6 +443,11 @@ secure storage から鍵を読んだ結果は、次のように区分します�
 #### Cookie Box の破棄と通知
 
 - Cookie Box を破棄したときは、`ProxyEventType.cookieStorageDiscarded` を発行する。`data['reason']` に `StorageIntegrityFailure` の名前が入る
+- 照合で問題なしとなっても、Hive が Cookie Box を開けない場合や、Cookie として読めない値がある場合（途中の記録が壊れている）は、`corrupted` として破棄して続ける。鍵と他の暗号化 Box はそのまま使う
+  - 0.21.0 以前の版が、UTF-8 で 255 バイトを超えるキーで書いた記録が該当する。Hive はキーの長さを 1 バイトの欄に書き、assert が無効なリリースビルドでは長さを桁あふれさせたまま書くため、次の起動で開けなくなっていた
+  - CRC は正しいため、Hive は破損として切り詰めず、キーの続きを値として読む。その結果は復号した値の先頭で決まり、`HiveError` や `RangeError` で開けないか、別の型の値として開けてしまう。そのため、ファイルを開けない場合（`FileSystemException`）を除くすべての失敗と、proxy が書かない値を破損として扱う
+  - Hive は開けなかった例外を、proxy が捕まえた後もゾーンの未処理の例外として報告する
+  - 0.4.0 より前の平文 Cookie Box（`proxy_cookies`）が同じ理由で開けない場合は対象外で、従来どおり起動に失敗する。その版でも起動できなかった状態のため
 - 破棄は `start()` や、起動前・停止後に呼んだ Cookie API の中で起きる。イベントはブロードキャストのため、後から購読したアプリには届かない
 - 起動後は `ProxyDiagnostics.lastCookieStorageDiscardedAt` と `lastCookieStorageDiscardReason` で照会できる（インスタンスごとの値）
 - 復旧 API による削除では `cookieStorageDiscarded` を発行せず、診断情報も変えない
@@ -868,6 +873,8 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 - **既定 24 時間**: `ProxyConfig.idempotencyRetention` で変更できます。期限切れ後は新規リクエストとして扱います
 - **ストレージ**: Hive で永続化。アプリ再起動後も有効
 - **期限切れの削除**: 1 時間ごとの定期処理で削除します
+- **キーの長さ**: UTF-8 で 255 バイトを超えるキーは、SHA-256 に置き換えて記録します（【1】の「端末に保存するデータ」）。照会も同じ値で探すため、長さによる扱いの違いはありません
+- **記録が壊れている場合**: Box を開けない場合や、記録日時として読めない値がある場合は、作り直して起動を続け、`ProxyEventType.errorOccurred`（`phase: idempotencyStoreRecovery`）で知らせます。0.21.0 以前の版が、255 バイトを超えるキーで書いた記録が該当します（【4】の「Cookie Box の破棄と通知」）。作り直すと保持期間内に届いた記録が失われるため、その間は同じキーの要求を送信済みとして止められず、要求の状態の照会は `delivered` ではなく `unknown` を返します。起動できなくなるより影響が小さいため、作り直しを選びます
 
 ## 【7】レスポンス圧縮
 
@@ -2786,6 +2793,8 @@ enum ProxyEventType {
 `cookieStorageDiscarded` の `data` には、次のメタ情報が入ります。
 
 - `reason`: 破棄した理由（`StorageIntegrityFailure` の名前）
+
+べき等性キーの記録を作り直したときに発行する `errorOccurred` の `data` には、`phase`（`idempotencyStoreRecovery`）と `error` が入ります（【6】の「保持期間」）。
 
 旧平文 Box の移行と保持上限の処理で発行する `errorOccurred` の `data` には、`operation`（移行は `legacyStorageDelete` か `legacyStorageMigration`、保持上限は `retentionLimit`）と `error` が入ります。`legacyStorageDelete` では、`box` に旧平文 Box の名前が入ります。
 
