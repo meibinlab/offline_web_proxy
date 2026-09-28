@@ -251,6 +251,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
   enableReplayHeader: true,
   replayHeaderName: 'X-Offline-Replay',
   enableUpstreamCompression: true,
+  encryptResponseCache: false,
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -319,7 +320,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li>Even on a match, a response carrying <code>Set-Cookie</code>, a response carrying <code>Vary</code> (unless it names <code>Accept-Encoding</code> alone), or a request carrying <code>Authorization</code>, is not stored. A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason, so a path that never becomes available offline can be diagnosed.</li>
 <li>A <code>Vary</code> naming <code>Accept-Encoding</code> alone is stored because the proxy sends the same <code>Accept-Encoding</code> on every upstream route and decompresses gzip before storing, so the response cannot vary. Tomcat, nginx and Apache all add that <code>Vary</code> by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A <code>Vary</code> naming <code>*</code> or any other header is still skipped.</li>
 <li>For a matching path the upstream <code>max-age</code> and <code>Expires</code> are ignored and <code>cacheTtl</code> decides the expiry, because <code>no-store</code> is usually paired with <code>max-age=0</code>, which would make the entry stale the moment it is stored.</li>
-<li><strong>The response cache is not encrypted.</strong> The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.</li>
+<li><strong>The response cache is not encrypted by default.</strong> The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it. Enable <code>encryptResponseCache</code> when it holds personal or business data.</li>
 </ul>
 </li>
 <li><code>mirroredOrigins</code> lists other origins fetched through the proxy. On a screen that loads its UI library from a CDN, the absolute URL in the HTML never passes through 127.0.0.1, so caching, fallback and warmup all miss it. A listed origin is relayed by the proxy and joins the ordinary cache and offline fallback. Empty by default.
@@ -362,6 +363,13 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 </ul>
 </li>
 <li><code>cacheMaxSize</code> caps the total body size of the response cache (200 MB by default, <code>0</code> for no limit). Beyond it, entries are removed oldest stored first until the total fits within 90% of the limit, and <code>ProxyEventType.cacheEvicted</code> is raised. A response whose body alone exceeds the limit is not stored.</li>
+<li><code>encryptResponseCache</code> stores the response cache encrypted with the same key as the cookies, the queue and the quarantine store (off by default).
+<ul>
+<li>The box is decrypted in full when it opens, so <code>start()</code> takes longer as the cache grows (about 0.4 s for 30 MB and 3.2 s for 200 MB on a desktop CPU; a phone is expected to be several times slower). Keep <code>cacheMaxSize</code> modest when enabling it.</li>
+<li>Switching it on moves the plain cache over inside <code>start()</code> and deletes the plain file (about 0.7 s for 30 MB and 7 s for 200 MB on a desktop CPU). The deletion is an ordinary file deletion and does not guarantee that the storage is erased. Switching it off deletes the encrypted cache without restoring it in plain form. When the key does not match, the cache is emptied instead of failing startup.</li>
+<li>The box keys (the SHA-256 of the normalized URL) stay readable.</li>
+</ul>
+</li>
 <li><code>cacheTtl</code> and <code>cacheStale</code> <strong>replace</strong> the default maps rather than merging with them. Always keep a <code>default</code> entry so that unlisted content types still resolve.</li>
 <li><code>text/html</code> defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. <strong>Long offline operation requires tuning both <code>cacheTtl</code> and <code>cacheStale</code>.</strong> <code>cacheStale</code> has no JavaScript entry, so scripts fall back to <code>default</code> (3 days).</li>
 </ul>
@@ -822,9 +830,15 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 </tr>
 <tr>
 <td><code>proxy_cache</code></td>
-<td>Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL</td>
+<td>Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL. Used while <code>encryptResponseCache</code> is <code>false</code> (the default)</td>
 <td>None</td>
-<td>Entries past their stale period are removed every hour</td>
+<td>Entries past their stale period and entries beyond <code>cacheMaxSize</code> are removed. Moved into <code>proxy_cache_secure</code> and deleted once <code>encryptResponseCache</code> is enabled</td>
+</tr>
+<tr>
+<td><code>proxy_cache_secure</code></td>
+<td>Response cache when <code>encryptResponseCache</code> is enabled. Same content and keys as <code>proxy_cache</code></td>
+<td>Values only (AES-256)</td>
+<td>Same as <code>proxy_cache</code>. Deleted, never restored in plain form, when <code>encryptResponseCache</code> is switched off again</td>
 </tr>
 <tr>
 <td><code>proxy_web_storage</code></td>
@@ -846,7 +860,7 @@ Connection recovery emits <code>serverRecovered</code> and <code>serverUnavailab
 </tr>
 <tr>
 <td><code>offline_web_proxy.cookie_box_encryption_key</code> in secure storage</td>
-<td>The key of the encrypted boxes, shared by cookies, the queue, the quarantine store and the dropped history</td>
+<td>The key of the encrypted boxes, shared by cookies, the queue, the quarantine store, the dropped history (and the response cache when encrypted)</td>
 <td>Kept in secure storage</td>
 <td>Until <code>recoverEncryptedStorage()</code> deletes it, or an unusable key (missing, unreadable or invalid) is replaced by a new one. A new key is written when no queue, quarantine or dropped-history box has content (see <a href="#when-the-encryption-key-is-lost">When the encryption key is lost</a>)</td>
 </tr>

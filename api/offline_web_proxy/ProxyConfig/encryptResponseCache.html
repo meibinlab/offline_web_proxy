@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="API docs for the encryptResponseCache property from the ProxyConfig class, for the Dart programming language.">
+  <title>encryptResponseCache property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../../static-assets/styles.css?v1">
+  <link rel="icon" href="../../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">encryptResponseCache property</li>
+  </ol>
+  <div class="self-name">encryptResponseCache</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
+    data-below-sidebar="">
+    <div>
+<h1><span class="kind-property">encryptResponseCache</span> property 
+</h1></div>
+
+      <section class="multi-line-signature">
+        
+        <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a>
+        <span class="name ">encryptResponseCache</span>
+        <div class="features"><span class="feature">final</span></div>
+
+      </section>
+      
+<section class="desc markdown">
+  <p>Whether to encrypt the response cache on the device.</p>
+<p>When enabled, cached responses (status, headers and body) are stored in
+an AES-256 encrypted Hive box with the same key as the cookies, the queue
+and the quarantine store. Enable it when <a href="../../offline_web_proxy/ProxyConfig/forceCachePaths.html">forceCachePaths</a> keeps personal
+or business data, since the cache otherwise stays on the device in plain
+form for as long as it is kept. The box keys stay readable; they are the
+SHA-256 of the normalized URL, so anyone who can guess a URL can tell
+whether it is cached.</p>
+<p><strong>Cost</strong>: Hive decrypts the whole box when it opens it, so <code>start()</code>
+takes longer as the cache grows. On a desktop CPU, opening took about
+0.4 s for 30 MB and 3.2 s for 200 MB (0.1 s and 0.7 s without
+encryption); a phone is expected to be several times slower. Each store
+takes about 0.3 ms longer. Keep <a href="../../offline_web_proxy/ProxyConfig/cacheMaxSize.html">cacheMaxSize</a> modest when enabling it.</p>
+<p>Switching it on moves an existing plain cache into the encrypted box and
+deletes the plain file, inside <code>start()</code> (about 0.7 s for 30 MB and 7 s
+for 200 MB on a desktop CPU). The file is deleted the ordinary way, which
+does not guarantee that the flash storage is erased; a failed deletion is
+retried at the next startup. Switching it off deletes the encrypted box
+without restoring it in plain form, so the cache starts empty. The cache
+is not checked against the key at startup: when the key no longer
+matches, the cache is emptied rather than failing <code>start()</code>, because the
+responses can be fetched again.</p>
+<p><strong>Default</strong>: <code>false</code></p>
+</section>
+
+      
+<section class="summary source-code" id="source">
+  <h2><span>Implementation</span></h2>
+  <pre class="language-dart"><code class="language-dart">final bool encryptResponseCache;</code></pre>
+</section>
+
+
+</div> <!-- /.main-content -->
+
+<div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+  <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">encryptResponseCache property</li>
+</ol>
+
+
+  <h5>ProxyConfig class</h5>
+  <div id="dartdoc-sidebar-left-content"></div>
+</div><!--/.sidebar-offcanvas-->
+
+<div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+</div><!--/.sidebar-offcanvas-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.20.0
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../../static-assets/highlight.pack.js?v1"></script>
+<script src="../../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+
