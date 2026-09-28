@@ -48,7 +48,11 @@ enum ProxyEventType {
   /// Staleキャッシュ使用
   cacheStaleUsed,
 
-  /// 保存対象のパスに一致したが、安全のため保存を見送った
+  /// 応答の保存を見送った
+  ///
+  /// `data['reason']` に理由が入ります。`forceCachePaths` の安全側の除外
+  /// （`set-cookie`・`vary`・`authorization`）と、本文だけで
+  /// `ProxyConfig.cacheMaxSize` を超えた場合（`cacheMaxSize`）です。
   cacheSkipped,
 
   /// リクエストキューイング
@@ -72,8 +76,14 @@ enum ProxyEventType {
   /// ネットワーク切断
   networkOffline,
 
-  /// キャッシュクリア
+  /// キャッシュクリア（`clearCache()` で全件を削除した）
   cacheCleared,
+
+  /// `ProxyConfig.cacheMaxSize` を超えたため、古い応答を削除した
+  ///
+  /// `data` には `reason`（`cacheMaxSize`）、`evictedCount`（件数）、
+  /// `evictedBytes`（本文の大きさ）が入ります。
+  cacheEvicted,
 
   /// エラー発生
   errorOccurred,
