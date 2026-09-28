@@ -33,8 +33,9 @@ The proxy stores data in Hive boxes and in secure storage. In an encrypted box o
 | `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
 | `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default (see "Retention Limits" in [5]) |
 | `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged, idempotency key, time first accepted). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
-| `proxy_cache` | Response cache (status code, headers, body, expiry). Keys are the SHA-256 of the normalized URL. Used while `encryptResponseCache` is `false` (the default) | None | Entries past their stale period and entries beyond `cacheMaxSize` are removed. Moved into `proxy_cache_secure` and deleted once `encryptResponseCache` is enabled |
-| `proxy_cache_secure` | Response cache when `encryptResponseCache` is enabled. Same content and keys as `proxy_cache` | Values only (AES-256) | Same as `proxy_cache`. Deleted, never restored in plain form, when `encryptResponseCache` is switched off again |
+| `proxy_cache_index_secure`, `proxy_cache_body_secure` | Response cache (the default). The metadata box (`proxy_cache_index_secure`) holds the status code, stored time, expiry, Content-Type and body size; the body box (`proxy_cache_body_secure`) holds the headers and body. Keys are the SHA-256 of the normalized URL | Values only (AES-256) | Entries past their stale period and entries beyond `cacheMaxSize` are removed. Deleted, never restored in plain form, when `encryptResponseCache` is switched off |
+| `proxy_cache_index`, `proxy_cache_body` | Response cache when `encryptResponseCache` is `false`. Same content and keys as the encrypted pair | None | Same as the encrypted pair. Moved into the encrypted pair and deleted once `encryptResponseCache` is enabled |
+| `proxy_cache`, `proxy_cache_secure` | Response cache of 0.21.0 and earlier, holding the metadata and body in one value. `proxy_cache_secure` is the one written by 0.21.0 with `encryptResponseCache` enabled | `proxy_cache`: none; `proxy_cache_secure`: values only (AES-256) | Moved into the new pair and deleted at startup. With `encryptResponseCache` off, `proxy_cache_secure` is deleted without being moved |
 | `proxy_web_storage` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on | None | Until the next snapshot overwrites it |
 | `proxy_idempotency` | Idempotency keys that reached the upstream, with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
 | `proxy_port_preferences` | The port last bound for each host | None | Until the next bind overwrites it |
@@ -949,7 +950,7 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
 
 **Freshness**: A server that sends `no-store` usually sends something like `no-store, max-age=0, must-revalidate`. Honouring those directives would make the entry stale the moment it is stored, leaving only the stale window for offline use. Since the decision to store was already overridden by configuration, the expiry follows configuration too: for a matching path, `s-maxage`, `max-age` and `Expires` are ignored and `cacheTtl` decides the TTL.
 
-**Storage note**: `no-store` exists to ask that a response never be written to storage. The response cache is not encrypted by default, so the body of a listed path stays on the device in the clear. Weigh what the screen contains, and the impact of a lost device, before listing it. Enable `encryptResponseCache` when it holds personal or business data (section [16], "Encrypting the Response Cache").
+**Storage note**: `no-store` exists to ask that a response never be written to storage. The response cache is encrypted by default (section [16], "Encrypting the Response Cache"). With `encryptResponseCache` switched off, the body of a listed path stays on the device in the clear. Even when encrypted, the box keys (the SHA-256 of the URL) stay readable, so weigh what the screen contains, and the impact of a lost device, before listing it.
 
 #### Warmup
 
@@ -984,152 +985,38 @@ For a path matching `ProxyConfig.forceCachePaths`, steps 1 to 3 are skipped and 
 - **If-None-Match / ETag**: Forward upstream unchanged when the browser sends them
 - **304 Not Modified**: Treat as the normal browser/upstream flow rather than a proxy-side online cache-hit decision
 
-### Cache File Format
+### Storage Format
 
-Integrate metadata and content into a single file to simplify management:
+The response cache is split across two Hive boxes (see "Data Stored on the Device" in [1] for their names).
 
-#### File Structure
+| Box | Content | How it is read |
+| --- | --- | --- |
+| Metadata (`proxy_cache_index_secure`; `proxy_cache_index` when not encrypted) | Status code, stored time (`createdAt`), expiry (`expiresAt`), Content-Type, body size (`sizeBytes`) | An ordinary box. Every entry is loaded into memory when it opens (a few hundred bytes each) |
+| Body (`proxy_cache_body_secure`; `proxy_cache_body` when not encrypted) | Headers, body | A LazyBox. An entry is read from the file when it is served from the cache |
 
-```
-[Header Section]
-CACHE_VERSION: 1.0
-CREATED_AT: 2024-01-01T12:00:00Z
-EXPIRES_AT: 2024-01-02T12:00:00Z
-STATUS_CODE: 200
-CONTENT_TYPE: text/html; charset=utf-8
-CONTENT_LENGTH: 1234
-CACHE_CONTROL: max-age=3600, public
-ETAG: "abc123"
-LAST_MODIFIED: Mon, 01 Jan 2024 12:00:00 GMT
-X_ORIGINAL_URL: https://example.com/page
+- **Why two boxes**: An ordinary Hive box loads every entry when it opens (and decrypts every entry when encrypted) and keeps them in memory until it closes. With bodies included this can reach hundreds of megabytes, so bodies are read only when needed. Removing expired entries, removing entries beyond `cacheMaxSize`, `getCacheStats()` and `getCacheList()` use the metadata alone
+- **Body**: Stored as bytes, with no character conversion
+- **Write order**: A store writes the body, then the metadata; a removal deletes the metadata, then the body. Replacing an entry deletes the old metadata first. An interruption never leaves metadata without its body, or a new body paired with old metadata. A read during a replacement treats the entry as missing
+- **Records found in only one box**: Removed at startup. A body alone is left when a write or a removal stops halfway; metadata alone is left, for example, when Hive truncates only one of the boxes because it does not match the key. This is skipped when another instance already has the boxes open, so that a write in progress is not mistaken for a leftover
+- **Concurrent writes**: Stores and removals run one at a time (see "Capacity Limit" in [16])
+- **Deletion**: Hive deletes logically. A deleted entry stays in the file until Hive compacts it automatically
 
-[Body Section]
-<html>Actual response content</html>
-```
+#### Migrating from 0.21.0 and Earlier
 
-#### Benefits of HTTP Protocol Compliance
+Up to 0.21.0, each entry kept its metadata and body in one value in `proxy_cache` (plain) or `proxy_cache_secure` (encrypted). At startup (during storage initialization inside `start()`), these are moved into the new pair as follows.
 
-- **Standards Compliance**: Same header/body separation method as HTTP/1.1 specification
-- **Easy Parsing**: Can reuse existing HTTP parser libraries
-- **Readability**: Intuitive and easy to understand for developers
-- **Debug Efficiency**: Can directly check cache files with HTTP tools
+- The source is opened for reading one entry at a time, so the whole cache is never loaded into memory
+- Once the move is done, the source file is deleted
+- An entry that cannot be moved is dropped and the rest keep moving; the count is reported at the end (`ProxyEventType.errorOccurred`, `failedCount`). `phase` is `cacheEncryptionMigration` when moving into the encrypted pair and `cacheFormatMigration` when moving into the plain pair
+- When the destination already has the same key, the one with the later stored time (`createdAt`) is kept, since both can receive entries while the encryption setting is being switched
+- With `encryptResponseCache` off, `proxy_cache_secure` is deleted without being restored in plain form
+- For the time the move takes, see "Encrypting the Response Cache" in [16]
 
-#### Separation Method Details
+### Cache Key
 
-- **Header Terminator**: Separate header and body sections with CRLF CRLF (`\r\n\r\n`)
-- **Line Separator**: Separate each header line with CRLF (`\r\n`)
-- **Compatibility**: Flexibly support environments with LF only (`\n\n`)
-
-#### Benefits
-
-- **Atomicity Guarantee**: Metadata and content synchronized with a single file write
-- **Eliminate Fragment Problem**: Metadata and content always consistent
-- **Simplified Management**: File count reduced by half, disk capacity also reduced
-- **Read Efficiency**: Get metadata and content with a single file access
-- **HTTP Compatibility**: Saved in standard HTTP message format
-
-#### Drawbacks and Countermeasures
-
-- **No Partial Reading**: Must read entire file even when only metadata is needed
-  → **Countermeasure**: Keep header section size small (usually under 1KB), minimize impact
-- **Large File Processing**: High cost of checking metadata for large files
-  → **Countermeasure**: Read only fixed number of bytes (e.g., 4KB) from file beginning to parse headers
-
-### Atomic Operations
-
-Greatly simplified by single file format:
-
-- **Via Temporary File**: Write header and body sections to temporary file simultaneously with response reception
-- **Atomic Move**: After write completion, move to official cache file with rename operation
-- **Exclusive Control**: Prevent race conditions during file operations
-- **No Backup Needed**: Single file format reduces risk of partial corruption
-
-### Consistency Check (Simplified)
-
-- **Header Validation**: Check if header format at file beginning is correct
-- **Separator Confirmation**: Confirm existence of CRLF CRLF (`\r\n\r\n`) or LF LF (`\n\n`)
-- **Size Consistency**: Verify actual body section size against `CONTENT_LENGTH`
-- **When Corruption Detected**: Delete entire file (no partial repair)
-
-### Performance Optimization
-
-Optimization leveraging single file format advantages:
-
-#### Cache Index
-
-- **Hive Index**: Index by URL, expiration time, file size, etc.
-- **Metadata Cache**: Keep frequently accessed metadata in memory
-- **Lazy Loading**: Read body section only when necessary
-
-#### Streaming Support
-
-- **Large Files**: Stream body section after reading header section
-- **Range Specification**: Can partially deliver within single file for future Range support
-
-#### HTTP Parser Utilization
-
-- **Library Reuse**: Parse header section with existing HTTP message parser
-- **Validation**: Directly utilize HTTP header validation functionality
-- **Extensibility**: Automatically support future new HTTP headers
-
-### File Naming Convention
-
-```
-cache/
-├── content/
-│   ├── ab/
-│   │   ├── cd1234abcd5678ef90...cache     # Integrated cache file
-│   │   └── ef9876543210abcd...cache       # Other cache
-│   └── gh/
-│       └── ij5678901234cdef...cache
-└── index.hive                             # Cache index
-```
-
-#### URL Hashing
-
-Perform normalization processing before hashing URL to generate consistent hash values:
-
-##### Normalization Steps
-
-1. **URL Decode**: Decode all percent-encoding (%20, etc.)
-2. **Scheme Normalization**: Unify `HTTP` → `http`, `HTTPS` → `https`
-3. **Hostname Normalization**: Convert uppercase to lowercase (`Example.COM` → `example.com`)
-4. **Port Normalization**: Omit default ports (http:80, https:443)
-5. **Path Normalization**:
-   - Compress consecutive slashes (`//` → `/`)
-   - Resolve dot notation (`./`, `../`)
-   - Unify trailing slash (add/remove according to configuration)
-6. **Query Parameter Normalization**:
-   - Sort parameters by key name
-   - URL encode values (UTF-8, RFC 3986 compliant)
-7. **Fragment Removal**: Remove `#fragment` part (does not affect cache key)
-8. **UTF-8 Encoding**: Finally encode in UTF-8 before hashing
-
-##### Normalization Example
-
-```
-Input URL: https://Example.COM:443/path//to/../page?b=2&a=1#fragment
-                                  ↓
-After normalization: https://example.com/path/page?a=1&b=2
-                                  ↓
-SHA-256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
-```
-
-##### Hash Collision Countermeasure
-
-- **SHA-256**: Hash URL with SHA-256 and use for filename
-- **Collision Detection**: Verify actual URL with `X_ORIGINAL_URL` header in file
-- **Processing on Collision**:
-  1. Read cache file
-  2. Compare `X_ORIGINAL_URL` with normalized URL
-  3. Treat as cache miss if mismatch
-  4. Overwrite with new cache file
-
-##### Hierarchical Directory Structure
-
-- **Subdirectory**: Create subdirectory with first 2 characters of hash
-- **Load Distribution**: Limit number of files per directory (usually under 1000 files)
-- **Example**: Hash `abcd1234...` → `cache/content/ab/cd1234...cache`
+- **Value**: The SHA-256, in hex (64 characters), of the normalized upstream URL
+- **Normalization**: The scheme and the authority (user info, host and port) are lowercased, runs of slashes in the path are collapsed into one, and the query is appended as is (not sorted). The fragment is dropped. Everything else follows what Dart's `Uri.parse` produces. A URL that cannot be parsed is lowercased as a whole
+- **The URL itself is not stored**: Collisions are not checked. `CacheEntry.url` is an empty string
 
 ## [9] Content Type and Character Encoding
 
@@ -1403,7 +1290,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 ### Capacity Limit
 
 - **`ProxyConfig.cacheMaxSize`**: Upper limit on the total size of the response bodies in the cache. 200 MB by default. `0` disables it; a negative value makes `start()` throw `ProxyStartException`
-- **What counts**: Body sizes only (the same as `CacheStats.totalSize`). Headers and storage overhead are not counted, so the file is somewhat larger. Hive keeps the whole box in memory, so the limit also bounds memory use
+- **What counts**: Body sizes only (the same as `CacheStats.totalSize`). Headers and storage overhead are not counted, so the file is somewhat larger. Only the metadata (a few hundred bytes per entry) stays in memory; bodies are read one at a time when served (see "Storage Format" in [8])
 - **When exceeded**: Entries are removed in the order they were stored (`createdAt`), oldest first, until the total fits within 90% of the limit. Stopping right at the limit would leave the cache pinned there, removing something on every store. The response just stored is kept
   - The order follows the time of storing rather than the last use, because recording every use would rewrite each entry, body included. Entries stored at the same time follow their keys
   - A removal raises `ProxyEventType.cacheEvicted` whose `data` holds `reason` `cacheMaxSize`, `evictedCount` (entries) and `evictedBytes` (body bytes)
@@ -1414,22 +1301,23 @@ Preserve original Cache-Control header as much as possible even in offline respo
 
 ### Encrypting the Response Cache
 
-With `ProxyConfig.encryptResponseCache` (default `false`) enabled, the response cache (status code, headers and body) is stored in an AES-256 encrypted box (`proxy_cache_secure`) with the same key as the cookies, the queue and the quarantine store. Enable it when `forceCachePaths` keeps APIs that return personal or business data.
+While `ProxyConfig.encryptResponseCache` (default `true`) is on, the response cache (status code, headers and body) is stored in AES-256 encrypted boxes (`proxy_cache_index_secure` and `proxy_cache_body_secure`) with the same key as the cookies, the queue and the quarantine store. APIs that return personal or business data can be kept with `forceCachePaths` without leaving them on the device in the clear.
 
 - **Not encrypted**: The box keys (the SHA-256 of the normalized URL) stay readable. Anyone who can guess a URL can tell whether it is cached
-- **Cost**: Hive decrypts every entry when it opens an encrypted box, so `start()` takes longer as the cache grows. Measured on a desktop CPU (AOT) with 30 KB bodies, opening the box took the times below; a phone is expected to take several times longer (not measured on a device). Each store takes about 0.3 ms longer. Keep `cacheMaxSize` modest when enabling it
+- **Cost**: Bodies are read one at a time (see "Storage Format" in [8]), so startup does not decrypt every entry. Measured on a desktop CPU (AOT) with 30 KB bodies, the results were as follows; a phone is expected to take several times longer (not measured on a device)
 
-| Cache total | Plain | Encrypted |
-| --- | --- | --- |
-| 29 MB | 94 ms | 436 ms |
-| 88 MB | 282 ms | 1,319 ms |
-| 199 MB | 656 ms | 3,170 ms |
+| Cache total | Open (plain) | Open (encrypted) | Memory added on open | Read of one entry when served (encrypted) | Store of one entry (plain / encrypted) |
+| --- | --- | --- | --- | --- | --- |
+| 29 MB | 99 ms | 92 ms | about 1 MB | 0.4 ms | 0.3 ms / 0.7 ms |
+| 88 MB | 262 ms | 333 ms | about 1–6 MB | 0.4 ms | 0.2 ms / 0.8 ms |
+| 199 MB | 656 ms | 749 ms | about 5–6 MB | 0.9 ms | 0.4 ms / 1.3 ms |
 
-- **When switched on**: An existing plain `proxy_cache` is read one entry at a time into the encrypted box, and the plain file is deleted. An entry that cannot be moved is dropped and the rest keep moving; the count is reported at the end (`ProxyEventType.errorOccurred`, `phase: cacheEncryptionMigration`, `failedCount`), since leaving no plain file behind comes first
-  - The move runs inside `start()` (inside storage initialization), and cookie APIs wait for it. On a desktop CPU with 30 KB bodies it took about 0.7 s for 29 MB and 7 s for 199 MB
-  - The file is deleted the ordinary way; erasing the underlying flash storage is not guaranteed. If the deletion fails, the move is retried at the next startup
-- **When switched off**: The encrypted box is deleted without being restored in plain form; the cache starts empty. A failed deletion does not stop startup (`ProxyEventType.errorOccurred`, `phase: cacheEncryptionCleanup`)
-- **Key check**: The cache is not part of the startup check (section [4], "Decision Tables"). When the key does not match, the cache is emptied rather than failing startup, because the responses can be fetched again. The encrypted box is deleted when the key is regenerated and when `recoverEncryptedStorage()` deletes the key (it is not listed in the result of `recoverEncryptedStorage()`)
+  - The open time is Hive reading the whole file to check its CRCs, and barely depends on encryption. With the 0.21.0 format (every entry in one box), encryption took 436 ms for 29 MB and 3,170 ms for 199 MB, and the whole cache stayed in memory
+- **When switched on** (including an update from the default of 0.21.0 and earlier): An existing plain pair (`proxy_cache_index`, `proxy_cache_body`) or a `proxy_cache` of 0.21.0 and earlier is read one entry at a time into the encrypted pair, and the plain files are deleted. An entry that cannot be moved is dropped and the rest keep moving; the count is reported at the end (`ProxyEventType.errorOccurred`, `phase: cacheEncryptionMigration`, `failedCount`), since leaving no plain file behind comes first
+  - The move runs inside `start()` (inside storage initialization), and cookie APIs wait for it. On a desktop CPU with 30 KB bodies, moving a `proxy_cache` of 0.21.0 and earlier took about 1.1 s for 29 MB and 7.5 s for 199 MB. It happens only once
+  - The files are deleted the ordinary way; erasing the underlying flash storage is not guaranteed. If the deletion fails, the move is retried at the next startup
+- **When switched off**: The encrypted pair (and a `proxy_cache_secure` of 0.21.0) is deleted without being restored in plain form; the cache starts empty. A failed deletion does not stop startup (`ProxyEventType.errorOccurred`, `phase: cacheEncryptionCleanup`)
+- **Key check**: The cache is not part of the startup check (section [4], "Decision Tables"). When the key does not match, the cache is emptied rather than failing startup, because the responses can be fetched again. The encrypted pair is deleted when the key is regenerated and when `recoverEncryptedStorage()` deletes the key (it is not listed in the result of `recoverEncryptedStorage()`)
 
 ### TTL (Time to Live) and Stale Period Management
 
@@ -2653,7 +2541,7 @@ class ProxyConfig {
   final bool enableReplayHeader; // Mark requests sent from the queue (default: true)
   final String replayHeaderName; // Header marking requests sent from the queue (default: "X-Offline-Replay")
   final bool enableUpstreamCompression; // Compress the upstream link with gzip (default: true)
-  final bool encryptResponseCache; // Encrypt the response cache (default: false)
+  final bool encryptResponseCache; // Encrypt the response cache (default: true)
   final DropPolicy dropPolicy; // How a request that stopped retrying is handled (default: quarantine)
   final int quarantineMaxCount; // Maximum number of quarantined requests (default: 1000, 0 = no limit)
   final Duration quarantineRetention; // Retention of quarantined requests (default: 30 days, Duration.zero = no limit)

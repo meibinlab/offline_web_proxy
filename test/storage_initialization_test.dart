@@ -366,18 +366,18 @@ void main() {
         ),
         throwsA(isA<ProxyStartException>()),
       );
-      await Hive.box('proxy_cache').close();
+      await Hive.box('proxy_cache_index_secure').close();
 
       await proxy.start(config: const ProxyConfig(origin: _origin));
 
-      expect(Hive.isBoxOpen('proxy_cache'), isTrue);
+      expect(Hive.isBoxOpen('proxy_cache_index_secure'), isTrue);
     });
 
     /// 段階 2 の失敗時は、この呼び出しで開いた Box だけを閉じ、他の処理が
     /// 開いていた Box は閉じないこと
     test('closes only the boxes stage 2 opened when it fails', () async {
       await Hive.initFlutter();
-      await Hive.openBox('proxy_cache');
+      await Hive.openBox('proxy_cache_index');
       // Box のファイル名と同じディレクトリを置き、段階 2 の途中で失敗させる
       Directory(
         '$hiveTestDirectory${Platform.pathSeparator}proxy_idempotency.hive',
@@ -387,7 +387,12 @@ void main() {
       final uncaughtErrors = <Object>[];
       await runZonedGuarded(() async {
         try {
-          await proxy.start(config: const ProxyConfig(origin: _origin));
+          await proxy.start(
+            config: const ProxyConfig(
+              origin: _origin,
+              encryptResponseCache: false,
+            ),
+          );
         } catch (error) {
           startError = error;
         }
@@ -411,7 +416,9 @@ void main() {
       // 失敗より前に段階 2 が開いた Box は閉じていること
       expect(Hive.isBoxOpen('proxy_web_storage'), isFalse);
       // テストが先に開いていた Box は閉じていないこと
-      expect(Hive.isBoxOpen('proxy_cache'), isTrue);
+      expect(Hive.isBoxOpen('proxy_cache_index'), isTrue);
+      // 段階 2 が新たに開いた本文の LazyBox は閉じていること
+      expect(Hive.isBoxOpen('proxy_cache_body'), isFalse);
     });
 
     /// 共有している段階 1 の失敗が、別の error zone から待っている呼び出しにも

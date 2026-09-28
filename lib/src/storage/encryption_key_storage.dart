@@ -88,10 +88,12 @@ class ProxyStorageTestHooks {
   /// 遅らせると、移行がロックを保持している状態を再現できます。
   final Future<void> Function(ProxyStorageBox kind)? beforeLegacyBoxCleared;
 
-  /// 平文の応答キャッシュを暗号化した Box へ 1 件移す直前に呼ぶ処理です。
+  /// 応答キャッシュの記録を 1 件移す直前に呼ぶ処理です。
   ///
-  /// 例外を送出すると、その記録を移せなかった場合を再現できます。
-  final Future<void> Function(Object key)? beforePlainCacheEntryMoved;
+  /// 平文の記録を暗号化した Box へ移す場合と、0.21.0 以前の形式から移す
+  /// 場合に呼びます。例外を送出すると、その記録を移せなかった場合を再現
+  /// できます。
+  final Future<void> Function(Object key)? beforeCacheEntryMoved;
 
   /// テスト用の設定を生成します。
   ///
@@ -102,7 +104,7 @@ class ProxyStorageTestHooks {
   /// [keyRereadAttempts] は鍵を読み直す回数です。
   /// [storageLockTimeout] は排他を取得するまでの上限時間です。
   /// [beforeLegacyBoxCleared] は旧 Box を空にする直前に呼ぶ処理です。
-  /// [beforePlainCacheEntryMoved] は平文の応答キャッシュを 1 件移す直前に
+  /// [beforeCacheEntryMoved] は応答キャッシュの記録を 1 件移す直前に
   /// 呼ぶ処理です。
   const ProxyStorageTestHooks({
     this.keyStorage,
@@ -112,6 +114,6 @@ class ProxyStorageTestHooks {
     this.keyRereadAttempts,
     this.storageLockTimeout,
     this.beforeLegacyBoxCleared,
-    this.beforePlainCacheEntryMoved,
+    this.beforeCacheEntryMoved,
   });
 }

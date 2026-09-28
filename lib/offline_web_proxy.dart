@@ -101,6 +101,7 @@ import 'src/storage/encrypted_storage_integrity.dart';
 import 'src/storage/encryption_key_reader.dart';
 import 'src/storage/encryption_key_storage.dart';
 import 'src/storage/hive_frame_inspector.dart';
+import 'src/storage/response_cache_store.dart';
 import 'src/storage/storage_order.dart';
 
 export 'src/exceptions/exceptions.dart';
@@ -154,14 +155,6 @@ typedef WarmupErrorCallback = void Function(String path, String error);
 
 const String _encryptedCookieBoxName = 'proxy_cookies_secure';
 
-/// 平文で保存する応答キャッシュの Box 名。
-const String _plainCacheBoxName = 'proxy_cache';
-
-/// 暗号化して保存する応答キャッシュの Box 名。
-///
-/// 鍵の照合（[_encryptedBoxNames]）には含めない。鍵と合わない場合は、上流から
-/// 取り直せるため空にして続ける。
-const String _encryptedCacheBoxName = 'proxy_cache_secure';
 const String _legacyCookieBoxName = 'proxy_cookies';
 const String _portPreferenceBoxName = 'proxy_port_preferences';
 const String _webStorageBoxName = 'proxy_web_storage';
@@ -604,8 +597,11 @@ class OfflineWebProxy {
   Timer? _queueDrainTimer;
   Timer? _cachePurgeTimer;
 
-  /// キャッシュデータの永続化ボックス。
-  Box? _cacheBox;
+  /// 応答キャッシュ（メタデータの Box と本文の LazyBox の組）。
+  ///
+  /// 暗号化する場合も、鍵の照合（[_encryptedBoxNames]）には含めません。
+  /// 鍵と合わない場合は、上流から取り直せるため空にして続けます。
+  ResponseCacheStore? _cacheStore;
 
   /// 応答キャッシュの本文の大きさの合計。分からない場合は `null`。
   ///
@@ -1056,7 +1052,7 @@ class OfflineWebProxy {
       }
 
       // Hiveボックスを閉じる
-      await _cacheBox?.close();
+      await _cacheStore?.close();
       await _queueBox?.close();
       await _cookieBox?.close();
       await _portPreferenceBox?.close();
@@ -2400,7 +2396,7 @@ class OfflineWebProxy {
   Future<void> clearCache() async {
     try {
       await _cacheWriteLock.synchronized(() async {
-        await _cacheBox?.clear();
+        await _cacheStore?.clear();
         _cacheTotalBytes = null;
       });
       _emitEvent(ProxyEventType.cacheCleared, '', {});
@@ -2420,11 +2416,12 @@ class OfflineWebProxy {
     try {
       final keysToDelete = <String>[];
 
-      if (_cacheBox != null) {
-        final keys = _cacheBox!.keys.toList(growable: false);
+      final store = _cacheStore;
+      if (store != null) {
+        final keys = store.keys.toList(growable: false);
         for (var i = 0; i < keys.length; i++) {
           final key = keys[i];
-          final entry = _cacheBox!.get(key) as Map?;
+          final entry = store.metadata(key as Object);
           if (entry != null) {
             if (_determineStatus(entry) == CacheStatus.expired) {
               keysToDelete.add(key as String);
@@ -2440,16 +2437,16 @@ class OfflineWebProxy {
           // 保存と交互に進むと合計の控えがずれるため、ロックの中で消す。
           // 走査の後に保存し直された記録は、期限を確かめ直して残す
           await _cacheWriteLock.synchronized(() async {
-            final box = _cacheBox;
-            if (box == null || !box.isOpen) {
+            final store = _cacheStore;
+            if (store == null || !store.isOpen) {
               return;
             }
             final expiredKeys = keysToDelete.where((key) {
-              final entry = box.get(key);
-              return entry is Map &&
+              final entry = store.metadata(key);
+              return entry != null &&
                   _determineStatus(entry) == CacheStatus.expired;
             }).toList(growable: false);
-            await box.deleteAll(expiredKeys);
+            await store.deleteAll(expiredKeys);
             _cacheTotalBytes = null;
           });
         }
@@ -2476,7 +2473,7 @@ class OfflineWebProxy {
       final normalizedUrl = _normalizeUrl(url);
       final cacheKey = _generateCacheKey(normalizedUrl);
       await _cacheWriteLock.synchronized(() async {
-        await _cacheBox?.delete(cacheKey);
+        await _cacheStore?.delete(cacheKey);
         _cacheTotalBytes = null;
       });
     } catch (e) {
@@ -2498,7 +2495,8 @@ class OfflineWebProxy {
   Future<List<CacheEntry>> getCacheList({int? limit, int? offset}) async {
     try {
       final entries = <CacheEntry>[];
-      final keys = _cacheBox?.keys.toList() ?? [];
+      final store = _cacheStore;
+      final keys = store?.keys.toList() ?? [];
 
       final startIndex = offset ?? 0;
       final endIndex = limit != null
@@ -2507,7 +2505,7 @@ class OfflineWebProxy {
 
       for (int i = startIndex; i < endIndex; i++) {
         final key = keys[i];
-        final data = _cacheBox!.get(key) as Map?;
+        final data = store!.metadata(key as Object);
         if (data != null) {
           entries.add(_mapToCacheEntry(data));
         }
@@ -2534,9 +2532,10 @@ class OfflineWebProxy {
       int expiredEntries = 0;
       int totalSize = 0;
 
-      if (_cacheBox != null) {
-        for (final key in _cacheBox!.keys) {
-          final entry = _cacheBox!.get(key) as Map?;
+      final store = _cacheStore;
+      if (store != null) {
+        for (final key in store.keys) {
+          final entry = store.metadata(key as Object);
           if (entry != null) {
             totalEntries++;
             totalSize += (entry['sizeBytes'] as int? ?? 0);
@@ -3997,13 +3996,14 @@ class OfflineWebProxy {
   /// 保存領域の世代が変わっていない場合に `true` です。
   bool get _isDataStageFresh =>
       _keyStageGeneration == _storageGeneration &&
+      (_cacheStore?.isOpen ?? false) &&
       _dataStageBoxes.every((box) => box != null && box.isOpen);
 
-  /// 段階 2 で開く Box の一覧を返します（移行を待つ旧平文 Box は含みません）。
+  /// 段階 2 で開く Box の一覧を返します（移行を待つ旧平文 Box と、応答
+  /// キャッシュの組は含みません）。
   ///
   /// 段階 2 の結果をそのまま使えるか（どれも閉じられていないか）の判定に使います。
   List<Box?> get _dataStageBoxes => [
-        _cacheBox,
         _webStorageBox,
         _idempotencyBox,
         _queueBox,
@@ -4044,9 +4044,9 @@ class OfflineWebProxy {
       throw StateError('Encrypted storage is not initialized');
     }
 
-    final openedBoxes = <Box>[];
+    final openedBoxes = <BoxBase>[];
     try {
-      _cacheBox = await _openCacheBox(
+      _cacheStore = await _openCacheStore(
         directoryPath,
         encryptionKey,
         openedBoxes,
@@ -4074,7 +4074,7 @@ class OfflineWebProxy {
       await _prepareLegacyMigration(directoryPath, openedBoxes);
     } catch (_) {
       await _closeBoxesQuietly(openedBoxes);
-      _cacheBox = null;
+      _cacheStore = null;
       _cacheTotalBytes = null;
       _webStorageBox = null;
       _idempotencyBox = null;
@@ -4094,7 +4094,7 @@ class OfflineWebProxy {
   /// 元の失敗を呼び出し側へ伝えるため、閉じる処理の失敗は送出しません。
   ///
   /// [boxes] 閉じる Box の一覧。
-  Future<void> _closeBoxesQuietly(Iterable<Box> boxes) async {
+  Future<void> _closeBoxesQuietly(Iterable<BoxBase> boxes) async {
     for (final box in boxes) {
       if (!box.isOpen) {
         continue;
@@ -4216,7 +4216,7 @@ class OfflineWebProxy {
   /// [openedBoxes] 新たに開いた Box を記録する一覧。失敗時に閉じるために使います。
   Future<void> _prepareLegacyMigration(
     String directoryPath,
-    List<Box> openedBoxes,
+    List<BoxBase> openedBoxes,
   ) async {
     for (final entry in _legacyBoxNames.entries) {
       final kind = entry.key;
@@ -5097,8 +5097,8 @@ class OfflineWebProxy {
   /// 別のインスタンスが開いている暗号化 Box も、ファイルを置き換える前に閉じます。
   /// 閉じる処理は実行中の自動圧縮の終了を待ちます。
   Future<void> _closeAllProxyBoxes() async {
+    await _cacheStore?.close();
     final boxes = <Box?>[
-      _cacheBox,
       _queueBox,
       _cookieBox,
       _portPreferenceBox,
@@ -5116,16 +5116,15 @@ class OfflineWebProxy {
       }
     }
 
-    for (final boxName in [
-      ..._encryptedBoxNames.values,
-      _encryptedCacheBoxName,
-    ]) {
+    for (final boxName in _encryptedBoxNames.values) {
       if (Hive.isBoxOpen(boxName)) {
         await Hive.box(boxName).close();
       }
     }
+    // 別のインスタンスが開いている応答キャッシュも、ファイルを消す前に閉じる
+    await ResponseCacheStore.closeAllOpen();
 
-    _cacheBox = null;
+    _cacheStore = null;
     _cacheTotalBytes = null;
     _queueBox = null;
     _cookieBox = null;
@@ -5357,7 +5356,7 @@ class OfflineWebProxy {
       await Hive.initFlutter();
     }
 
-    final openedBoxes = <Box>[];
+    final openedBoxes = <BoxBase>[];
     try {
       final portPreferenceBox =
           await _openBoxTracked(_portPreferenceBoxName, openedBoxes);
@@ -5427,7 +5426,7 @@ class OfflineWebProxy {
   /// Returns: 開いた Box。既に開いている場合はその Box。
   Future<Box> _openBoxTracked(
     String name,
-    List<Box> openedBoxes, {
+    List<BoxBase> openedBoxes, {
     Uint8List? encryptionKey,
   }) async {
     final wasOpen = Hive.isBoxOpen(name);
@@ -5442,12 +5441,13 @@ class OfflineWebProxy {
     return box;
   }
 
-  /// 応答キャッシュの Box を、[ProxyConfig.encryptResponseCache] に従って開きます。
+  /// 応答キャッシュを、[ProxyConfig.encryptResponseCache] に従って開きます。
   ///
-  /// 暗号化する場合は、平文の Box が残っていれば暗号化した Box へ移してから
-  /// 平文のファイルを削除します。暗号化しない場合は、暗号化した Box が
-  /// 残っていても平文へ戻さずに削除します。暗号化した内容を平文で書き出さない
-  /// ためで、キャッシュは空から始まります。
+  /// 暗号化しない場合は、暗号化した記録が残っていても平文へ戻さずに削除します。
+  /// 暗号化した内容を平文で書き出さないためで、キャッシュは空から始まります。
+  /// 古い形式の記録や、暗号化する前の平文の記録は、開いた後に移します
+  /// （[ResponseCacheStore.open]）。移行の失敗は
+  /// [ProxyEventType.errorOccurred] で知らせ、起動は続けます。
   ///
   /// 段階 2 の中で、初期化のロックを保持したまま呼びます。
   ///
@@ -5455,94 +5455,31 @@ class OfflineWebProxy {
   /// [encryptionKey] 暗号化 Box の鍵。
   /// [openedBoxes] この呼び出しで開いた Box を加える一覧。
   ///
-  /// Returns: 開いた応答キャッシュの Box。
-  Future<Box> _openCacheBox(
+  /// Returns: 開いた応答キャッシュ。
+  Future<ResponseCacheStore> _openCacheStore(
     String directoryPath,
     Uint8List encryptionKey,
-    List<Box> openedBoxes,
+    List<BoxBase> openedBoxes,
   ) async {
-    if (!(_config?.encryptResponseCache ?? false)) {
+    final encrypt = _config?.encryptResponseCache ?? true;
+    if (!encrypt) {
       await _deleteEncryptedCacheBox(directoryPath);
-      return _openBoxTracked(_plainCacheBoxName, openedBoxes);
     }
 
-    // 鍵と合わない Box は、Hive が開くときに空へ切り詰める
-    final box = await _openBoxTracked(
-      _encryptedCacheBoxName,
-      openedBoxes,
+    return ResponseCacheStore.open(
+      directoryPath: directoryPath,
+      encrypt: encrypt,
       encryptionKey: encryptionKey,
-    );
-    await _movePlainCacheInto(box, directoryPath);
-    return box;
-  }
-
-  /// 平文の応答キャッシュを暗号化した Box へ移し、平文のファイルを削除します。
-  ///
-  /// 平文の Box は 1 件ずつ読む形で開き、キャッシュ全体を二重にメモリへ
-  /// 載せないようにします。移せなかった記録は捨てて残りを移し続け、最後に
-  /// 件数を [ProxyEventType.errorOccurred] で知らせます。キャッシュは上流から
-  /// 取り直せるうえ、平文のファイルを残さないことを優先するためです。
-  /// 平文のファイルを削除できなかった場合は、次の起動で移し直します。
-  /// 例外は送出しません。
-  ///
-  /// [encryptedBox] 移し先の、暗号化した応答キャッシュの Box。
-  /// [directoryPath] Hive の保存先ディレクトリ。
-  Future<void> _movePlainCacheInto(
-      Box encryptedBox, String directoryPath) async {
-    try {
-      if (!await Hive.boxExists(_plainCacheBoxName, path: directoryPath)) {
-        return;
-      }
-
-      // 別のインスタンスが平文のまま開いていれば、閉じてから移す
-      if (Hive.isBoxOpen(_plainCacheBoxName)) {
-        await Hive.box(_plainCacheBoxName).close();
-      }
-
-      final plainBox = await Hive.openLazyBox(
-        _plainCacheBoxName,
-        path: directoryPath,
-      );
-      var failedCount = 0;
-      Object? lastError;
-      try {
-        for (final key in plainBox.keys.toList(growable: false)) {
-          try {
-            await _storageTestHooks?.beforePlainCacheEntryMoved?.call(key);
-            final value = await plainBox.get(key);
-            if (value != null) {
-              await encryptedBox.put(key, value);
-            }
-          } catch (error) {
-            failedCount++;
-            lastError = error;
-          }
-        }
-      } finally {
-        await plainBox.close();
-      }
-      if (failedCount > 0) {
+      openedBoxes: openedBoxes,
+      onMigrationError: (phase, error, {failedCount}) {
         _emitEvent(ProxyEventType.errorOccurred, '', {
-          'phase': 'cacheEncryptionMigration',
-          'failedCount': failedCount,
-          'error': lastError.toString(),
-        });
-      }
-    } catch (error) {
-      _emitEvent(ProxyEventType.errorOccurred, '', {
-        'phase': 'cacheEncryptionMigration',
-        'error': error.toString(),
-      });
-    } finally {
-      try {
-        await Hive.deleteBoxFromDisk(_plainCacheBoxName, path: directoryPath);
-      } catch (error) {
-        _emitEvent(ProxyEventType.errorOccurred, '', {
-          'phase': 'cacheEncryptionMigration',
+          'phase': phase,
+          if (failedCount != null) 'failedCount': failedCount,
           'error': error.toString(),
         });
-      }
-    }
+      },
+      beforeEntryMoved: _storageTestHooks?.beforeCacheEntryMoved,
+    );
   }
 
   /// 暗号化した応答キャッシュの Box をファイルごと削除します。
@@ -5556,10 +5493,7 @@ class OfflineWebProxy {
   /// [directoryPath] Hive の保存先ディレクトリ。
   Future<void> _deleteEncryptedCacheBox(String directoryPath) async {
     try {
-      await Hive.deleteBoxFromDisk(
-        _encryptedCacheBoxName,
-        path: directoryPath,
-      );
+      await ResponseCacheStore.deleteEncrypted(directoryPath);
     } catch (error) {
       _emitEvent(ProxyEventType.errorOccurred, '', {
         'phase': 'cacheEncryptionCleanup',
@@ -7293,7 +7227,7 @@ window.__offline_web_proxy_web_storage_bridge = {
           Uint8List bodyBytes,
         })? rangeEntry,
       })?> _loadCachedFallbackEntry(String cacheKey) async {
-    final data = _cacheBox?.get(cacheKey) as Map?;
+    final data = await _cacheStore?.read(cacheKey);
     if (data == null) {
       return null;
     }
@@ -8448,17 +8382,17 @@ window.__offline_web_proxy_web_storage_bridge = {
 
     await _cacheWriteLock.synchronized(() async {
       // 閉じた Box への書き込みは従来どおり失敗させ、呼び出し側でイベントにする
-      final box = _cacheBox;
-      if (box == null) {
+      final store = _cacheStore;
+      if (store == null) {
         return;
       }
 
-      final previous = box.isOpen ? box.get(cacheKey) : null;
-      await box.put(cacheKey, data);
+      final previous = store.isOpen ? store.metadata(cacheKey) : null;
+      await store.put(cacheKey, data);
       final knownTotal = _cacheTotalBytes;
       if (knownTotal != null) {
         final previousSize =
-            previous is Map ? (previous['sizeBytes'] as int? ?? 0) : 0;
+            previous != null ? (previous['sizeBytes'] as int? ?? 0) : 0;
         _cacheTotalBytes = knownTotal - previousSize + bodyBytes.length;
       }
 
@@ -8471,19 +8405,19 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// 控えた値が無い場合は全件を数え直して控えます。[_cacheWriteLock] の中で
   /// 呼びます。
   ///
-  /// [box] 応答キャッシュの Box。
+  /// [store] 応答キャッシュ。
   ///
   /// Returns: 本文の大きさ（`sizeBytes`）の合計。
-  int _resolveCacheTotalBytes(Box box) {
+  int _resolveCacheTotalBytes(ResponseCacheStore store) {
     final known = _cacheTotalBytes;
     if (known != null) {
       return known;
     }
 
     var total = 0;
-    for (final key in box.keys) {
-      final entry = box.get(key);
-      if (entry is Map) {
+    for (final key in store.keys) {
+      final entry = store.metadata(key as Object);
+      if (entry != null) {
         total += entry['sizeBytes'] as int? ?? 0;
       }
     }
@@ -8504,22 +8438,22 @@ window.__offline_web_proxy_web_storage_bridge = {
   ///
   /// [protectedKey] 削除しない記録のキー。いま保存した記録を指定します。
   Future<void> _evictCacheOverLimit({String? protectedKey}) async {
-    final box = _cacheBox;
+    final store = _cacheStore;
     final maxSize = _config?.cacheMaxSize ?? 0;
-    if (box == null || !box.isOpen || maxSize <= 0) {
+    if (store == null || !store.isOpen || maxSize <= 0) {
       return;
     }
 
-    if (_resolveCacheTotalBytes(box) <= maxSize) {
+    if (_resolveCacheTotalBytes(store) <= maxSize) {
       return;
     }
 
     // 控えの合計に頼らず、並べる記録と同じ走査で数え直す
     var total = 0;
     final entries = <({String key, DateTime createdAt, int size})>[];
-    for (final key in box.keys) {
-      final entry = box.get(key);
-      if (entry is! Map) {
+    for (final key in store.keys) {
+      final entry = store.metadata(key as Object);
+      if (entry == null) {
         continue;
       }
       final size = entry['sizeBytes'] as int? ?? 0;
@@ -8557,7 +8491,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       return;
     }
 
-    await box.deleteAll(evictedKeys);
+    await store.deleteAll(evictedKeys);
     _cacheTotalBytes = total;
     _emitEvent(ProxyEventType.cacheEvicted, '', {
       'reason': 'cacheMaxSize',
