@@ -100,9 +100,10 @@ enum ProxyEventType {
   /// 上流への到達を確認し、転送を再開した
   upstreamCircuitClosed,
 
-  /// 暗号化鍵と合わない Cookie の暗号化 Box を破棄した
+  /// 暗号化鍵と合わない、または壊れた Cookie の暗号化 Box を破棄した
   ///
   /// `data['reason']` に `StorageIntegrityFailure` の名前が入ります。
-  /// 破棄した後は再ログインが必要です。
+  /// 照合では問題が無くても Hive が開けない Box（途中の記録が壊れている）は、
+  /// `corrupted` として破棄します。破棄した後は再ログインが必要です。
   cookieStorageDiscarded,
 }
