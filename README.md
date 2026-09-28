@@ -296,6 +296,7 @@ Notes:
   - Answer 4xx to reject a first forward. A 5xx answer puts the request in the queue, and it is sent again with this header. So is a 4xx answer that never reaches the proxy, for example after a timeout, so give the same answer from the queue to a request already rejected under the same idempotency key.
   - A header of the same name sent by the screen is removed from every request forwarded as the screen sent it (read requests included) and replaced with the proxy's value on requests sent from the queue.
   - **This is not authentication.** Any request that reaches the upstream without the proxy can carry the header.
+- `cacheMaxSize` caps the total body size of the response cache (200 MB by default, `0` for no limit). Beyond it, entries are removed oldest stored first until the total fits within 90% of the limit, and `ProxyEventType.cacheEvicted` is raised. A response whose body alone exceeds the limit is not stored.
 - `cacheTtl` and `cacheStale` **replace** the default maps rather than merging with them. Always keep a `default` entry so that unlisted content types still resolve.
 - `text/html` defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. **Long offline operation requires tuning both `cacheTtl` and `cacheStale`.** `cacheStale` has no JavaScript entry, so scripts fall back to `default` (3 days).
 
