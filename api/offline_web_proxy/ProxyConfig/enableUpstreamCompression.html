@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the forceCachePaths property from the ProxyConfig class, for the Dart programming language.">
-  <title>forceCachePaths property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the enableUpstreamCompression property from the ProxyConfig class, for the Dart programming language.">
+  <title>enableUpstreamCompression property - ProxyConfig class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -31,9 +31,9 @@
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
     <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">forceCachePaths property</li>
+    <li class="self-crumb">enableUpstreamCompression property</li>
   </ol>
-  <div class="self-name">forceCachePaths</div>
+  <div class="self-name">enableUpstreamCompression</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -57,58 +57,45 @@
     data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">forceCachePaths</span> property 
+<h1><span class="kind-property">enableUpstreamCompression</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
-        <a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>&gt;</span>
-        <span class="name ">forceCachePaths</span>
+        <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a>
+        <span class="name ">enableUpstreamCompression</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>Paths whose responses are cached even when they carry
-<code>Cache-Control: no-store</code>.</p>
-<p>Many existing web systems send <code>no-store</code> on every response, which leaves
-the proxy with nothing to serve offline. Listing the paths a screen needs
-makes those responses cacheable without weakening the rule everywhere:
-there is deliberately no switch that disables <code>no-store</code> handling as a
-whole.</p>
-<p>Only <code>GET</code> responses are stored, and a listed path is still skipped when
-keeping the response would leak or corrupt per-user state:</p>
-<ul>
-<li>the response carries <code>Set-Cookie</code>, which would persist a session on the
-device and replay it later</li>
-<li>the response carries <code>Vary</code>, which the URL-only cache key cannot
-honour, unless it names <code>Accept-Encoding</code> alone: the proxy sends the
-same <code>Accept-Encoding</code> on every upstream request and decompresses gzip
-before storing (see <a href="../../offline_web_proxy/ProxyConfig/enableUpstreamCompression.html">enableUpstreamCompression</a>), so such a response
-cannot vary</li>
-<li>the request carried <code>Authorization</code>, so the response belongs to one user</li>
-</ul>
-<p>A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason,
-so a path that never becomes available offline can be diagnosed.</p>
-<p><strong>Security</strong>: <code>no-store</code> asks the client not to write the response to
-storage at all. The response cache is not encrypted, so the body of a
-listed path is kept on the device in the clear. Weigh that against what
-the screen contains before listing it.</p>
-<p><strong>Freshness</strong>: A response that says <code>no-store</code> usually says <code>max-age=0</code>
-as well. Honouring it would make the entry stale the moment it is stored,
-so the upstream freshness directives are ignored for a listed path and
-<a href="../../offline_web_proxy/ProxyConfig/cacheTtl.html">cacheTtl</a> decides the TTL instead.</p>
-<p>Patterns use <code>*</code> for one path segment and <code>**</code> across segments; a pattern
-without either is matched exactly. Query strings are not part of the
-comparison.</p>
-<p><strong>Example</strong>: <code>['/app/**', '/js/*.js']</code>
-<strong>Default</strong>: <code>[]</code> (no path is force-cached)</p>
+  <p>Whether to ask the upstream for gzip-compressed responses.</p>
+<p>When enabled, every request the proxy sends upstream — forwarded
+requests, requests sent from the queue, warmup and mirrored origins —
+carries <code>Accept-Encoding: gzip</code>, so the upstream link carries compressed
+bodies. A gzip body is decompressed before it is cached, rewritten or
+returned to the WebView: <code>Content-Encoding</code> is removed and
+<code>Content-Length</code> follows the decompressed body. The WebView always
+receives an uncompressed body, because the loopback link gains nothing
+from compression.</p>
+<p>A response without a body (<code>HEAD</code>, <code>204</code>, <code>304</code>) only loses its
+<code>Content-Encoding</code>. A body that cannot be decompressed — corrupt,
+truncated, or larger than 64 MB once decompressed — is passed through
+unchanged, with its <code>Content-Encoding</code>, and is not cached. A coding the
+proxy does not ask for, such as <code>br</code>, is passed through as before. A
+request carrying <code>Range</code> is sent <code>identity</code>, because a range of a
+compressed representation cannot be decompressed on its own.</p>
+<p>When disabled, the proxy sends <code>Accept-Encoding: identity</code>, as 0.19.0
+and earlier did. The same value is sent on every route in both cases,
+which keeps caching a response whose <code>Vary</code> names <code>Accept-Encoding</code>
+alone safe.</p>
+<p><strong>Default</strong>: <code>true</code></p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final List&lt;String&gt; forceCachePaths;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final bool enableUpstreamCompression;</code></pre>
 </section>
 
 
@@ -126,7 +113,7 @@ comparison.</p>
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">forceCachePaths property</li>
+    <li class="self-crumb">enableUpstreamCompression property</li>
 </ol>
 
 

@@ -250,6 +250,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
   acceptedAtHeaderName: 'X-Offline-Accepted-At',
   enableReplayHeader: true,
   replayHeaderName: 'X-Offline-Replay',
+  enableUpstreamCompression: true,
   offlineMissResponse: ProxyResponseConfig(
     statusCode: 504,
     contentType: 'application/json; charset=utf-8',
@@ -316,7 +317,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>forceCachePaths</code> lists the paths stored even when the response says <code>Cache-Control: no-store</code>. On a server that sends <code>no-store</code> everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes <code>no-store</code> handling proxy-wide.
 <ul>
 <li>Even on a match, a response carrying <code>Set-Cookie</code>, a response carrying <code>Vary</code> (unless it names <code>Accept-Encoding</code> alone), or a request carrying <code>Authorization</code>, is not stored. A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason, so a path that never becomes available offline can be diagnosed.</li>
-<li>A <code>Vary</code> naming <code>Accept-Encoding</code> alone is stored because the proxy pins <code>Accept-Encoding: identity</code> on every upstream request, so the response cannot vary. Tomcat, nginx and Apache all add that <code>Vary</code> by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A <code>Vary</code> naming <code>*</code> or any other header is still skipped.</li>
+<li>A <code>Vary</code> naming <code>Accept-Encoding</code> alone is stored because the proxy sends the same <code>Accept-Encoding</code> on every upstream route and decompresses gzip before storing, so the response cannot vary. Tomcat, nginx and Apache all add that <code>Vary</code> by default once compression is on, so skipping on it would remove the screen's HTML, JS and CSS in one go. A <code>Vary</code> naming <code>*</code> or any other header is still skipped.</li>
 <li>For a matching path the upstream <code>max-age</code> and <code>Expires</code> are ignored and <code>cacheTtl</code> decides the expiry, because <code>no-store</code> is usually paired with <code>max-age=0</code>, which would make the entry stale the moment it is stored.</li>
 <li><strong>The response cache is not encrypted.</strong> The body of a listed path stays on the device in the clear, so weigh what the screen contains before listing it.</li>
 </ul>
@@ -351,6 +352,13 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li>Answer 4xx to reject a first forward. A 5xx answer puts the request in the queue, and it is sent again with this header. So is a 4xx answer that never reaches the proxy, for example after a timeout, so give the same answer from the queue to a request already rejected under the same idempotency key.</li>
 <li>A header of the same name sent by the screen is removed from every request forwarded as the screen sent it (read requests included) and replaced with the proxy's value on requests sent from the queue.</li>
 <li><strong>This is not authentication.</strong> Any request that reaches the upstream without the proxy can carry the header.</li>
+</ul>
+</li>
+<li>With <code>enableUpstreamCompression</code> on (the default), the proxy sends <code>Accept-Encoding: gzip</code> upstream and decompresses a gzip body before returning it to the WebView, which cuts the traffic on the upstream link.
+<ul>
+<li>The same value is sent on every route: forwarding, requests sent from the queue, warmup and mirrored origins. Caching, HTML and CSS rewriting and the response to the WebView all use the decompressed body.</li>
+<li>A body that cannot be decompressed (corrupt, truncated, or larger than 64 MB once decompressed) is returned as is and not cached. Codings other than gzip, such as br, are passed through as before. A request carrying <code>Range</code> is sent <code>identity</code>.</li>
+<li>Set it to <code>false</code> to send <code>Accept-Encoding: identity</code>, as 0.19.0 and earlier did.</li>
 </ul>
 </li>
 <li><code>cacheMaxSize</code> caps the total body size of the response cache (200 MB by default, <code>0</code> for no limit). Beyond it, entries are removed oldest stored first until the total fits within 90% of the limit, and <code>ProxyEventType.cacheEvicted</code> is raised. A response whose body alone exceeds the limit is not stored.</li>
