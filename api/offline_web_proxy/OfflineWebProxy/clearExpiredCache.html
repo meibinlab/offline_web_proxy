@@ -103,13 +103,22 @@
         }
       }
 
-      for (var i = 0; i &lt; keysToDelete.length; i++) {
-        final key = keysToDelete[i];
-        await _cacheBox!.delete(key);
-
-        if (i % 200 == 0) {
-          await Future.delayed(Duration.zero);
-        }
+      if (keysToDelete.isNotEmpty) {
+        &#47;&#47; 保存と交互に進むと合計の控えがずれるため、ロックの中で消す。
+        &#47;&#47; 走査の後に保存し直された記録は、期限を確かめ直して残す
+        await _cacheWriteLock.synchronized(() async {
+          final box = _cacheBox;
+          if (box == null || !box.isOpen) {
+            return;
+          }
+          final expiredKeys = keysToDelete.where((key) {
+            final entry = box.get(key);
+            return entry is Map &amp;&amp;
+                _determineStatus(entry) == CacheStatus.expired;
+          }).toList(growable: false);
+          await box.deleteAll(expiredKeys);
+          _cacheTotalBytes = null;
+        });
       }
     }
   } catch (e) {

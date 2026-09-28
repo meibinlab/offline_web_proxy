@@ -201,7 +201,10 @@
 
 </dt>
 <dd>
-  <p>保存対象のパスに一致したが、安全のため保存を見送った</p>
+  <p>応答の保存を見送った</p>
+<p><code>data['reason']</code> に理由が入ります。<code>forceCachePaths</code> の安全側の除外
+（<code>set-cookie</code>・<code>vary</code>・<code>authorization</code>）と、本文だけで
+<code>ProxyConfig.cacheMaxSize</code> を超えた場合（<code>cacheMaxSize</code>）です。</p>
   
 
 </dd>
@@ -297,7 +300,21 @@
 
 </dt>
 <dd>
-  <p>キャッシュクリア</p>
+  <p>キャッシュクリア（<code>clearCache()</code> で全件を削除した）</p>
+  
+
+</dd>
+
+            <dt id="cacheEvicted" class="constant">
+    <span class="name ">cacheEvicted</span>
+  <span class="signature">&#8594; const <a href="../offline_web_proxy/ProxyEventType.html">ProxyEventType</a></span>
+  
+
+</dt>
+<dd>
+  <p><code>ProxyConfig.cacheMaxSize</code> を超えたため、古い応答を削除した</p>
+<p><code>data</code> には <code>reason</code>（<code>cacheMaxSize</code>）、<code>evictedCount</code>（件数）、
+<code>evictedBytes</code>（本文の大きさ）が入ります。</p>
   
 
 </dd>

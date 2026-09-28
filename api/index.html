@@ -353,6 +353,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><strong>This is not authentication.</strong> Any request that reaches the upstream without the proxy can carry the header.</li>
 </ul>
 </li>
+<li><code>cacheMaxSize</code> caps the total body size of the response cache (200 MB by default, <code>0</code> for no limit). Beyond it, entries are removed oldest stored first until the total fits within 90% of the limit, and <code>ProxyEventType.cacheEvicted</code> is raised. A response whose body alone exceeds the limit is not stored.</li>
 <li><code>cacheTtl</code> and <code>cacheStale</code> <strong>replace</strong> the default maps rather than merging with them. Always keep a <code>default</code> entry so that unlisted content types still resolve.</li>
 <li><code>text/html</code> defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. <strong>Long offline operation requires tuning both <code>cacheTtl</code> and <code>cacheStale</code>.</strong> <code>cacheStale</code> has no JavaScript entry, so scripts fall back to <code>default</code> (3 days).</li>
 </ul>

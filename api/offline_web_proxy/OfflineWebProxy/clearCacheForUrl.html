@@ -93,7 +93,10 @@
   try {
     final normalizedUrl = _normalizeUrl(url);
     final cacheKey = _generateCacheKey(normalizedUrl);
-    await _cacheBox?.delete(cacheKey);
+    await _cacheWriteLock.synchronized(() async {
+      await _cacheBox?.delete(cacheKey);
+      _cacheTotalBytes = null;
+    });
   } catch (e) {
     throw CacheOperationException(
         &#39;clearForUrl&#39;, &#39;URLのキャッシュ削除に失敗しました: $e&#39;, e is Exception ? e : null);

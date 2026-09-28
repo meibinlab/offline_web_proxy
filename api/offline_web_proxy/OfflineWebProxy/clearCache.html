@@ -84,7 +84,10 @@
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearCache() async {
   try {
-    await _cacheBox?.clear();
+    await _cacheWriteLock.synchronized(() async {
+      await _cacheBox?.clear();
+      _cacheTotalBytes = null;
+    });
     _emitEvent(ProxyEventType.cacheCleared, &#39;&#39;, {});
   } catch (e) {
     throw CacheOperationException(
