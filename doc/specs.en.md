@@ -25,11 +25,11 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 
 ### Data Stored on the Device
 
-The proxy stores data in Hive boxes and in secure storage. In an encrypted box only the values are encrypted, and the box keys stay in the clear (IDs derived from the stored time for the queue, the quarantine store and the dropped history; the domain, path, name and so on for cookies). **The queue and the quarantine store keep the request headers and body as they were sent.** The content, encryption and retention of each location are as follows.
+The proxy stores data in Hive boxes and in secure storage. In an encrypted box only the values are encrypted, and the box keys stay in the clear (IDs derived from the stored time for the queue, the quarantine store and the dropped history; the domain, path, name and so on for cookies). Hive writes the key length in a single byte, so a key over 255 bytes in UTF-8 (a cookie with a long path or name, or a long idempotency key chosen by the page) is stored as `sha256:` followed by its SHA-256 in hex. **The queue and the quarantine store keep the request headers and body as they were sent.** The content, encryption and retention of each location are as follows.
 
 | Location | Content | Encryption | Retention |
 | --- | --- | --- | --- |
-| `proxy_cookies_secure` | Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on | Values only (AES-256) | An expired cookie is removed when the cookies to send are looked up. `clearCookies()` removes them |
+| `proxy_cookies_secure` | Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on (the SHA-256 when over 255 bytes in UTF-8) | Values only (AES-256) | An expired cookie is removed when the cookies to send are looked up. `clearCookies()` removes them |
 | `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
 | `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default (see "Retention Limits" in [5]) |
 | `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged, idempotency key, time first accepted). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
@@ -37,7 +37,7 @@ The proxy stores data in Hive boxes and in secure storage. In an encrypted box o
 | `proxy_cache_index`, `proxy_cache_body` | Response cache when `encryptResponseCache` is `false`. Same content and keys as the encrypted pair | None | Same as the encrypted pair. Moved into the encrypted pair and deleted once `encryptResponseCache` is enabled |
 | `proxy_cache`, `proxy_cache_secure` | Response cache of 0.21.0 and earlier, holding the metadata and body in one value. `proxy_cache_secure` is the one written by 0.21.0 with `encryptResponseCache` enabled | `proxy_cache`: none; `proxy_cache_secure`: values only (AES-256) | Moved into the new pair and deleted at startup. With `encryptResponseCache` off, `proxy_cache_secure` is deleted without being moved |
 | `proxy_web_storage` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on | None | Until the next snapshot overwrites it |
-| `proxy_idempotency` | Idempotency keys that reached the upstream, with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
+| `proxy_idempotency` | Idempotency keys that reached the upstream (the SHA-256 when over 255 bytes in UTF-8), with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
 | `proxy_port_preferences` | The port last bound for each host | None | Until the next bind overwrites it |
 | `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store, the dropped history (and the response cache when encrypted) | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or a new key replaces it as the decision tables say (see "Decision Tables" in [4]) |
 | `proxy_queue`, `proxy_quarantined_requests`, `proxy_dropped_requests`, `proxy_cookies` | Content stored in the clear by 0.14.0 or earlier (cookies: before 0.4.0) | None | Deleted after migration to the encrypted boxes. The old queue, quarantine and dropped-history boxes are emptied before deletion |
@@ -444,6 +444,11 @@ When an encrypted box has content:
 #### Discarding the Cookie Box
 
 - Discarding the cookie box raises `ProxyEventType.cookieStorageDiscarded` with the `StorageIntegrityFailure` name in `data['reason']`
+- When the check finds no problem but Hive still cannot open the cookie box, or the box holds a value that cannot be read as a cookie (a record in the middle is broken), the box is discarded as `corrupted` and startup continues. The key and the other encrypted boxes are kept
+  - This covers records written by 0.21.0 and earlier with a key over 255 bytes in UTF-8. Hive writes the key length in a single byte, and a release build, where asserts are off, wrote the overflowed length as is, so the next start could not open the box
+  - The CRC is valid, so Hive does not truncate the box as damaged and reads the rest of the key as the value. The result depends on the first byte of the decrypted value: the open fails with `HiveError`, `RangeError` and so on, or the box opens with a value of another type. Every failure other than a file that cannot be opened (`FileSystemException`), and every value the proxy never writes, is therefore treated as damage
+  - Hive also reports the failed open as an unhandled error in the zone, even after the proxy catches it
+  - A plain cookie box from before 0.4.0 (`proxy_cookies`) that cannot be opened for the same reason is not covered and still fails startup, since that version could not start in that state either
 - The discard happens inside `start()` or a cookie API called before `start()` or after `stop()`. Events are broadcast, so an app that subscribes later never receives it
 - After startup, `ProxyDiagnostics.lastCookieStorageDiscardedAt` and `lastCookieStorageDiscardReason` report it (per instance)
 - Deletion by the recovery API raises no `cookieStorageDiscarded` and leaves the diagnostics unchanged
@@ -869,6 +874,8 @@ The proxy guarantees only that the same operation carries the same key. **Dedupl
 - **24 hours by default**: Configurable via `ProxyConfig.idempotencyRetention`. After it expires, a request carrying the key is treated as new
 - **Storage**: Persist with Hive. Valid even after app restart
 - **Expiry**: Removed by the hourly maintenance task
+- **Key length**: A key over 255 bytes in UTF-8 is recorded as its SHA-256 ("Data Stored on the Device" in [1]). Lookups use the same value, so the length makes no difference
+- **Broken records**: When the box cannot be opened, or holds a value that cannot be read as a recorded time, it is rebuilt, startup continues, and `ProxyEventType.errorOccurred` (`phase: idempotencyStoreRecovery`) reports it. This covers records written by 0.21.0 and earlier with a key over 255 bytes ("Discarding the Cookie Box" in [4]). Rebuilding loses the keys recorded within the retention period, so during that period a request with the same key is not held back as already delivered, and the request-state lookup returns `unknown` instead of `delivered`. This is chosen because it does less harm than a proxy that cannot start
 
 ## [7] Response Compression
 
@@ -2674,6 +2681,8 @@ The `data` of `requestDropped` carries the following metadata.
 The `data` of `cookieStorageDiscarded` carries the following metadata.
 
 - `reason`: Why the cookie box was discarded (name of the `StorageIntegrityFailure`)
+
+For `errorOccurred` raised when the idempotency key records are rebuilt, `data` carries `phase` (`idempotencyStoreRecovery`) and `error` ("Retention Period" in [6]).
 
 For `errorOccurred` raised by the legacy plain box migration and the retention limits, `data` carries `operation` (`legacyStorageDelete` or `legacyStorageMigration` for the migration, `retentionLimit` for the retention limits) and `error`. With `legacyStorageDelete`, `box` holds the name of the legacy plain box.
 

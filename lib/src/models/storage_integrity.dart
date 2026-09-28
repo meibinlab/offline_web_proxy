@@ -65,6 +65,10 @@ enum StorageIntegrityFailure {
   keyMismatch,
 
   /// 先頭側が壊れた暗号化 Box があります。
+  ///
+  /// Cookie Box の破棄の理由（`ProxyEventType.cookieStorageDiscarded`）では、
+  /// 照合で問題が無くても Hive が開けなかった（途中の記録が壊れていた）
+  /// 場合も含みます。
   corrupted,
 
   /// 照合が時間の上限を超えた暗号化 Box があります。

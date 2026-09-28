@@ -16,6 +16,14 @@
   - 期限切れの削除、`cacheMaxSize` による削除、`getCacheStats()`、`getCacheList()` はメタデータだけで行います
   - 保存先の Box 名が変わりました（`proxy_cache_index_secure`・`proxy_cache_body_secure`、暗号化しない場合は `proxy_cache_index`・`proxy_cache_body`）。0.21.0 以前の `proxy_cache`・`proxy_cache_secure` は、起動時に新しい形式へ移して削除します。平文のまま移す場合の失敗は `ProxyEventType.errorOccurred`（`phase: cacheFormatMigration`）で知らせます
 
+### 修正
+
+- **長いキーを保存すると、次の起動で `start()` が失敗し続けていた**: Hive は文字列キーの長さを 1 バイトの欄に書きます。assert が無効なリリースビルドでは、UTF-8 で 255 バイトを超えるキーを拒否せず、長さを桁あふれさせた壊れた記録をそのまま書きます。次に Box を開くと Hive が例外（`HiveError: Cannot read, unknown typeId`）を送出し、アプリのデータを消すまで `start()` が失敗していました。画面が 255 バイトを超える `Idempotency-Key` を付けた更新系を送信待ちから送った場合と、ドメイン・パス・名前を合わせて 255 バイトを超える Cookie を保存した場合に起きます
+  - 255 バイトを超えるキーは、`sha256:` に続く SHA-256 の 16 進（71 バイト）に置き換えて保存するようにしました。255 バイト以下のキーは変えないため、保存済みのデータはそのまま使えます
+  - 以前の版が壊した Box（開けない、または proxy が書かない型の値がある）は、起動時に次のとおり扱います。べき等性キーの記録（`proxy_idempotency`）は作り直して起動を続け、`ProxyEventType.errorOccurred`（`phase: idempotencyStoreRecovery`）で知らせます。保持期間内に届いた記録が失われるため、その間は同じキーの要求を送信済みとして止められず、要求の状態の照会は `unknown` を返します。Cookie の暗号化 Box は `StorageIntegrityFailure.corrupted` として破棄して起動を続け、`ProxyEventType.cookieStorageDiscarded` を発行します（再ログインが必要）。鍵と他の暗号化 Box はそのまま使います
+  - Hive は開けなかった例外を、proxy が捕まえた後もゾーンの未処理の例外として報告します。壊れた Box を作り直す起動では、アプリのエラー報告に `HiveError` などが記録されることがあります
+  - 0.4.0 より前の平文 Cookie Box（`proxy_cookies`）が同じ理由で開けない場合は対象外で、従来どおり起動に失敗します。その版でも起動できなかった状態のためです
+
 ### ドキュメント
 
 - 仕様書【8】の「キャッシュファイル形式」から「ファイル命名規則」までの、実装の無い独自のファイル形式と URL の正規化の記述を、実際の保存形式とキャッシュキーの説明に改めました
@@ -24,6 +32,7 @@
 
 - `test/encrypted_cache_test.dart` を新しい保存形式に合わせ、既定で暗号化すること、0.21.0 以前の形式からの移行（平文・暗号化、暗号化の有無、鍵と合わない場合）、復旧 API が別の処理の開いた本文の Box を閉じること、片方の Box にしかない記録の削除、削除と全削除が両方の Box に効くことのテストを追加しました
 - `test/response_cache_store_test.dart` を追加しました（メタデータと本文への分割、置き換え、別の処理が開いている組の扱い、移行で同じキーがある場合、暗号化した組の削除の続行、古いファイルを削除できなかった場合の次回の再試行）
+- `test/hive_key_length_test.dart` を追加しました（キーの変換、長いべき等性キーの記録と再起動、長いキーの Cookie、以前の版が壊したべき等性キーの Box と、開けない・別の型の値として開ける Cookie の Box）
 
 ## 0.21.0
 

@@ -765,7 +765,7 @@ proxy は Hive の Box と secure storage にデータを保存します。暗�
 
 | 保存先 | 内容 | 暗号化 | 保持期間 |
 | --- | --- | --- | --- |
-| `proxy_cookies_secure` | Cookie（名前、値、ドメイン、パス、有効期限、属性）。キーはドメイン、パス、名前など | 値のみ（AES-256） | 有効期限を過ぎたものは、送信する Cookie を探すときに削除。`clearCookies()` で削除 |
+| `proxy_cookies_secure` | Cookie（名前、値、ドメイン、パス、有効期限、属性）。キーはドメイン、パス、名前など（UTF-8 で 255 バイトを超える場合は SHA-256） | 値のみ（AES-256） | 有効期限を過ぎたものは、送信する Cookie を探すときに削除。`clearCookies()` で削除 |
 | `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
 | `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限 |
 | `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
@@ -773,7 +773,7 @@ proxy は Hive の Box と secure storage にデータを保存します。暗�
 | `proxy_cache_index`、`proxy_cache_body` | `encryptResponseCache` を `false` にした場合の応答キャッシュ。内容とキーは暗号化した組と同じ | なし | 暗号化した組と同じ。`encryptResponseCache` を有効にすると、暗号化した組へ移して削除 |
 | `proxy_cache`、`proxy_cache_secure` | 0.21.0 以前の応答キャッシュ。1 件の値にメタデータと本文をまとめた形式。`proxy_cache_secure` は 0.21.0 で `encryptResponseCache` を有効にした場合 | `proxy_cache` はなし、`proxy_cache_secure` は値のみ（AES-256） | 起動時に新しい組へ移して削除。`encryptResponseCache` を無効にした場合、`proxy_cache_secure` は移さずに削除 |
 | `proxy_web_storage` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット | なし | 次のスナップショットで上書きされるまで |
-| `proxy_idempotency` | 上流へ届いたべき等性キーと、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
+| `proxy_idempotency` | 上流へ届いたべき等性キー（UTF-8 で 255 バイトを超える場合は SHA-256）と、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
 | `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号 | なし | 次のバインドで上書きされるまで |
 | secure storage の `offline_web_proxy.cookie_box_encryption_key` | 暗号化 Box の鍵。Cookie、キュー、隔離、ドロップ履歴（と、有効にした場合の応答キャッシュ）で共有 | secure storage に保存 | `recoverEncryptedStorage()` が削除するか、使えない鍵（なし・読み取り不能・形式不正）を新しい鍵で上書きするまで。新しい鍵を書き込むのは、キュー・隔離・ドロップ履歴の Box に中身が無い場合（「暗号化鍵を失った場合」） |
 | `proxy_queue`、`proxy_quarantined_requests`、`proxy_dropped_requests`、`proxy_cookies` | 0.14.0 以前（Cookie は 0.4.0 より前）が平文で保存した内容 | なし | 暗号化 Box へ移行した後に削除。キュー・隔離・ドロップ履歴の旧 Box は、削除の前に空にする |
@@ -817,6 +817,8 @@ proxy は Hive の Box と secure storage にデータを保存します。暗�
   - 破棄は `start()` や、起動前・停止後に呼んだ Cookie API の中で起きるため、後から購読したアプリにはイベントが届きません。
   - 起動後は `getDiagnostics()` の `lastCookieStorageDiscardedAt` と `lastCookieStorageDiscardReason` で確認してください。
   - 復旧 API による削除では、このイベントを発行せず、診断情報も変えません。
+- 照合で問題が無くても Hive が開けない、または Cookie として読めない値がある Cookie Box（途中の記録が壊れている）は、`corrupted` として破棄して起動を続けます。0.21.0 以前の版が、UTF-8 で 255 バイトを超えるキーで書いた記録が該当します。べき等性キーの記録（`proxy_idempotency`）が同じ理由で開けない、または記録日時として読めない値がある場合は、作り直して起動を続け、`errorOccurred`（`phase: idempotencyStoreRecovery`）で知らせます。
+  - Hive は開けなかった例外を、proxy が捕まえた後もゾーンの未処理の例外として報告します。この起動では、アプリのエラー報告（Crashlytics など）に `HiveError` などが記録されることがあります。
 - 起動前や停止後に呼んだ Cookie API（`restoreCookies()` など）で照合に失敗すると、`CookieOperationException` を投げ、その `cause` に `StorageIntegrityException` が入ります。失敗は保持せず、次の呼び出しや `start()` で照合をやり直します。
 - `StorageIntegrityException.failure` は次の理由を表します。
   - `temporarilyUnavailable`: iOS / macOS の端末のロック中など、保護データを読めない状態です。読み取りの結果を鍵の有無の判定に使いません
