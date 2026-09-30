@@ -116,8 +116,16 @@ class ProxyStats {
   /// [QueuePauseReason.authenticationRequired] means that a queued request
   /// was answered with one of `ProxyConfig.authRequiredStatusCodes`. The
   /// requests stay in the queue until the user signs in again and the queue
-  /// resumes. The pause is not persisted and ends when the proxy stops.
+  /// resumes. [QueuePauseReason.rateLimited] means that a queued request was
+  /// answered with `429` and sending resumes at [queuePausedUntil]. The pause
+  /// is not persisted and ends when the proxy stops.
   final QueuePauseReason? queuePausedReason;
+
+  /// When sending from the queue resumes on its own, in UTC.
+  ///
+  /// Set only while [queuePausedReason] is [QueuePauseReason.rateLimited];
+  /// `null` otherwise, including a pause for a sign-in, which has no end time.
+  final DateTime? queuePausedUntil;
 
   /// Timestamp when the proxy server was started.
   ///
@@ -143,6 +151,7 @@ class ProxyStats {
     this.unacknowledgedDroppedCount = 0,
     this.quarantinedCount = 0,
     this.queuePausedReason,
+    this.queuePausedUntil,
     required this.startedAt,
     required this.uptime,
   });

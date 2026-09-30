@@ -22,8 +22,8 @@ class QueueResendResult {
 
   /// Whether the upstream accepted the request.
   ///
-  /// `true` once the upstream answered with 2xx, or when the idempotency key
-  /// shows the request had already been delivered.
+  /// `true` once the upstream answered with 2xx or `303`, or when the
+  /// idempotency key shows the request had already been delivered.
   final bool success;
 
   /// Idempotency key sent with the request, when one was attached.
