@@ -206,6 +206,9 @@ void main() {
         expect(decoded['queueLength'], equals(0));
         expect(decoded['quarantinedCount'], equals(0));
         expect(decoded['unacknowledgedDroppedCount'], equals(0));
+        // 一時停止していない場合も、項目は null として返すこと
+        expect(decoded.containsKey('queuePausedReason'), isTrue);
+        expect(decoded['queuePausedReason'], isNull);
         expect(decoded['recentResendResults'], isEmpty);
         // 状態は都度変わるため WebView 側にも保存させないこと
         expect(response.cacheControl, equals('no-store'));

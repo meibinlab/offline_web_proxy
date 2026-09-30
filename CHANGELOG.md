@@ -1,3 +1,26 @@
+## Unreleased
+
+### 破壊的変更の注意
+
+- `ProxyEventType` に `authenticationRequired` を追加しました。`default` の無い `switch` で網羅している場合は、分岐の追加が必要です
+
+### 機能追加
+
+- **認証が必要な応答でキューの送信を一時停止できるようにした**（opt-in）: Cookie のセッションで認証する上流では、オフラインの間にセッションが切れ、回線が戻るとキューの要求がすべて 4xx で隔離されていました。`ProxyConfig.authRequiredStatusCodes`（例 `{401}`）に指定した状態コードが返ると、その要求をキューに残して送信を一時停止し、後続も送りません
+  - 一時停止すると `ProxyEventType.authenticationRequired` を発行し、`ProxyStats.queuePausedReason` と状態通知の `queuePausedReason` が `authenticationRequired` になります。キーで照会した状態は `queued` のままです
+  - `resumeQueue()` を呼ぶか、`ProxyConfig.authResumePaths` に一致するログインが proxy を通って 2xx か 3xx を返すと再開します。ログインで受け取った Cookie で送り直します
+  - ログインし直しても通らない要求は、`skipPausedRequest()` で `dropPolicy` に従って隔離またはドロップ履歴へ移せます（理由 `authentication_required`）
+  - 指定できるのは 300〜499 です。権限不足でも返る `403` などを指定すると、ログインで解決しない要求でキューが止まる点に注意してください
+  - `POST` への `303` は、従来どおり `dart:io` が転送先をたどるため一時停止しません。`POST` のセッション切れは `401`・`302`・`307` のいずれかで返してください
+
+### ドキュメント
+
+- `ProxyConfig.forceCachePaths` の dartdoc に残っていた「応答キャッシュは暗号化しない」との記述を、0.22.0 の既定（暗号化する）に合わせて直しました
+
+### テスト
+
+- `test/queue_auth_pause_test.dart` を追加しました。一時停止と後続の保留、`resumeQueue()` とログインの成功（3xx）による再開、再び一時停止すること、`skipPausedRequest()`（隔離、ドロップ、隔離の上限を超える場合）、3xx の指定、送信中のログイン、設定の検証（境界値を含む）、停止による解除、既定では従来どおり隔離することを確認します
+
 ## 0.22.0
 
 ### 破壊的変更の注意

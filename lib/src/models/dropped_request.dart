@@ -13,7 +13,9 @@ class DroppedRequest {
   ///
   /// キューからの除外は `"4xx_error"` など、隔離の保持上限による追い出しは
   /// `"quarantine_limit"`（件数・合計バイト数）と `"quarantine_expired"`（期間）、
-  /// 1 件で隔離の合計バイト数の上限を超えた場合は `"quarantine_too_large"` です。
+  /// 1 件で隔離の合計バイト数の上限を超えた場合は `"quarantine_too_large"`、
+  /// キューを一時停止させた要求を `skipPausedRequest()` で取り除いた場合は
+  /// `"authentication_required"` です。
   final String dropReason;
 
   /// エラー時のHTTPステータスコード

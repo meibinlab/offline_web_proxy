@@ -753,7 +753,8 @@ void main() {
       });
     });
 
-    /// 状態通知の JSON の項目を変えないこと
+    /// 状態通知の JSON の項目を意図せず変えないこと
+    /// （`queuePausedReason` は、キューの一時停止のために追加した）
     test('keeps the status json fields unchanged', () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
@@ -776,6 +777,7 @@ void main() {
             'queueLength',
             'quarantinedCount',
             'unacknowledgedDroppedCount',
+            'queuePausedReason',
             'recentResendResults',
           }),
         );

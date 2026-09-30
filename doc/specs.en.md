@@ -541,7 +541,7 @@ Provides methods for cookie management. See [20] API Reference for details.
 
 A request leaves the queue in the following case.
 
-- **4xx Errors**: Client errors (authentication failure, invalid request, etc.). Resending cannot change the result, so the request is removed
+- **4xx Errors**: Client errors (authentication failure, invalid request, etc.). Resending cannot change the result, so the request is removed. A code listed in `authRequiredStatusCodes` is not removed but pauses sending from the queue ("Pausing on an Authentication-Required Answer")
 
 Network errors and 5xx errors are treated as temporary failures: they are kept in the queue and retried.
 
@@ -559,6 +559,29 @@ Network errors and 5xx errors are treated as temporary failures: they are kept i
 - **No double bookkeeping**: A quarantined request is not also written to the dropped history. The exception is the retention limits: requests moved out of the quarantine store, and a request that alone exceeds the total size limit, are written to the dropped history (see "Retention Limits")
 - **Keys kept in the history**: The dropped history also records the idempotency key and the time the request was first accepted (`acceptedAt`). This includes requests moved out of the quarantine store (`quarantine_limit`, `quarantine_expired`) and a request that alone exceeds the size limit (`quarantine_too_large`). Entries recorded before 0.19.0 have neither
 - **Recording order**: Both the quarantine store and the dropped history are written before the request is removed from the queue. If the write fails the request stays queued, so it is never removed without a record. A request moved out of the quarantine store by a retention limit is likewise written to the dropped history before it is removed
+
+### Pausing on an Authentication-Required Answer (authRequiredStatusCodes)
+
+An upstream that authenticates with a cookie session lets the session expire while the device is offline. When the connection returns, the queued requests are sent with the expired session and the upstream answers 4xx, so under the rules above they are all removed before the user can sign in again.
+
+A status code listed in `ProxyConfig.authRequiredStatusCodes` pauses sending from the queue instead of removing the request.
+
+- **Default**: Empty. Unless codes are listed, every 4xx leaves the queue as before
+- **Accepted values**: 300 to 499, so that a redirect to the sign-in page (such as `302`) can be listed. Other values are rejected at startup with `ProxyStartException` (2xx already means success and 5xx means retry)
+- **`303` on `POST`**: As before, a resend follows redirects with the `dart:io` defaults, so a `POST` answered with `303` is followed to the target with `GET`, and the status code of the target decides (a `200` from a sign-in page is taken as delivered). Listing `303` does not pause a `POST`. Other codes and methods are not followed. Have the upstream answer an expired session on a `POST` with `401`, `302` or `307`
+- **Pause**: When a request sent from the queue is answered with a listed code, the request stays in the queue with its retry count and next send time unchanged. Sending from the queue pauses: neither the rest of the current pass nor later periodic passes send anything, because later requests are likely to fail for the same reason and their order is kept. This differs from the usual rule that later requests overtake a request waiting for its backoff ("Queue Management")
+- **Notification**: Each pause raises `ProxyEventType.authenticationRequired` once. The resend result (`queueResendAttempted`) is recorded with `willRetry: true` and `dropReason: null`
+- **State**: `ProxyStats.queuePausedReason` and `queuePausedReason` in the status endpoint become `authenticationRequired`. A status query by key keeps answering `queued`
+- **Resuming**:
+  - When `resumeQueue()` is called
+  - When a request matching `ProxyConfig.authResumePaths` passes through the proxy and the upstream answers 2xx or 3xx, whatever the method. Paths relayed to `mirroredOrigins` are not matched. A 3xx counts because a sign-in form usually redirects after it succeeds. The queue resumes after the `Set-Cookie` of that response is stored in the cookie jar, so the queued requests are sent with the new session (a resend takes its cookies from the jar at the time it is sent). Patterns follow "Path Pattern Notation Used by Configuration" in [1]
+  - Either way sending starts without waiting for the next periodic pass. While another operation is working on the queue, the next periodic pass (every 5 seconds) sends instead
+- **Pausing again**: If the same request is answered with a listed code again after resuming, the queue pauses again; it is not resent automatically. A failed sign-in answered with 2xx (an error in the body) also resumes the queue, which then pauses again for the same reason
+- **Sign-in during a send**: When a resume trigger happens after a request has started to be sent, its answer is treated as one for the old session and does not pause the queue even with a listed code. The request stays in the queue and is sent with the new session at the next periodic pass. The later requests of the same pass are sent before it, as with a request waiting for its backoff
+- **Moving a stuck request out**: A request that keeps getting the same answer after signing in again (a missing permission, a CSRF token of the old session and so on) can be removed with `skipPausedRequest()`. It goes to the quarantine store or the dropped history according to `dropPolicy`, with reason `authentication_required` (with `quarantine`, a request that alone exceeds `quarantineMaxBytes` is recorded in the dropped history as `quarantine_too_large`, as for a 4xx). The pause then ends and the rest are sent
+- **Caution**: Listing a code that is also returned for other reasons (such as `403` for a missing permission) stops the queue on a request that signing in cannot fix, until `skipPausedRequest()` is called
+- **Not persisted**: The pause is kept in memory and cleared by `stop()` and `start()`. The next start sends from the head request again and pauses again on the same answer
+- **Unchanged**: The online decision, `queueExcludePaths`, and the answer to the first forward (a request whose first forward is answered with 4xx is not queued, and the answer goes to the page as-is)
 
 ### Update Requests That Are Never Queued (queueExcludePaths)
 
@@ -755,9 +778,12 @@ The unsent count and the online state were reachable only from the Dart API, so 
   "queueLength": 0,
   "quarantinedCount": 0,
   "unacknowledgedDroppedCount": 0,
+  "queuePausedReason": null,
   "recentResendResults": []
 }
 ```
+
+- **`queuePausedReason`**: Why sending from the queue is paused (the name of `queuePausedReason` in `getStats()`): `null` when it is not, `"authenticationRequired"` while it waits for a sign-in ("Pausing on an Authentication-Required Answer")
 
 With it, "block settlement while something is unsent", "show the unsent count" and "hide the sign-in when offline" are decided entirely in the web app.
 
@@ -788,7 +814,7 @@ A page that sends an update request with its own idempotency key (section [6]) c
 
 | `state` | Meaning | `statusCode` |
 | --- | --- | --- |
-| `queued` | Waiting in the queue, including a request waiting to be resent after 5xx or an unreachable upstream | None |
+| `queued` | Waiting in the queue, including a request waiting to be resent after 5xx or an unreachable upstream, and while the queue is paused for a sign-in | None |
 | `quarantined` | Rejected by the upstream with 4xx and kept in quarantine | Value the upstream returned |
 | `delivered` | Sent from the queue and answered with 2xx by the upstream, for `idempotencyRetention` (24 hours by default) | None |
 | `dropped` | In the dropped history | Value the upstream returned (`0` when none) |
@@ -811,7 +837,7 @@ A page that sends an update request with its own idempotency key (section [6]) c
 
 | State | Next state |
 | --- | --- |
-| `queued` | `delivered` (2xx, or treated as sent because the delivered records already hold the key), `quarantined` (4xx), `dropped` (4xx with `dropPolicy` `drop`, or `quarantine_too_large`). Stays `queued` on 5xx or an unreachable upstream |
+| `queued` | `delivered` (2xx, or treated as sent because the delivered records already hold the key), `quarantined` (4xx), `dropped` (4xx with `dropPolicy` `drop`, or `quarantine_too_large`). Stays `queued` on 5xx or an unreachable upstream, and while the queue is paused by an `authRequiredStatusCodes` answer. The request that paused the queue becomes `quarantined` or `dropped` through `skipPausedRequest()` |
 | `quarantined` | `queued` (`retryQuarantinedRequest()`), `dropped` (`quarantine_limit`, `quarantine_expired`), `unknown` (discarded) |
 | `dropped` | `unknown` (expired or removed by the count limit, `clearDroppedRequests()`) |
 | `delivered` | `unknown` (after `idempotencyRetention`) |
@@ -2187,6 +2213,33 @@ for (final request in quarantined) {
 }
 ```
 
+#### `Future<void> resumeQueue()`
+
+Resumes sending from a queue paused by `authRequiredStatusCodes` ("Pausing on an Authentication-Required Answer" in [5]).
+
+- **Return Value**: None
+- **Note**: Sending starts from the request that caused the pause. It can be called when the queue is not paused; then a request already being sent before the call does not pause the queue even when answered with a listed code. Does nothing while the proxy is stopped
+
+```dart
+// Call after the user signs in again
+await proxy.resumeQueue();
+```
+
+#### `Future<bool> skipPausedRequest()`
+
+Removes the request that paused the queue and resumes sending, so that a request that keeps getting the same answer after signing in again does not stop the queue for good.
+
+- **Return Value**: `true` when removed. `false` when the queue is not paused, when the proxy is stopped, or when the request is no longer in the queue (in the last case the pause still ends)
+- **Exceptions**:
+  - `QueueOperationException`: When the request cannot be written to the quarantine store or the dropped history, or when the queue, quarantine or dropped-history lock cannot be acquired within 30 seconds. The request stays in the queue and the queue stays paused
+- **Note**: The request goes to the quarantine store or the dropped history according to `dropPolicy`, with reason `authentication_required`. With `quarantine`, a request that alone exceeds `quarantineMaxBytes` is recorded in the dropped history as `quarantine_too_large`
+
+```dart
+if ((await proxy.getStats()).queuePausedReason != null) {
+  await proxy.skipPausedRequest();
+}
+```
+
 #### `Future<bool> retryQuarantinedRequest(String id)`
 
 Moves a quarantined request back to the queue and resends it.
@@ -2377,7 +2430,7 @@ class DroppedRequest {
   final String url; // URL of dropped request
   final String method; // HTTP method
   final DateTime droppedAt; // Date/time dropped
-  final String dropReason; // Drop reason ("4xx_error" and so on; "quarantine_limit", "quarantine_expired" or "quarantine_too_large" for the quarantine retention limits)
+  final String dropReason; // Drop reason ("4xx_error" and so on; "quarantine_limit", "quarantine_expired" or "quarantine_too_large" for the quarantine retention limits; "authentication_required" for skipPausedRequest())
   final int statusCode; // HTTP status code at error
   final String errorMessage; // Detailed error message
   final bool acknowledged; // Whether it has been shown to the operator (default: false)
@@ -2399,7 +2452,7 @@ class QuarantinedRequest {
   final DateTime quarantinedAt; // Date/time quarantined
   final DateTime queuedAt; // Date/time stored in the queue before quarantine
   final DateTime acceptedAt; // First accepted (never changes across a retry)
-  final String reason; // Quarantine reason ("4xx_error", etc.)
+  final String reason; // Quarantine reason ("4xx_error"; "authentication_required" for skipPausedRequest())
   final int statusCode; // HTTP status code returned by the upstream
   final String errorMessage; // Detailed error message
   final bool pendingMigration; // Waiting for migration from a legacy plain box; cannot be resent or discarded (default: false)
@@ -2468,8 +2521,13 @@ class ProxyStats {
   final int droppedRequestsCount; // Dropped request count
   final int unacknowledgedDroppedCount; // Dropped history entries not yet acknowledged
   final int quarantinedCount; // Number of quarantined requests
+  final QueuePauseReason? queuePausedReason; // Why sending from the queue is paused (null when it is not)
   final DateTime startedAt; // Proxy server start date/time
   final Duration uptime; // Operation time
+}
+
+enum QueuePauseReason {
+  authenticationRequired // A queued request was answered with one of authRequiredStatusCodes ([5])
 }
 ```
 
@@ -2543,6 +2601,8 @@ class ProxyConfig {
   final String idempotencyHeaderName; // Idempotency key header name (default: "Idempotency-Key")
   final Duration idempotencyRetention; // Retention of completed keys (default: 24 hours)
   final List<QueueExcludeRule> queueExcludePaths; // Updates never queued (default: empty)
+  final Set<int> authRequiredStatusCodes; // Authentication-required codes that pause the queue (default: empty)
+  final List<String> authResumePaths; // Sign-in paths that resume a paused queue (default: empty)
   final bool enableAcceptedAtHeader; // Report the acceptance time (default: true)
   final String acceptedAtHeaderName; // Acceptance time header (default: "X-Offline-Accepted-At")
   final bool enableReplayHeader; // Mark requests sent from the queue (default: true)
@@ -2644,7 +2704,8 @@ enum ProxyEventType {
   errorOccurred, // Error occurred
   serverUnavailable, // Responsiveness check failed and recovery was not possible
   serverRecovered, // Recovered by rebinding
-  cookieStorageDiscarded // Discarded a cookie box that did not match the key
+  cookieStorageDiscarded, // Discarded a cookie box that did not match the key
+  authenticationRequired // Paused sending from the queue on an authentication-required answer
 }
 ```
 
@@ -2670,17 +2731,23 @@ The `data` of `requestQuarantined` carries the following metadata.
 
 - `quarantineId`: Identifier inside the quarantine store (used by `retryQuarantinedRequest` and friends)
 - `statusCode`: Status code returned by the upstream
-- `reason`: Quarantine reason (`"4xx_error"`, etc.)
+- `reason`: Quarantine reason (`"4xx_error"`; `"authentication_required"` for `skipPausedRequest()`)
 
 The `data` of `requestDropped` carries the following metadata.
 
 - `statusCode`: Status code returned by the upstream (for a request moved out of the quarantine store, the value from the quarantine)
-- `dropReason`: Why the request was removed (`"4xx_error"` and so on; `quarantine_limit`, `quarantine_expired` or `quarantine_too_large` for the quarantine retention limits)
+- `dropReason`: Why the request was removed (`"4xx_error"` and so on; `quarantine_limit`, `quarantine_expired` or `quarantine_too_large` for the quarantine retention limits; `authentication_required` for `skipPausedRequest()`)
 - `quarantineId`: Identifier inside the quarantine store, when a count, age or total size limit moved the request out of it
 
 The `data` of `cookieStorageDiscarded` carries the following metadata.
 
 - `reason`: Why the cookie box was discarded (name of the `StorageIntegrityFailure`)
+
+The `url` of `authenticationRequired` is the URL of the request that paused the queue, and `data` carries the following metadata.
+
+- `statusCode`: Status code returned by the upstream
+- `idempotencyKey`: Idempotency key of the request (`null` when there is none)
+- `queueId`: Key of the request in the queue
 
 For `errorOccurred` raised when the idempotency key records are rebuilt, `data` carries `phase` (`idempotencyStoreRecovery`) and `error` ("Retention Period" in [6]).
 

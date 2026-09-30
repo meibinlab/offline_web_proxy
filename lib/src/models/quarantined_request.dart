@@ -26,7 +26,10 @@ class QuarantinedRequest {
   /// 隔離と再送を経ても変わりません。
   final DateTime acceptedAt;
 
-  /// 隔離理由（"4xx_error" 等）
+  /// 隔離理由
+  ///
+  /// 上流が 4xx で拒否した場合は `"4xx_error"`、キューを一時停止させた要求を
+  /// `skipPausedRequest()` で取り除いた場合は `"authentication_required"` です。
   final String reason;
 
   /// 上流から返されたHTTPステータスコード

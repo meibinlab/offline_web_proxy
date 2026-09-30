@@ -154,9 +154,11 @@ class ProxyConfig {
   /// so a path that never becomes available offline can be diagnosed.
   ///
   /// **Security**: `no-store` asks the client not to write the response to
-  /// storage at all. The response cache is not encrypted, so the body of a
-  /// listed path is kept on the device in the clear. Weigh that against what
-  /// the screen contains before listing it.
+  /// storage at all. The response cache is encrypted by default; with
+  /// [encryptResponseCache] switched off, the body of a listed path stays on
+  /// the device in the clear. Even when encrypted, the box keys (the SHA-256
+  /// of the URL) stay readable, so weigh what the screen contains before
+  /// listing it.
   ///
   /// **Freshness**: A response that says `no-store` usually says `max-age=0`
   /// as well. Honouring it would make the entry stale the moment it is stored,
@@ -522,6 +524,67 @@ class ProxyConfig {
   /// **Default**: `[]` (every update request is queued)
   final List<QueueExcludeRule> queueExcludePaths;
 
+  /// Status codes with which the upstream says that the session has expired.
+  ///
+  /// A session kept in a cookie often expires on the upstream while the
+  /// device is offline, so every queued update is rejected when the
+  /// connection returns. Without this setting a 4xx moves each of them out of
+  /// the queue (see [dropPolicy]) before the user has a chance to sign in
+  /// again.
+  ///
+  /// When a request sent from the queue is answered with one of these codes,
+  /// the proxy keeps it in the queue, without counting a retry, and pauses
+  /// the queue: no later request is sent, so their order is kept. It raises
+  /// `ProxyEventType.authenticationRequired` once per pause and reports
+  /// `QueuePauseReason.authenticationRequired` through
+  /// `ProxyStats.queuePausedReason` and the status endpoint. A status query
+  /// by idempotency key keeps answering `queued`.
+  ///
+  /// Sending resumes when `OfflineWebProxy.resumeQueue()` is called, or when
+  /// a request matching [authResumePaths] succeeds through the proxy. If the
+  /// same request is answered with one of these codes again, the queue pauses
+  /// again. `OfflineWebProxy.skipPausedRequest()` moves that request out of
+  /// the queue when signing in does not help.
+  ///
+  /// Codes from 300 to 499 are accepted, so that a redirect to the sign-in
+  /// page such as `302` can be listed; other values are rejected by `start()`
+  /// with a `ProxyStartException`. A `POST` answered with `303` is followed
+  /// to the redirect target by `dart:io`, as before, so the code of the
+  /// target decides; list `302` or `307` for a `POST`. The pause is kept in
+  /// memory only and ends when the proxy stops.
+  ///
+  /// **Warning**: List only codes that mean "sign in again". A code that is
+  /// also returned for other reasons, such as `403` for a missing permission
+  /// or an expired CSRF token, keeps the queue paused for a request that
+  /// signing in cannot fix, until `skipPausedRequest()` is called.
+  ///
+  /// **Example**: `{401}`
+  /// **Default**: `{}` (every 4xx leaves the queue as described in
+  /// [dropPolicy])
+  final Set<int> authRequiredStatusCodes;
+
+  /// Paths of the sign-in requests that resume a paused queue.
+  ///
+  /// When a request of any method whose path matches one of these patterns
+  /// is answered with a 2xx or 3xx by the upstream through the proxy, a queue
+  /// paused by [authRequiredStatusCodes] resumes at once. A 3xx counts
+  /// because a sign-in form usually redirects after it succeeds. The cookies
+  /// set by that response are stored first, so the queued requests are sent
+  /// with the new session. A web app that signs in inside the WebView can
+  /// thus resume the queue without any call from Dart.
+  ///
+  /// A sign-in that fails with a 2xx (an error in the body) also resumes the
+  /// queue; the paused request is then rejected again and the queue pauses
+  /// again.
+  ///
+  /// Patterns use `*` for one path segment and `**` across segments; a
+  /// pattern without either is matched exactly. Query strings are not part of
+  /// the comparison.
+  ///
+  /// **Example**: `['/api/login.json']`
+  /// **Default**: `[]` (only `resumeQueue()` resumes the queue)
+  final List<String> authResumePaths;
+
   /// Whether the proxy tells the upstream when it first accepted an update.
   ///
   /// A request stored while offline reaches the upstream only after the
@@ -654,6 +717,7 @@ class ProxyConfig {
   /// What happens to a queued update request the upstream rejected with 4xx.
   ///
   /// Resending cannot change a 4xx result, so the request leaves the queue.
+  /// Codes listed in [authRequiredStatusCodes] pause the queue instead.
   /// [DropPolicy.quarantine] keeps it, body included, in a quarantine store so
   /// that it can be resent after the cause is fixed, or discarded on purpose.
   /// [DropPolicy.drop] discards it and keeps only a history entry.
@@ -920,6 +984,8 @@ class ProxyConfig {
     this.idempotencyHeaderName = 'Idempotency-Key',
     this.idempotencyRetention = const Duration(hours: 24),
     this.queueExcludePaths = const [],
+    this.authRequiredStatusCodes = const {},
+    this.authResumePaths = const [],
     this.enableAcceptedAtHeader = true,
     this.acceptedAtHeaderName = 'X-Offline-Accepted-At',
     this.enableReplayHeader = true,

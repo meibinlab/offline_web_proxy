@@ -1,3 +1,5 @@
+import 'queue_pause_reason.dart';
+
 /// Statistics and performance metrics for the [OfflineWebProxy] server.
 ///
 /// This class provides comprehensive operational insights including request
@@ -109,6 +111,14 @@ class ProxyStats {
   /// and need a decision.
   final int quarantinedCount;
 
+  /// Why sending from the offline queue is paused, or `null` when it is not.
+  ///
+  /// [QueuePauseReason.authenticationRequired] means that a queued request
+  /// was answered with one of `ProxyConfig.authRequiredStatusCodes`. The
+  /// requests stay in the queue until the user signs in again and the queue
+  /// resumes. The pause is not persisted and ends when the proxy stops.
+  final QueuePauseReason? queuePausedReason;
+
   /// Timestamp when the proxy server was started.
   ///
   /// Used as the baseline for calculating uptime and provides context for
@@ -132,6 +142,7 @@ class ProxyStats {
     required this.droppedRequestsCount,
     this.unacknowledgedDroppedCount = 0,
     this.quarantinedCount = 0,
+    this.queuePausedReason,
     required this.startedAt,
     required this.uptime,
   });

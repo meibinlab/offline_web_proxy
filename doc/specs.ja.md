@@ -541,7 +541,7 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 
 以下の場合、リクエストをキューから取り除きます。
 
-- **4xx 系エラー**: クライアントエラー（認証失敗、不正リクエスト等）。再送しても結果が変わらないため取り除く
+- **4xx 系エラー**: クライアントエラー（認証失敗、不正リクエスト等）。再送しても結果が変わらないため取り除く。ただし `authRequiredStatusCodes` に指定した状態コードは取り除かず、キューの送信を一時停止する（「認証が必要な応答での一時停止」）
 
 ネットワークエラーと 5xx 系エラーは一時的な障害とみなし、取り除かずに再試行を継続します。
 
@@ -559,6 +559,29 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 - **二重記録の回避**: 隔離した場合はドロップ履歴へ記録しません。例外は保持上限を超えた場合で、隔離から移す分と、1 件で合計バイト数の上限を超える分をドロップ履歴へ記録します（「保持上限」）
 - **履歴に残すキー**: ドロップ履歴には、べき等性キーと最初に受け付けた日時（`acceptedAt`）も記録します。隔離から移す場合（`quarantine_limit`・`quarantine_expired`）と、1 件で上限を超える場合（`quarantine_too_large`）も同じです。0.19.0 より前に記録した履歴には、どちらもありません
 - **記録の順序**: 隔離もドロップ履歴も、キューから取り除く前に記録します。記録できなかった場合はキューへ残すため、取り除いたのに記録が無い状態にはなりません。保持上限で隔離から移す場合も、ドロップ履歴へ記録してから隔離から削除します
+
+### 認証が必要な応答での一時停止（authRequiredStatusCodes）
+
+Cookie のセッションで認証する上流では、端末がオフラインの間にサーバ側のセッションが切れます。回線が戻るとキューの要求は切れたセッションで送られ、上流は 4xx を返すため、上記の扱いでは利用者が再ログインする前にすべて取り除かれます。
+
+`ProxyConfig.authRequiredStatusCodes` に指定した状態コードは、取り除かずにキューの送信を一時停止します。
+
+- **既定**: 空。指定が無い限り従来どおり、4xx はすべて取り除きます
+- **指定できる値**: 300〜499。ログイン画面へのリダイレクト（`302` など）も指定できます。範囲外の値は起動時に `ProxyStartException` で拒否します（2xx は成功、5xx は再試行と扱いが決まっているため）
+- **`POST` の `303`**: 従来どおり、再送は `dart:io` の既定でリダイレクトをたどるため、`POST` への `303` は `GET` で転送先へたどり、転送先の状態コードで判定します（ログイン画面の `200` なら届いたものとみなします）。`303` を指定しても `POST` では一時停止しません。ほかの状態コードとメソッドはたどりません。`POST` のセッション切れは `401`・`302`・`307` のいずれかで返すよう上流を設定してください
+- **一時停止**: キューから送った要求がこの状態コードを返すと、その要求をキューに残し、再試行回数も次の送信時刻も変えません。キューの送信を一時停止し、この周回の残りも、以降の定期処理でも送りません。後続の要求は同じ理由で失敗する見込みが高く、順序も保つためです。バックオフ待ちの要求を追い越して後続を送る通常の扱い（「キュー管理」）とは異なります
+- **通知**: 一時停止するたびに `ProxyEventType.authenticationRequired` を 1 回発行します。再送結果（`queueResendAttempted`）は、`willRetry: true`、`dropReason: null` で記録します
+- **状態**: `ProxyStats.queuePausedReason` と状態通知の `queuePausedReason` が `authenticationRequired` になります。キーで照会した状態は `queued` のままです
+- **再開の契機**:
+  - `resumeQueue()` を呼んだとき
+  - `ProxyConfig.authResumePaths` に一致する要求が proxy を通り、上流が 2xx か 3xx を返したとき。メソッドは問いません。`mirroredOrigins` へ中継するパスは照合しません。フォームのログインは成功後にリダイレクトすることが多いため、3xx も含めます。応答の `Set-Cookie` は Cookie Jar へ保存した後に再開するため、キューの要求は新しいセッションで送られます（再送の Cookie は、送る時点の Cookie Jar を優先します）。記法は【1】の「設定のパスパターン記法」に従います
+  - どちらも、次の定期処理を待たずに送信を始めます。別の処理がキューを扱っている間は、その後の定期処理（5 秒ごと）で送ります
+- **再び一時停止**: 再開後に同じ要求がまた指定の状態コードを返した場合は、再び一時停止します。自動では送り直しません。本文にエラーを入れて 2xx を返すログインの失敗でも再開しますが、同じ理由で再び一時停止します
+- **送信中のログイン**: 要求を送り始めた後に再開の契機が起きた場合、その要求の応答は古いセッションで送ったものとみなし、指定の状態コードでも一時停止しません。要求はキューに残り、次の定期処理で新しいセッションで送ります。バックオフ待ちの要求と同じく、同じ周回の後続の要求はこの要求より先に送ります
+- **止まり続ける要求の除去**: ログインし直しても同じ応答が返る要求（権限不足、古いセッションの CSRF トークンを含む要求など）は、`skipPausedRequest()` で取り除けます。`dropPolicy` に従って隔離またはドロップ履歴へ移し、理由は `authentication_required` です（隔離する方針で、1 件で `quarantineMaxBytes` を超える要求は、4xx の場合と同じくドロップ履歴へ `quarantine_too_large` で記録します）。取り除いた後は一時停止を解除し、残りを送ります
+- **注意**: 権限不足でも返る状態コード（`403` など）を指定すると、ログインで解決しない要求でキューが止まり、`skipPausedRequest()` を呼ぶまで送信が進みません
+- **永続化しない**: 一時停止の状態はメモリ上だけに持ち、`stop()` と `start()` で解除します。次の起動では先頭の要求から送り直し、同じ応答なら再び一時停止します
+- **変えないもの**: オフラインの判定、`queueExcludePaths` の扱い、最初の転送の応答（最初の転送で上流が 4xx を返した要求はキューへ入れず、応答をそのまま画面へ返します）
 
 ### キューへ入れない更新系（queueExcludePaths）
 
@@ -755,9 +778,12 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
   "queueLength": 0,
   "quarantinedCount": 0,
   "unacknowledgedDroppedCount": 0,
+  "queuePausedReason": null,
   "recentResendResults": []
 }
 ```
+
+- **`queuePausedReason`**: キューの送信を一時停止している理由（`getStats()` の `queuePausedReason` の名前）。一時停止していなければ `null`、認証待ちなら `"authenticationRequired"` です（「認証が必要な応答での一時停止」）
 
 これにより「未送信があるときは精算させない」「未送信件数を表示する」「オフラインならレジ認証を出さない」が Web 側だけで完結します。
 
@@ -788,7 +814,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 | `state` | 意味 | `statusCode` |
 | --- | --- | --- |
-| `queued` | 送信待ち。5xx や到達できないために再送を待っている場合を含む | なし |
+| `queued` | 送信待ち。5xx や到達できないために再送を待っている場合と、認証待ちで一時停止している場合を含む | なし |
 | `quarantined` | 上流が 4xx で拒否し、隔離している | 上流が返した値 |
 | `delivered` | 送信待ちから送り、上流が 2xx を返した。`idempotencyRetention`（既定 24 時間）の間だけ | なし |
 | `dropped` | ドロップ履歴にある | 上流が返した値（無い場合は `0`） |
@@ -811,7 +837,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 | 状態 | 次の状態 |
 | --- | --- |
-| `queued` | `delivered`（2xx、または届いた記録に同じキーがあり、送らずに成功とみなした場合）、`quarantined`（4xx）、`dropped`（4xx で `dropPolicy` が `drop` の場合、`quarantine_too_large` の場合）。5xx や到達できない間は `queued` のまま |
+| `queued` | `delivered`（2xx、または届いた記録に同じキーがあり、送らずに成功とみなした場合）、`quarantined`（4xx）、`dropped`（4xx で `dropPolicy` が `drop` の場合、`quarantine_too_large` の場合）。5xx や到達できない間と、`authRequiredStatusCodes` の応答で一時停止している間は `queued` のまま。一時停止させた要求は `skipPausedRequest()` で `quarantined` か `dropped` になる |
 | `quarantined` | `queued`（`retryQuarantinedRequest()`）、`dropped`（`quarantine_limit`・`quarantine_expired`）、`unknown`（破棄） |
 | `dropped` | `unknown`（保持期間か件数の上限で消えた場合、`clearDroppedRequests()`） |
 | `delivered` | `unknown`（`idempotencyRetention` を過ぎた場合） |
@@ -2187,6 +2213,33 @@ for (final request in quarantined) {
 }
 ```
 
+#### `Future<void> resumeQueue()`
+
+`authRequiredStatusCodes` の応答で一時停止したキューの送信を再開します（【5】の「認証が必要な応答での一時停止」）。
+
+- **戻り値**: なし
+- **注意**: 一時停止の原因になった要求から順に送ります。一時停止していない場合も呼び出せ、その場合は呼び出す前から送信中の要求が指定の状態コードを返しても一時停止しません。停止中は何もしません
+
+```dart
+// 利用者がログインし直した後に呼び出す
+await proxy.resumeQueue();
+```
+
+#### `Future<bool> skipPausedRequest()`
+
+キューを一時停止させた要求をキューから取り除き、送信を再開します。ログインし直しても同じ応答が返る要求で、キューが止まり続けないようにします。
+
+- **戻り値**: 取り除いた場合は `true`。一時停止していない場合、停止中の場合、要求が既にキューに無い場合は `false`（最後の場合も一時停止は解除します）
+- **例外**:
+  - `QueueOperationException`: 隔離またはドロップ履歴へ記録できなかった場合と、キュー・隔離・ドロップ履歴のいずれかのロックを 30 秒以内に取得できなかった場合。要求はキューに残り、一時停止も続きます
+- **注意**: `dropPolicy` に従って隔離またはドロップ履歴へ移し、理由は `authentication_required` です。隔離する方針で、1 件で `quarantineMaxBytes` を超える要求は、ドロップ履歴へ `quarantine_too_large` で記録します
+
+```dart
+if ((await proxy.getStats()).queuePausedReason != null) {
+  await proxy.skipPausedRequest();
+}
+```
+
 #### `Future<bool> retryQuarantinedRequest(String id)`
 
 隔離されたリクエストをキューへ戻して再送します。
@@ -2377,7 +2430,7 @@ class DroppedRequest {
   final String url; // ドロップされたリクエストのURL
   final String method; // HTTPメソッド
   final DateTime droppedAt; // ドロップされた日時
-  final String dropReason; // ドロップ理由（"4xx_error" など。隔離の保持上限では "quarantine_limit"、"quarantine_expired"、"quarantine_too_large"）
+  final String dropReason; // ドロップ理由（"4xx_error" など。隔離の保持上限では "quarantine_limit"、"quarantine_expired"、"quarantine_too_large"。skipPausedRequest() では "authentication_required"）
   final int statusCode; // エラー時のHTTPステータスコード
   final String errorMessage; // 詳細なエラーメッセージ
   final bool acknowledged; // 利用者へ提示済みか（既定: false）
@@ -2399,7 +2452,7 @@ class QuarantinedRequest {
   final DateTime quarantinedAt; // 隔離された日時
   final DateTime queuedAt; // 隔離される前にキューへ保存された日時
   final DateTime acceptedAt; // 最初に受け付けた日時（隔離と再送を経ても不変）
-  final String reason; // 隔離理由（"4xx_error" 等）
+  final String reason; // 隔離理由（"4xx_error"、skipPausedRequest() では "authentication_required"）
   final int statusCode; // 上流から返されたHTTPステータスコード
   final String errorMessage; // 詳細なエラーメッセージ
   final bool pendingMigration; // 旧平文 Box から移行を待っている項目か。再送も破棄もできない（既定: false）
@@ -2468,8 +2521,13 @@ class ProxyStats {
   final int droppedRequestsCount; // ドロップされたリクエスト数
   final int unacknowledgedDroppedCount; // 未確認のドロップ履歴件数
   final int quarantinedCount; // 隔離されているリクエスト数
+  final QueuePauseReason? queuePausedReason; // キューの送信を一時停止している理由（していなければ null）
   final DateTime startedAt; // プロキシサーバ開始日時
   final Duration uptime; // 稼働時間
+}
+
+enum QueuePauseReason {
+  authenticationRequired // キューから送った要求が authRequiredStatusCodes の状態コードを返した（【5】）
 }
 ```
 
@@ -2543,6 +2601,8 @@ class ProxyConfig {
   final String idempotencyHeaderName; // べき等性キーのヘッダ名（既定: "Idempotency-Key"）
   final Duration idempotencyRetention; // 送信済みキーの保持期間（既定: 24 時間）
   final List<QueueExcludeRule> queueExcludePaths; // キューへ入れない更新系（既定: 空）
+  final Set<int> authRequiredStatusCodes; // キューを一時停止する認証が必要の状態コード（既定: 空）
+  final List<String> authResumePaths; // 一時停止したキューを再開させるログインのパス（既定: 空）
   final bool enableAcceptedAtHeader; // 受付時刻の通知（既定: true）
   final String acceptedAtHeaderName; // 受付時刻のヘッダ名（既定: "X-Offline-Accepted-At"）
   final bool enableReplayHeader; // キューからの送信の通知（既定: true）
@@ -2644,7 +2704,8 @@ enum ProxyEventType {
   errorOccurred, // エラー発生
   serverUnavailable, // 稼働確認に失敗し復旧できなかった
   serverRecovered, // 再バインドにより復旧した
-  cookieStorageDiscarded // 鍵と合わない Cookie Box を破棄した
+  cookieStorageDiscarded, // 鍵と合わない Cookie Box を破棄した
+  authenticationRequired // 認証が必要との応答でキューの送信を一時停止した
 }
 ```
 
@@ -2670,17 +2731,23 @@ enum ProxyEventType {
 
 - `quarantineId`: 隔離領域内での識別子（`retryQuarantinedRequest` などで指定）
 - `statusCode`: 上流から返されたステータスコード
-- `reason`: 隔離理由（`"4xx_error"` 等）
+- `reason`: 隔離理由（`"4xx_error"`、`skipPausedRequest()` では `"authentication_required"`）
 
 `requestDropped` の `data` には、次のメタ情報が入ります。
 
 - `statusCode`: 上流から返されたステータスコード（隔離から移した場合は隔離時の値）
-- `dropReason`: 取り除いた理由（`"4xx_error"` など。隔離の保持上限では `quarantine_limit`、`quarantine_expired`、`quarantine_too_large`）
+- `dropReason`: 取り除いた理由（`"4xx_error"` など。隔離の保持上限では `quarantine_limit`、`quarantine_expired`、`quarantine_too_large`。`skipPausedRequest()` では `authentication_required`）
 - `quarantineId`: 件数・期間・合計バイト数の上限により隔離から移した場合の、隔離領域内での識別子
 
 `cookieStorageDiscarded` の `data` には、次のメタ情報が入ります。
 
 - `reason`: 破棄した理由（`StorageIntegrityFailure` の名前）
+
+`authenticationRequired` の `url` は一時停止させた要求の URL で、`data` には次のメタ情報が入ります。
+
+- `statusCode`: 上流が返したステータスコード
+- `idempotencyKey`: 要求のべき等性キー（無い場合は `null`）
+- `queueId`: キュー上のキー
 
 べき等性キーの記録を作り直したときに発行する `errorOccurred` の `data` には、`phase`（`idempotencyStoreRecovery`）と `error` が入ります（【6】の「保持期間」）。
 

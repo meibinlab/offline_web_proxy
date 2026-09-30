@@ -4,7 +4,8 @@
 /// by the status endpoint when it is called with `idempotencyKey`.
 enum RequestState {
   /// Waiting in the queue to be sent, including a request whose attempts keep
-  /// failing with 5xx or an unreachable upstream.
+  /// failing with 5xx or an unreachable upstream, and a request held while the
+  /// queue is paused by `ProxyConfig.authRequiredStatusCodes`.
   queued,
 
   /// Rejected by the upstream with 4xx and kept in quarantine.
