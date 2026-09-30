@@ -75,7 +75,7 @@
   <p>べき等性キーごとに、更新系リクエストがいまどうなっているかを返します。</p>
 <p>画面が自分で決めたキー（<code>Idempotency-Key</code> など）で送った要求について、
 送信待ち・隔離・届いた・ドロップのどれにあるかを返します。送信待ち・隔離・
-ドロップ履歴と、キューから送って上流が 2xx を返したキーの記録
+ドロップ履歴と、キューから送って上流が 2xx か 303 を返したキーの記録
 （<a href="../../offline_web_proxy/ProxyConfig/idempotencyRetention.html">ProxyConfig.idempotencyRetention</a> の間）を探します。暗号化する前の
 保存領域から移行を待っている分も探します。</p>
 <p>同じキーが複数の場所にある場合は、<a href="../../offline_web_proxy/RequestState.html">RequestState.delivered</a>、

@@ -89,10 +89,11 @@ again. <code>OfflineWebProxy.skipPausedRequest()</code> moves that request out o
 the queue when signing in does not help.</p>
 <p>Codes from 300 to 499 are accepted, so that a redirect to the sign-in
 page such as <code>302</code> can be listed; other values are rejected by <code>start()</code>
-with a <code>ProxyStartException</code>. A <code>POST</code> answered with <code>303</code> is followed
-to the redirect target by <code>dart:io</code>, as before, so the code of the
-target decides; list <code>302</code> or <code>307</code> for a <code>POST</code>. The pause is kept in
-memory only and ends when the proxy stops.</p>
+with a <code>ProxyStartException</code>. A resend does not follow redirects, and a
+<code>303</code> is otherwise taken as delivered (the upstream processed the
+request and points to the result); list <code>303</code> when the upstream answers
+an expired session with it. The pause is kept in memory only and ends
+when the proxy stops.</p>
 <p><strong>Warning</strong>: List only codes that mean "sign in again". A code that is
 also returned for other reasons, such as <code>403</code> for a missing permission
 or an expired CSRF token, keeps the queue paused for a request that

@@ -145,7 +145,7 @@ queue is paused by <code>ProxyConfig.authRequiredStatusCodes</code>.</p>
 
 </dt>
 <dd>
-  <p>Sent from the queue and answered with 2xx by the upstream, within
+  <p>Sent from the queue and answered with 2xx or <code>303</code> by the upstream, within
 <code>ProxyConfig.idempotencyRetention</code>.</p>
 <p>A request the upstream answered on its first forward with anything but
 5xx is not recorded, because the page receives that answer directly; it is

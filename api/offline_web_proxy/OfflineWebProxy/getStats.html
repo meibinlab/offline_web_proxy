@@ -98,6 +98,7 @@
     final uptime = _startedAt != null
         ? DateTime.now().difference(_startedAt!)
         : Duration.zero;
+    final queuePause = _currentQueuePause();
 
     return ProxyStats(
       totalRequests: _totalRequests,
@@ -108,7 +109,8 @@
       droppedRequestsCount: droppedRequestsCount,
       unacknowledgedDroppedCount: unacknowledgedDroppedCount,
       quarantinedCount: quarantinedCount,
-      queuePausedReason: _queuePauseReason,
+      queuePausedReason: queuePause.reason,
+      queuePausedUntil: queuePause.until,
       startedAt: _startedAt ?? DateTime.now(),
       uptime: uptime,
     );

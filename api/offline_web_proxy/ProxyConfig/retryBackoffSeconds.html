@@ -72,7 +72,10 @@
   <p>Backoff intervals for retrying failed queued requests.</p>
 <p>When queued requests fail, they are retried with increasing delays
 according to this schedule. After the last interval, retries continue
-using the final value with jitter.</p>
+using the final value. When a <code>408</code> or <code>429</code> carries a later
+<code>Retry-After</code> (seconds or an HTTP date), the request waits until then,
+for one hour at most. After a <code>429</code>, nothing else is sent from the queue
+until that request is due, so that the rate limit is not prolonged.</p>
 <p><strong>Default</strong>: <code>[1, 2, 5, 10, 20, 30]</code> (seconds)</p>
 </section>
 

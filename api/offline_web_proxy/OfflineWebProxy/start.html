@@ -126,6 +126,7 @@
     _compileConfiguredPatterns();
     _resetRecoveryState();
     _clearQueuePause();
+    _queueHoldUntil = null;
 
     &#47;&#47; ストレージを初期化
     await _initializeStorage();

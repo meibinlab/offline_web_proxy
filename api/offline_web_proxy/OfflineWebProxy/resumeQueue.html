@@ -79,7 +79,9 @@
 一時停止します。</p>
 <p>一時停止していない場合も呼び出せます。その場合、呼び出す前から送信中の
 要求が認証が必要との応答を返しても、古いセッションで送った要求として
-一時停止しません。停止中は何もしません。</p>
+一時停止しません。停止中は何もしません。429 による送信の控え
+（<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.rateLimited</a>）は解除しません。控えは
+<a href="../../offline_web_proxy/ProxyStats/queuePausedUntil.html">ProxyStats.queuePausedUntil</a> に自動で解けます。</p>
 </section>
 
 

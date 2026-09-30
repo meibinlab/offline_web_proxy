@@ -131,6 +131,23 @@ proxy.</p>
 
 </dd>
 
+            <dt id="rateLimited" class="constant">
+    <span class="name ">rateLimited</span>
+  <span class="signature">&#8594; const <a href="../offline_web_proxy/QueuePauseReason.html">QueuePauseReason</a></span>
+  
+
+</dt>
+<dd>
+  <p>A request sent from the queue was answered with <code>429 Too Many Requests</code>.</p>
+<p>Sending resumes on its own at <code>ProxyStats.queuePausedUntil</code>, when that
+request is due again (its <code>Retry-After</code>, up to one hour, or the usual
+backoff). The hold is kept in memory only and ends when the proxy stops.
+When the queue is also paused by <a href="../offline_web_proxy/QueuePauseReason.html">authenticationRequired</a>, that reason
+is reported instead, because it needs the user to act.</p>
+  
+
+</dd>
+
         </dl>
       </section>
 
