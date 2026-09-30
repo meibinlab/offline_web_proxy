@@ -528,22 +528,25 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 - **保存順の維持**: 保存日時の昇順で再送し、リクエストの順序を保持
 - **キーの一意性**: マイクロ秒精度のタイムスタンプと同一マイクロ秒内の連番でキーを採番し、同時に保存したリクエストが上書きで失われないようにする
 - **永続化**: Hive の暗号化 Box（`proxy_queue_secure`）でキュー状態を保存。アプリ再起動後も再送を継続（「保存領域の暗号化」）
-- **再試行待ちの扱い**: バックオフ待機中のリクエストは今回の送信対象から外し、待機時間を過ぎた後続のリクエストを先に送信する
+- **再試行待ちの扱い**: バックオフ待機中のリクエストは今回の送信対象から外し、待機時間を過ぎた後続のリクエストを先に送信する。ただし 429 で送信を控えている間と、認証待ちで一時停止している間は、後続も送らない（「再試行戦略」「認証が必要な応答での一時停止」）
 - **接続の解放**: 再送では上流の応答本文を必ず読み切り、接続を解放してから次の要求へ進む。件数が同時接続数の上限を超えても最後まで送り切れるようにする
 - **隔離できない場合**: 隔離領域へ退避できない状況では、キューから取り除かずバックオフを適用して再試行する（1 件で `quarantineMaxBytes` を超える場合を除く。「保持上限」）
 
 ### 再試行戦略
 
 - **段階的バックオフ**: `ProxyConfig.retryBackoffSeconds` の秒数を再試行回数の順に適用（既定は 1, 2, 5, 10, 20, 30 秒）。末尾に達した後は同じ値を維持
-- **無限再試行**: ネットワークエラーと 5xx 応答の場合は再試行を継続
+- **無限再試行**: ネットワークエラー、5xx、408（Request Timeout）、429（Too Many Requests）の応答、303 以外の 3xx の応答の場合は再試行を継続
+- **`Retry-After`**: 408 と 429 の応答に `Retry-After`（秒数、または HTTP の日時）があり、通常の待ち時間より後を指す場合は、その時刻まで待ちます。ただし、今から 1 時間より後にはしません（異常に大きな値でキューが止まり続けないようにするため）。秒数は数字だけを受け付け、桁の大きな値は 1 時間として扱います。解釈できない値は無視します。5xx の `Retry-After` は使いません
+- **429 での送信の控え**: 429 を受けたら、その要求を送り直す時刻まで、キュー全体の送信を控えます。同じ上流へ後続を送り続けると、レート制限が長引くためです。控えはメモリ上だけに持ち、`start()` と `stop()` で解除します。控えている間は、`ProxyStats.queuePausedReason` と状態通知の `queuePausedReason` が `rateLimited` に、`queuePausedUntil` が再開する時刻（UTC）になります
+- **成功とみなす応答**: 2xx と 303（See Other）です。303 は、上流が要求を処理し、結果を別の場所で示すという意味のためです。再送ではリダイレクトをたどりません（最初の転送と同じ）。`authRequiredStatusCodes` に指定した状態コードは成功とみなしません
 
 ### 再送打ち切りの条件
 
 以下の場合、リクエストをキューから取り除きます。
 
-- **4xx 系エラー**: クライアントエラー（認証失敗、不正リクエスト等）。再送しても結果が変わらないため取り除く。ただし `authRequiredStatusCodes` に指定した状態コードは取り除かず、キューの送信を一時停止する（「認証が必要な応答での一時停止」）
+- **4xx 系エラー**: クライアントエラー（認証失敗、不正リクエスト等）。再送しても結果が変わらないため取り除く。ただし 408 と 429 は一時的な状態のため取り除かずに再試行し、`authRequiredStatusCodes` に指定した状態コードは取り除かずにキューの送信を一時停止する（「認証が必要な応答での一時停止」）
 
-ネットワークエラーと 5xx 系エラーは一時的な障害とみなし、取り除かずに再試行を継続します。
+ネットワークエラー、5xx 系エラー、408、429 は一時的な障害とみなし、取り除かずに再試行を継続します。
 
 ### 取り除いたリクエストの扱い
 
@@ -568,7 +571,7 @@ Cookie のセッションで認証する上流では、端末がオフライン�
 
 - **既定**: 空。指定が無い限り従来どおり、4xx はすべて取り除きます
 - **指定できる値**: 300〜499。ログイン画面へのリダイレクト（`302` など）も指定できます。範囲外の値は起動時に `ProxyStartException` で拒否します（2xx は成功、5xx は再試行と扱いが決まっているため）
-- **`POST` の `303`**: 従来どおり、再送は `dart:io` の既定でリダイレクトをたどるため、`POST` への `303` は `GET` で転送先へたどり、転送先の状態コードで判定します（ログイン画面の `200` なら届いたものとみなします）。`303` を指定しても `POST` では一時停止しません。ほかの状態コードとメソッドはたどりません。`POST` のセッション切れは `401`・`302`・`307` のいずれかで返すよう上流を設定してください
+- **`303`**: 指定しない場合、`303` は届いたものとみなします（「再試行戦略」）。上流がセッション切れを `303`（ログイン画面へのリダイレクト）で返す場合は、`303` を指定してください。指定しないと、届いていない要求がキューから消えます
 - **一時停止**: キューから送った要求がこの状態コードを返すと、その要求をキューに残し、再試行回数も次の送信時刻も変えません。キューの送信を一時停止し、この周回の残りも、以降の定期処理でも送りません。後続の要求は同じ理由で失敗する見込みが高く、順序も保つためです。バックオフ待ちの要求を追い越して後続を送る通常の扱い（「キュー管理」）とは異なります
 - **通知**: 一時停止するたびに `ProxyEventType.authenticationRequired` を 1 回発行します。再送結果（`queueResendAttempted`）は、`willRetry: true`、`dropReason: null` で記録します
 - **状態**: `ProxyStats.queuePausedReason` と状態通知の `queuePausedReason` が `authenticationRequired` になります。キーで照会した状態は `queued` のままです
@@ -779,11 +782,13 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
   "quarantinedCount": 0,
   "unacknowledgedDroppedCount": 0,
   "queuePausedReason": null,
+  "queuePausedUntil": null,
   "recentResendResults": []
 }
 ```
 
-- **`queuePausedReason`**: キューの送信を一時停止している理由（`getStats()` の `queuePausedReason` の名前）。一時停止していなければ `null`、認証待ちなら `"authenticationRequired"` です（「認証が必要な応答での一時停止」）
+- **`queuePausedReason`**: キューの送信を止めている理由（`getStats()` の `queuePausedReason` の名前）。止めていなければ `null`、認証待ちなら `"authenticationRequired"`（「認証が必要な応答での一時停止」）、429 を受けて控えているなら `"rateLimited"`（「再試行戦略」）です。両方に当たる場合は、利用者の操作が必要な `"authenticationRequired"` を返します
+- **`queuePausedUntil`**: 自動で再開する時刻（UTC の ISO 8601）。`"rateLimited"` の場合だけ値があり、それ以外は `null` です
 
 これにより「未送信があるときは精算させない」「未送信件数を表示する」「オフラインならレジ認証を出さない」が Web 側だけで完結します。
 
@@ -816,7 +821,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 | --- | --- | --- |
 | `queued` | 送信待ち。5xx や到達できないために再送を待っている場合と、認証待ちで一時停止している場合を含む | なし |
 | `quarantined` | 上流が 4xx で拒否し、隔離している | 上流が返した値 |
-| `delivered` | 送信待ちから送り、上流が 2xx を返した。`idempotencyRetention`（既定 24 時間）の間だけ | なし |
+| `delivered` | 送信待ちから送り、上流が 2xx か 303 を返した。`idempotencyRetention`（既定 24 時間）の間だけ | なし |
 | `dropped` | ドロップ履歴にある | 上流が返した値（無い場合は `0`） |
 | `unknown` | どこにも無い | なし |
 
@@ -837,7 +842,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 | 状態 | 次の状態 |
 | --- | --- |
-| `queued` | `delivered`（2xx、または届いた記録に同じキーがあり、送らずに成功とみなした場合）、`quarantined`（4xx）、`dropped`（4xx で `dropPolicy` が `drop` の場合、`quarantine_too_large` の場合）。5xx や到達できない間と、`authRequiredStatusCodes` の応答で一時停止している間は `queued` のまま。一時停止させた要求は `skipPausedRequest()` で `quarantined` か `dropped` になる |
+| `queued` | `delivered`（2xx か 303、または届いた記録に同じキーがあり、送らずに成功とみなした場合）、`quarantined`（408・429 以外の 4xx）、`dropped`（4xx で `dropPolicy` が `drop` の場合、`quarantine_too_large` の場合）。5xx・408・429・303 以外の 3xx や到達できない間と、`authRequiredStatusCodes` の応答で一時停止している間は `queued` のまま。一時停止させた要求は `skipPausedRequest()` で `quarantined` か `dropped` になる |
 | `quarantined` | `queued`（`retryQuarantinedRequest()`）、`dropped`（`quarantine_limit`・`quarantine_expired`）、`unknown`（破棄） |
 | `dropped` | `unknown`（保持期間か件数の上限で消えた場合、`clearDroppedRequests()`） |
 | `delivered` | `unknown`（`idempotencyRetention` を過ぎた場合） |
@@ -1006,7 +1011,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 1. **Cache-Control: s-maxage** (プロキシ用 TTL として扱う)
 2. **Cache-Control: max-age**
 3. **Expires** ヘッダ
-4. **設定ファイルのデフォルト TTL**
+4. **`ProxyConfig.cacheTtl` のデフォルト TTL**
 
 `Expires: 0` のように日時として解釈できない値は無視し、デフォルト TTL へ委ねます。解析の失敗を保存処理の外へ伝播させると、上流が返した 200 が転送失敗として扱われ、504 応答と上流到達性の失敗計上につながるためです。
 
@@ -1311,7 +1316,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 ### バックオフ戦略
 
 - **間隔**: `ProxyConfig.retryBackoffSeconds` の段階的延長（既定は [1, 2, 5, 10, 20, 30] 秒）
-- **再試行**: 無限再試行（ネットワークエラーと 5xx 応答の場合）
+- **再試行**: 無限再試行（ネットワークエラー、5xx、408、429、303 以外の 3xx の応答の場合）。`Retry-After` と 429 での送信の控えは【5】の「再試行戦略」を参照
 
 ### キュー処理
 
@@ -1393,15 +1398,7 @@ Cache-Control ヘッダを考慮した TTL 計算と stale 期間の設定を、
 
 #### Stale 期間の設定
 
-```yaml
-cache:
-  stalePeriod:
-    "text/html": 86400 # 1日間（TTL切れ後も1日間はstaleとして保持）
-    "text/css": 604800 # 7日間
-    "image/*": 2592000 # 30日間
-    "default": 259200 # 3日間
-  maxStalePeriod: 2592000 # 最大stale期間（30日）
-```
+`ProxyConfig.cacheStale` で、Content-Type ごとに秒数で指定します（例は「設定例」）。stale 期間の上限を抑える設定はありません。
 
 #### 特別なディレクティブ処理
 
@@ -1416,8 +1413,7 @@ cache:
 - **実行間隔**: 1 時間ごと
 - **削除対象**:
   1. **Expired 状態**のキャッシュ（stale 期間も超過）
-  2. **破損キャッシュ**（整合性チェック失敗）
-  3. **`cacheMaxSize` を超えた分**（保存した日時の古いものから。stale 状態でも削除対象）
+  2. **`cacheMaxSize` を超えた分**（保存した日時の古いものから。stale 状態でも削除対象）
 
 #### 手動削除メソッド
 
@@ -1427,16 +1423,17 @@ cache:
 - **`clearExpiredCache()`**: Expired 状態のキャッシュのみ削除
 - **`clearCacheForUrl(String url)`**: 特定 URL のキャッシュを削除
 
-#### 緊急削除
+#### 容量不足と壊れた記録
 
-- **ディスク容量不足**: 空き容量が設定値を下回った場合、stale 状態でも削除
-- **破損検出**: ファイル読み込み時に破損を検出した場合、即座に削除
+- **ディスクの空き容量**: 見ません。空き容量が少なくても、stale 状態の記録を先に削除することはありません。保存の上限は `cacheMaxSize` だけです
+- **本文の形式が分からない記録**: キャッシュが無いものとして扱います（削除はしません）。期限を過ぎると、期限切れとして削除されます
+- **片方の Box にしかない記録**: 起動時に削除します（【8】の「保存形式」）
 
 #### アプリライフサイクル連動
 
-- **アプリ起動時**: 破損キャッシュの検出・削除
-- **アプリ終了時**: メモリキャッシュのクリア（ファイルキャッシュは保持）
-- **設定変更時**: TTL 設定変更時は既存キャッシュの期限を再計算
+- **アプリ起動時**: 片方の Box にしかない記録を削除します
+- **アプリ終了時**: 特別な処理はしません。`stop()` で Box を閉じます（本文はもともとメモリに載せていません）
+- **設定変更時**: 保存済みの記録の有効期限（`cacheTtl` から求めて保存した値）は計算し直しません。stale 期間は判定のたびに、その時点の `cacheStale` から求めます
 
 ### キャッシュ使用優先順位
 
@@ -1464,108 +1461,37 @@ cache:
 
 ### 設定例
 
-```yaml
-# オフラインWebプロキシ設定ファイル
-# assets/config/config.yaml
-#
-# 全ての設定項目はオプションです。
-# 未設定の項目は以下に示すデフォルト値が自動的に使用されます。
+設定は `start(config: ProxyConfig(...))` で渡します。設定ファイル（YAML など）は読み込みません。`config` を省略すると既定値だけの設定になり、`origin` が空のため上流へは転送しません。キャッシュに関する項目の例です（すべての項目は【20】の `ProxyConfig` と README を参照）。
 
-proxy:
-  # サーバ基本設定
-  server:
-    port: 0 # 0=自動割当
-    host: "127.0.0.1" # ローカルバインド
-    origin: "" # 上流 サーバのURL（デフォルトは空、必須設定）
-      # 例: "https://api.example.com"
-    preferredPort: 0 # 利用可能なら優先するポート（0=指定なし）
-    idleTimeoutSeconds: 120 # 内部サーバのアイドルタイムアウト
-
-  # 死活監視・自動復旧設定
-  health:
-    checkPath: "/__offline_web_proxy/health" # ヘルスチェックパス
-    checkIntervalSeconds: 0 # 定期ヘルスチェック間隔（0=無効）
-    maxRestartAttemptsPerMinute: 5 # 1分あたりの再バインド上限回数
-
-  # キャッシュ設定
-  cache:
-    maxSizeBytes: 209715200 # 200MB
-    purgeIntervalSeconds: 3600 # 1時間ごと
-
-    # ウォームアップ設定（warmupCache() の既定値。start() では自動取得しない）
-    startup:
-      enabled: false # オフライン時または上流到達不能時の代替応答を準備するか
-      paths: [] # 事前取得対象のパスリスト（デフォルトは空）
-        # - "/config"
-        # - "/user/profile"
-        # - "/assets/app.css"
-      timeout: 30 # 各パスのタイムアウト（秒）
-      maxConcurrency: 3 # 同時実行数
-      onFailure: "continue" # continue（継続）/abort（中止）
-
-    # TTL設定（秒）
-    ttl:
-      "text/html": 3600 # 1時間
-      "text/css": 86400 # 24時間
-      "application/javascript": 86400 # 24時間
-      "image/*": 604800 # 7日間
-      "default": 86400 # 24時間
-
-    # Stale期間設定（TTL切れ後の保持期間）
-    stale:
-      "text/html": 86400 # 1日間
-      "text/css": 604800 # 7日間
-      "image/*": 2592000 # 30日間
-      "default": 259200 # 3日間
-      maxPeriodSeconds: 2592000 # 最大30日
-
-  # リクエストキュー設定
-  queue:
-    drainIntervalSeconds: 3 # キュー排出間隔
-    retryBackoffSeconds: [1, 2, 5, 10, 20, 30, 60] # バックオフ間隔
-    jitterPercent: 20 # ±20%
-
-  # タイムアウト設定（秒）
-  timeouts:
-    connect: 10 # TCP接続確立
-    send: 15 # リクエスト送信
-    receive: 30 # レスポンス受信
-    request: 60 # リクエスト全体
-
-  # べき等性設定
-  idempotency:
-    retentionHours: 24 # べき等性キーの保持期間
-
-  # ヘッダ書き換え設定（デフォルトは空、必要に応じて設定）
-  headers: {} # 空オブジェクト=デフォルト動作（デフォルト）
-    # authorization: "passthrough"  # 例: passthrough/inject/off
-    # cookies: "jar"                # 例: jar/passthrough/off
-    # setCookies: "capture"         # 例: capture/passthrough
-    # origin: "replace"             # 例: replace/passthrough/remove
-    # referer: "replace"            # 例: replace/passthrough/remove
-    # location: "rewrite"           # 例: rewrite/passthrough
-
-  # フォールバック設定
-  fallback:
-    offlinePage: "assets/fallback/offline.html"
-    errorPage: "assets/fallback/error.html"
-
-  # ログ設定
-  logging:
-    level: "info" # debug/info/warn/error
-    maskSensitiveHeaders: true # Authorization/Cookie等をマスク
-
-  # 到達の制限
-  access:
-    requireAccessToken: false # true で秘密値を持たない要求を 403 で拒否
-    addCorsHeaders: true # false で内部エンドポイント以外の応答へ CORS ヘッダを付けない
-
-  # 開発・デバッグ設定
-  debug:
-    enableAdminApi: false # セキュリティ重視、開発時のみtrue推奨
-    cacheInspection: false # セキュリティ重視、開発時のみtrue推奨
-    detailedHeaders: false # パフォーマンス重視、開発時のみtrue推奨
+```dart
+final port = await proxy.start(
+  config: const ProxyConfig(
+    origin: 'https://api.example.com',
+    cacheMaxSize: 200 * 1024 * 1024, // 200 MB（0 で上限なし）
+    cacheTtl: {
+      'text/html': 3600, // 1 時間
+      'text/css': 86400, // 24 時間
+      'application/javascript': 86400, // 24 時間
+      'text/javascript': 86400, // 24 時間
+      'image/*': 604800, // 7 日間
+      'default': 86400, // 24 時間
+    },
+    cacheStale: {
+      'text/html': 86400, // 1 日間
+      'text/css': 604800, // 7 日間
+      'image/*': 2592000, // 30 日間
+      'default': 259200, // 3 日間
+    },
+    forceCachePaths: ['/app/**'],
+    encryptResponseCache: true,
+    retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
+  ),
+);
 ```
+
+- **`cacheTtl`・`cacheStale`**: 指定すると既定値を丸ごと置き換えます。既定値と合わせたい種類は、例のようにすべて書きます
+- **期限切れの削除**: 1 時間ごとに行います（設定では変えられません）
+- **キューの送信**: 5 秒ごとに行います（設定では変えられません）
 
 ## 【17】スレッドセーフティ
 
@@ -1660,7 +1586,7 @@ INFO: GET /api/user → 200 OK (Authorization: **\***, Cookie: **\***)
 プロキシサーバを起動します。
 
 - **パラメータ**:
-  - `config`: 設定オブジェクト（省略時はデフォルト設定またはファイル設定を使用）
+  - `config`: 設定オブジェクト（省略時は既定値だけの設定。`origin` が空のため上流へは転送しない。設定ファイルは読み込まない）
 - **戻り値**: 実際に使用されるポート番号
 - **例外**:
   - `ProxyStartException`: サーバ起動に失敗した場合。既に稼働中の場合、起動処理中の場合、保持上限に負の値を指定した場合を含む
@@ -2218,7 +2144,7 @@ for (final request in quarantined) {
 `authRequiredStatusCodes` の応答で一時停止したキューの送信を再開します（【5】の「認証が必要な応答での一時停止」）。
 
 - **戻り値**: なし
-- **注意**: 一時停止の原因になった要求から順に送ります。一時停止していない場合も呼び出せ、その場合は呼び出す前から送信中の要求が指定の状態コードを返しても一時停止しません。停止中は何もしません
+- **注意**: 一時停止の原因になった要求から順に送ります。一時停止していない場合も呼び出せ、その場合は呼び出す前から送信中の要求が指定の状態コードを返しても一時停止しません。停止中は何もしません。429 による送信の控え（`rateLimited`）は解除しません。控えは `queuePausedUntil` に自動で解けます
 
 ```dart
 // 利用者がログインし直した後に呼び出す
@@ -2232,10 +2158,11 @@ await proxy.resumeQueue();
 - **戻り値**: 取り除いた場合は `true`。一時停止していない場合、停止中の場合、要求が既にキューに無い場合は `false`（最後の場合も一時停止は解除します）
 - **例外**:
   - `QueueOperationException`: 隔離またはドロップ履歴へ記録できなかった場合と、キュー・隔離・ドロップ履歴のいずれかのロックを 30 秒以内に取得できなかった場合。要求はキューに残り、一時停止も続きます
-- **注意**: `dropPolicy` に従って隔離またはドロップ履歴へ移し、理由は `authentication_required` です。隔離する方針で、1 件で `quarantineMaxBytes` を超える要求は、ドロップ履歴へ `quarantine_too_large` で記録します
+- **注意**: `dropPolicy` に従って隔離またはドロップ履歴へ移し、理由は `authentication_required` です。隔離する方針で、1 件で `quarantineMaxBytes` を超える要求は、ドロップ履歴へ `quarantine_too_large` で記録します。429 による送信の控え（`rateLimited`）は対象外で、`false` を返します
 
 ```dart
-if ((await proxy.getStats()).queuePausedReason != null) {
+if ((await proxy.getStats()).queuePausedReason ==
+    QueuePauseReason.authenticationRequired) {
   await proxy.skipPausedRequest();
 }
 ```
@@ -2521,13 +2448,15 @@ class ProxyStats {
   final int droppedRequestsCount; // ドロップされたリクエスト数
   final int unacknowledgedDroppedCount; // 未確認のドロップ履歴件数
   final int quarantinedCount; // 隔離されているリクエスト数
-  final QueuePauseReason? queuePausedReason; // キューの送信を一時停止している理由（していなければ null）
+  final QueuePauseReason? queuePausedReason; // キューの送信を止めている理由（止めていなければ null）
+  final DateTime? queuePausedUntil; // 自動で再開する時刻（UTC。rateLimited の場合だけ）
   final DateTime startedAt; // プロキシサーバ開始日時
   final Duration uptime; // 稼働時間
 }
 
 enum QueuePauseReason {
-  authenticationRequired // キューから送った要求が authRequiredStatusCodes の状態コードを返した（【5】）
+  authenticationRequired, // キューから送った要求が authRequiredStatusCodes の状態コードを返した（【5】）
+  rateLimited // キューから送った要求が 429 を返し、送り直す時刻まで控えている（【5】）
 }
 ```
 

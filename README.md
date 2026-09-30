@@ -272,7 +272,7 @@ Notes:
 - `upstreamFailureThreshold` is how many consecutive unreachable attempts stop forwarding. It prevents every request from waiting for the timeout when the link layer is up but the upstream is down. Set it to `0` to disable the behavior.
 - `upstreamProbePath`, `upstreamProbeMethod`, `upstreamProbeTimeout` and `upstreamProbeBackoffSeconds` control the reachability probe used while forwarding is stopped. Any response counts as reachable, regardless of status code.
 - `queuedResponse` and `offlineMissResponse` define the responses the proxy generates itself. Both default to JSON so that `response.json()` succeeds in the web app.
-- `dropPolicy` decides what happens to an update request the upstream rejected with 4xx (other than the codes listed in `authRequiredStatusCodes`). The default `quarantine` keeps it, body included, so `getQuarantinedRequests()` can surface it for a resend-or-discard decision (a request that alone exceeds `quarantineMaxBytes` is not quarantined; it is recorded in the dropped history as `quarantine_too_large`, without its body). `drop` discards it and keeps only a history entry, as before.
+- `dropPolicy` decides what happens to an update request the upstream rejected with 4xx (other than the codes listed in `authRequiredStatusCodes`). 408 and 429 are temporary and are retried like a 5xx instead; a `Retry-After` is honoured (up to one hour), and nothing else is sent from the queue during a 429. A 303 is taken as delivered. The default `quarantine` keeps it, body included, so `getQuarantinedRequests()` can surface it for a resend-or-discard decision (a request that alone exceeds `quarantineMaxBytes` is not quarantined; it is recorded in the dropped history as `quarantine_too_large`, without its body). `drop` discards it and keeps only a history entry, as before.
 - `quarantineMaxCount` (1000 by default), `quarantineRetention` (30 days), `quarantineMaxBytes` (20 MB), `droppedRequestMaxCount` (1000) and `droppedRequestRetention` (30 days) limit what the quarantine store and the dropped history keep. `0` (`Duration.zero`) removes a limit, and a negative value makes `start()` throw `ProxyStartException`. See [Retention limits for quarantine and dropped history](#retention-limits-for-quarantine-and-dropped-history).
 - `enableIdempotencyKey` attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. **Deduplication itself must be implemented on the upstream server.**
 - `forceCachePaths` lists the paths stored even when the response says `Cache-Control: no-store`. On a server that sends `no-store` everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes `no-store` handling proxy-wide.
@@ -298,7 +298,7 @@ Notes:
   - A pause raises `ProxyEventType.authenticationRequired` once, and `queuePausedReason` in `getStats()` and in the status endpoint becomes `authenticationRequired`. A status query by key keeps answering `queued`.
   - The queue resumes when `resumeQueue()` is called, or when a request matching `authResumePaths` (the sign-in) is answered with 2xx or 3xx through the proxy. A 3xx counts because a sign-in form usually redirects after it succeeds. If the same request is answered with the same code again, the queue pauses again.
   - A request that signing in does not fix is moved out with `skipPausedRequest()`, to the quarantine store or the dropped history according to `dropPolicy` (reason `authentication_required`), and the rest are sent.
-  - Codes from 300 to 499 are accepted, so a redirect to the sign-in page (such as `302`) can be listed. A `POST` answered with `303`, however, is followed to the target by `dart:io` as before and does not pause the queue (the status code of the target decides); answer an expired session on a `POST` with `401`, `302` or `307`. **A code that is also returned for other reasons, such as `403` for a missing permission, pauses the queue on a request that signing in cannot fix.** So does a request that carries a CSRF token of the old session.
+  - Codes from 300 to 499 are accepted, so a redirect to the sign-in page (such as `302`) can be listed. Unless listed, a `303` is taken as delivered, so list `303` when the upstream answers an expired session with it. **A code that is also returned for other reasons, such as `403` for a missing permission, pauses the queue on a request that signing in cannot fix.** So does a request that carries a CSRF token of the old session.
   - The pause is not persisted. It ends when the proxy stops, and the next start sends from the head of the queue again.
 - `enableAcceptedAtHeader` and `acceptedAtHeaderName` tell the upstream when the proxy first accepted a request. The same UTC ISO 8601 value is sent on the first forward and on every resend, so the upstream needs one rule — use this header when the payload carries no business timestamp — to stop offline sales from being recorded at reconnection time. Enabled by default.
   - The value survives a quarantine retry. `queuedAt` cannot be reused because a retry updates it.
@@ -564,11 +564,13 @@ The response looks like this.
   "quarantinedCount": 0,
   "unacknowledgedDroppedCount": 0,
   "queuePausedReason": null,
+  "queuePausedUntil": null,
   "recentResendResults": []
 }
 ```
 
-- `queuePausedReason` tells why sending from the queue is paused (`authRequiredStatusCodes`): `null` when it is not, `"authenticationRequired"` while it waits for a sign-in. The page can use it to ask the user to sign in.
+- `queuePausedReason` tells why sending from the queue is stopped: `null` when it is not, `"authenticationRequired"` while it waits for a sign-in (`authRequiredStatusCodes`), `"rateLimited"` while it is held after the upstream answered 429. The page can use `"authenticationRequired"` to ask the user to sign in.
+- `queuePausedUntil` is when sending resumes (UTC ISO 8601) for `"rateLimited"`, `null` otherwise.
 - `GET` only, never forwarded upstream, excluded from statistics, and omitted from the request log.
 - Only callers on the proxy's own origin are served. A request carrying another `Origin` is answered with `403`, and `Access-Control-Allow-Origin: *` is never attached.
 - A request without an `Origin` is allowed, so other apps on the device can reach it too. To limit it to the WebView, enable `requireAccessToken` as well ("Keeping Other Apps Away from the Proxy").
@@ -595,7 +597,7 @@ for (const item of (await response.json()).requests) {
 }
 ```
 
-- `state` is one of `queued` (waiting in the queue, including while the queue is paused for a sign-in), `quarantined` (rejected with 4xx), `delivered` (sent from the queue and answered with 2xx, for `idempotencyRetention`), `dropped` (in the dropped history) or `unknown` (found nowhere). `quarantined` and `dropped` carry `statusCode`.
+- `state` is one of `queued` (waiting in the queue, including while the queue is paused for a sign-in), `quarantined` (rejected with 4xx), `delivered` (sent from the queue and answered with 2xx or 303, for `idempotencyRetention`), `dropped` (in the dropped history) or `unknown` (found nowhere). `quarantined` and `dropped` carry `statusCode`.
 - When the same key sits in several places, the first match in the order `delivered` → `queued` → `quarantined` → `dropped` wins.
 - A request the upstream answered on its first forward with anything but 5xx is `unknown`, because the page receives that answer directly. A 5xx or an unreachable upstream puts the request in the queue, so it is `queued` (a request matching `queueExcludePaths` is never queued, so it stays `unknown`).
 - Up to 50 keys of up to 200 characters each; beyond that the answer is `400`. When the stores cannot be read the answer is `503`, never `unknown`.

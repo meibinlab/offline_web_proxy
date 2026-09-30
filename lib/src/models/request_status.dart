@@ -11,7 +11,7 @@ enum RequestState {
   /// Rejected by the upstream with 4xx and kept in quarantine.
   quarantined,
 
-  /// Sent from the queue and answered with 2xx by the upstream, within
+  /// Sent from the queue and answered with 2xx or `303` by the upstream, within
   /// `ProxyConfig.idempotencyRetention`.
   ///
   /// A request the upstream answered on its first forward with anything but

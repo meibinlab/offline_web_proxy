@@ -292,7 +292,10 @@ class ProxyConfig {
   ///
   /// When queued requests fail, they are retried with increasing delays
   /// according to this schedule. After the last interval, retries continue
-  /// using the final value with jitter.
+  /// using the final value. When a `408` or `429` carries a later
+  /// `Retry-After` (seconds or an HTTP date), the request waits until then,
+  /// for one hour at most. After a `429`, nothing else is sent from the queue
+  /// until that request is due, so that the rate limit is not prolonged.
   ///
   /// **Default**: `[1, 2, 5, 10, 20, 30]` (seconds)
   final List<int> retryBackoffSeconds;
@@ -548,10 +551,11 @@ class ProxyConfig {
   ///
   /// Codes from 300 to 499 are accepted, so that a redirect to the sign-in
   /// page such as `302` can be listed; other values are rejected by `start()`
-  /// with a `ProxyStartException`. A `POST` answered with `303` is followed
-  /// to the redirect target by `dart:io`, as before, so the code of the
-  /// target decides; list `302` or `307` for a `POST`. The pause is kept in
-  /// memory only and ends when the proxy stops.
+  /// with a `ProxyStartException`. A resend does not follow redirects, and a
+  /// `303` is otherwise taken as delivered (the upstream processed the
+  /// request and points to the result); list `303` when the upstream answers
+  /// an expired session with it. The pause is kept in memory only and ends
+  /// when the proxy stops.
   ///
   /// **Warning**: List only codes that mean "sign in again". A code that is
   /// also returned for other reasons, such as `403` for a missing permission
@@ -717,7 +721,8 @@ class ProxyConfig {
   /// What happens to a queued update request the upstream rejected with 4xx.
   ///
   /// Resending cannot change a 4xx result, so the request leaves the queue.
-  /// Codes listed in [authRequiredStatusCodes] pause the queue instead.
+  /// `408` and `429` are temporary and are retried like a 5xx instead, and
+  /// codes listed in [authRequiredStatusCodes] pause the queue.
   /// [DropPolicy.quarantine] keeps it, body included, in a quarantine store so
   /// that it can be resent after the cause is fixed, or discarded on purpose.
   /// [DropPolicy.drop] discards it and keeps only a history entry.

@@ -528,22 +528,25 @@ Provides methods for cookie management. See [20] API Reference for details.
 - **Stored Order**: Resend in ascending order of the stored timestamp to preserve request order
 - **Unique Keys**: Derive keys from a microsecond timestamp plus a per-microsecond sequence number so that requests stored at the same moment are never overwritten
 - **Persistence**: Save queue state in an encrypted Hive box (`proxy_queue_secure`). Continue resending after app restart (see "Encrypted Storage")
-- **Backoff Handling**: Skip requests that are still waiting for their backoff window and send the following requests whose window has already passed
+- **Backoff Handling**: Skip requests that are still waiting for their backoff window and send the following requests whose window has already passed, except while the queue is held after a 429 or paused for a sign-in ("Retry Strategy", "Pausing on an Authentication-Required Answer")
 - **Connection Release**: A resend always reads the upstream response body to completion and releases the connection before moving on, so a queue larger than the concurrent connection limit still drains to the end
 - **When Quarantine Fails**: If the request cannot be moved to the quarantine store, it stays in the queue and is retried with backoff applied (except a request that alone exceeds `quarantineMaxBytes`; see "Retention Limits")
 
 ### Retry Strategy
 
 - **Staged Backoff**: Apply the seconds listed in `ProxyConfig.retryBackoffSeconds` in retry order (defaults to 1, 2, 5, 10, 20, 30 seconds), then keep using the last value
-- **Infinite Retry**: Keep retrying for network errors and 5xx responses
+- **Infinite Retry**: Keep retrying for network errors, 5xx, 408 (Request Timeout) and 429 (Too Many Requests) responses, and 3xx responses other than 303
+- **`Retry-After`**: When a 408 or 429 response carries `Retry-After` (seconds or an HTTP date) that points later than the usual wait, the request waits until then, but never more than one hour from now (so that an absurd value cannot stall the queue). Seconds must be digits only, and a huge number counts as one hour. A value that cannot be parsed is ignored. A `Retry-After` on a 5xx is not used
+- **Holding the queue on 429**: After a 429, nothing is sent from the queue until that request is due again, because sending later requests to the same upstream would prolong the rate limit. The hold is kept in memory and cleared by `start()` and `stop()`. While it lasts, `ProxyStats.queuePausedReason` and `queuePausedReason` in the status endpoint are `rateLimited`, and `queuePausedUntil` is the time sending resumes (UTC)
+- **Responses taken as delivered**: 2xx and 303 (See Other), since a 303 means that the upstream processed the request and points to the result elsewhere. A resend does not follow redirects (as with the first forward). A code listed in `authRequiredStatusCodes` is not taken as delivered
 
 ### Conditions for Giving Up a Resend
 
 A request leaves the queue in the following case.
 
-- **4xx Errors**: Client errors (authentication failure, invalid request, etc.). Resending cannot change the result, so the request is removed. A code listed in `authRequiredStatusCodes` is not removed but pauses sending from the queue ("Pausing on an Authentication-Required Answer")
+- **4xx Errors**: Client errors (authentication failure, invalid request, etc.). Resending cannot change the result, so the request is removed. 408 and 429 are temporary and are retried instead, and a code listed in `authRequiredStatusCodes` is not removed but pauses sending from the queue ("Pausing on an Authentication-Required Answer")
 
-Network errors and 5xx errors are treated as temporary failures: they are kept in the queue and retried.
+Network errors, 5xx errors, 408 and 429 are treated as temporary failures: they are kept in the queue and retried.
 
 ### What Happens to a Removed Request
 
@@ -568,7 +571,7 @@ A status code listed in `ProxyConfig.authRequiredStatusCodes` pauses sending fro
 
 - **Default**: Empty. Unless codes are listed, every 4xx leaves the queue as before
 - **Accepted values**: 300 to 499, so that a redirect to the sign-in page (such as `302`) can be listed. Other values are rejected at startup with `ProxyStartException` (2xx already means success and 5xx means retry)
-- **`303` on `POST`**: As before, a resend follows redirects with the `dart:io` defaults, so a `POST` answered with `303` is followed to the target with `GET`, and the status code of the target decides (a `200` from a sign-in page is taken as delivered). Listing `303` does not pause a `POST`. Other codes and methods are not followed. Have the upstream answer an expired session on a `POST` with `401`, `302` or `307`
+- **`303`**: Unless listed, a `303` is taken as delivered ("Retry Strategy"). When the upstream answers an expired session with `303` (a redirect to the sign-in page), list `303`; otherwise a request that never arrived leaves the queue
 - **Pause**: When a request sent from the queue is answered with a listed code, the request stays in the queue with its retry count and next send time unchanged. Sending from the queue pauses: neither the rest of the current pass nor later periodic passes send anything, because later requests are likely to fail for the same reason and their order is kept. This differs from the usual rule that later requests overtake a request waiting for its backoff ("Queue Management")
 - **Notification**: Each pause raises `ProxyEventType.authenticationRequired` once. The resend result (`queueResendAttempted`) is recorded with `willRetry: true` and `dropReason: null`
 - **State**: `ProxyStats.queuePausedReason` and `queuePausedReason` in the status endpoint become `authenticationRequired`. A status query by key keeps answering `queued`
@@ -779,11 +782,13 @@ The unsent count and the online state were reachable only from the Dart API, so 
   "quarantinedCount": 0,
   "unacknowledgedDroppedCount": 0,
   "queuePausedReason": null,
+  "queuePausedUntil": null,
   "recentResendResults": []
 }
 ```
 
-- **`queuePausedReason`**: Why sending from the queue is paused (the name of `queuePausedReason` in `getStats()`): `null` when it is not, `"authenticationRequired"` while it waits for a sign-in ("Pausing on an Authentication-Required Answer")
+- **`queuePausedReason`**: Why sending from the queue is stopped (the name of `queuePausedReason` in `getStats()`): `null` when it is not, `"authenticationRequired"` while it waits for a sign-in ("Pausing on an Authentication-Required Answer"), `"rateLimited"` while it is held after a 429 ("Retry Strategy"). When both apply, `"authenticationRequired"` is returned, because it needs the user to act
+- **`queuePausedUntil`**: When sending resumes on its own (UTC ISO 8601). Set only for `"rateLimited"`, `null` otherwise
 
 With it, "block settlement while something is unsent", "show the unsent count" and "hide the sign-in when offline" are decided entirely in the web app.
 
@@ -816,7 +821,7 @@ A page that sends an update request with its own idempotency key (section [6]) c
 | --- | --- | --- |
 | `queued` | Waiting in the queue, including a request waiting to be resent after 5xx or an unreachable upstream, and while the queue is paused for a sign-in | None |
 | `quarantined` | Rejected by the upstream with 4xx and kept in quarantine | Value the upstream returned |
-| `delivered` | Sent from the queue and answered with 2xx by the upstream, for `idempotencyRetention` (24 hours by default) | None |
+| `delivered` | Sent from the queue and answered with 2xx or 303 by the upstream, for `idempotencyRetention` (24 hours by default) | None |
 | `dropped` | In the dropped history | Value the upstream returned (`0` when none) |
 | `unknown` | Found nowhere | None |
 
@@ -837,7 +842,7 @@ A page that sends an update request with its own idempotency key (section [6]) c
 
 | State | Next state |
 | --- | --- |
-| `queued` | `delivered` (2xx, or treated as sent because the delivered records already hold the key), `quarantined` (4xx), `dropped` (4xx with `dropPolicy` `drop`, or `quarantine_too_large`). Stays `queued` on 5xx or an unreachable upstream, and while the queue is paused by an `authRequiredStatusCodes` answer. The request that paused the queue becomes `quarantined` or `dropped` through `skipPausedRequest()` |
+| `queued` | `delivered` (2xx or 303, or treated as sent because the delivered records already hold the key), `quarantined` (4xx other than 408 and 429), `dropped` (4xx with `dropPolicy` `drop`, or `quarantine_too_large`). Stays `queued` on 5xx, 408, 429, a 3xx other than 303 or an unreachable upstream, and while the queue is paused by an `authRequiredStatusCodes` answer. The request that paused the queue becomes `quarantined` or `dropped` through `skipPausedRequest()` |
 | `quarantined` | `queued` (`retryQuarantinedRequest()`), `dropped` (`quarantine_limit`, `quarantine_expired`), `unknown` (discarded) |
 | `dropped` | `unknown` (expired or removed by the count limit, `clearDroppedRequests()`) |
 | `delivered` | `unknown` (after `idempotencyRetention`) |
@@ -1006,7 +1011,7 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
 1. **Cache-Control: s-maxage** (treated as proxy-side TTL)
 2. **Cache-Control: max-age**
 3. **Expires** header
-4. **Default TTL in configuration file**
+4. **Default TTL from `ProxyConfig.cacheTtl`**
 
 A value that cannot be read as a date, such as `Expires: 0`, is ignored and the default TTL applies. Letting the parse failure escape the storage step would turn an upstream 200 into a forwarding failure, answering 504 and counting against upstream reachability.
 
@@ -1311,7 +1316,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 ### Backoff Strategy
 
 - **Interval**: Gradual extension defined by `ProxyConfig.retryBackoffSeconds` (defaults to [1, 2, 5, 10, 20, 30] seconds)
-- **Retry**: Infinite retry (for network errors and 5xx responses)
+- **Retry**: Infinite retry (for network errors and for 5xx, 408, 429 and 3xx other than 303 responses). See "Retry Strategy" in [5] for `Retry-After` and the hold on 429
 
 ### Queue Processing
 
@@ -1393,15 +1398,7 @@ Cache is managed in the following 3 states and these states are used for offline
 
 #### Stale Period Setting
 
-```yaml
-cache:
-  stalePeriod:
-    "text/html": 86400 # 1 day (retain as stale for 1 day after TTL expiration)
-    "text/css": 604800 # 7 days
-    "image/*": 2592000 # 30 days
-    "default": 259200 # 3 days
-  maxStalePeriod: 2592000 # Maximum stale period (30 days)
-```
+Set it in seconds per Content-Type with `ProxyConfig.cacheStale` (see "Configuration Example"). There is no setting that caps the stale period.
 
 #### Special Directive Processing
 
@@ -1416,8 +1413,7 @@ cache:
 - **Execution Interval**: Every 1 hour
 - **Deletion Target**:
   1. **Expired state** cache (stale period also exceeded)
-  2. **Corrupted cache** (consistency check failed)
-  3. **Entries beyond `cacheMaxSize`** (oldest stored first; removed even in stale state)
+  2. **Entries beyond `cacheMaxSize`** (oldest stored first; removed even in stale state)
 
 #### Manual Deletion Methods
 
@@ -1427,16 +1423,17 @@ Provides methods for cache management. See [20] API Reference for details.
 - **`clearExpiredCache()`**: Delete only Expired state cache
 - **`clearCacheForUrl(String url)`**: Delete cache for specific URL
 
-#### Emergency Deletion
+#### Low Disk Space and Broken Entries
 
-- **Disk Space Shortage**: Delete even in stale state when free space falls below configured value
-- **Corruption Detection**: Delete immediately when corruption detected during file reading
+- **Free disk space**: Not checked. Stale entries are not removed early when space runs low; `cacheMaxSize` is the only limit on what is stored
+- **An entry whose body format is unknown**: Treated as not cached (it is not deleted). It is removed as expired once its time is up
+- **An entry found in only one of the two boxes**: Removed at startup ("Storage Format" in [8])
 
 #### App Lifecycle Integration
 
-- **App Startup**: Detect and delete corrupted cache
-- **App Termination**: Clear memory cache (retain file cache)
-- **Configuration Change**: Recalculate expiration of existing cache when TTL settings change
+- **App Startup**: Entries found in only one of the two boxes are removed
+- **App Termination**: Nothing special is done. `stop()` closes the boxes (bodies are never held in memory in the first place)
+- **Configuration Change**: The expiry already stored with an entry (computed from `cacheTtl` when it was saved) is not recalculated. The stale period is derived from the current `cacheStale` each time an entry is checked
 
 ### Cache Usage Priority
 
@@ -1464,108 +1461,37 @@ Decision order during request processing:
 
 ### Configuration Example
 
-```yaml
-# Offline Web Proxy Configuration File
-# assets/config/config.yaml
-#
-# All configuration items are optional.
-# Default values shown below are automatically used for unset items.
+Settings are passed with `start(config: ProxyConfig(...))`; no configuration file (YAML or otherwise) is read. Omitting `config` uses the defaults only, and since `origin` is then empty nothing is forwarded upstream. The example below shows the cache-related settings (see `ProxyConfig` in [20] and the README for every setting).
 
-proxy:
-  # Server basic settings
-  server:
-    port: 0 # 0=automatic assignment
-    host: "127.0.0.1" # Local bind
-    origin: "" # Upstream server URL (default is empty, required setting)
-      # Example: "https://api.example.com"
-    preferredPort: 0 # Port to prefer when available (0=unspecified)
-    idleTimeoutSeconds: 120 # Internal server idle timeout
-
-  # Health monitoring and automatic recovery settings
-  health:
-    checkPath: "/__offline_web_proxy/health" # Health check path
-    checkIntervalSeconds: 0 # Periodic health check interval (0=disabled)
-    maxRestartAttemptsPerMinute: 5 # Rebind limit per minute
-
-  # Cache settings
-  cache:
-    maxSizeBytes: 209715200 # 200MB
-    purgeIntervalSeconds: 3600 # Every 1 hour
-
-    # Warmup settings (defaults of warmupCache(); start() does not fetch them by itself)
-    startup:
-      enabled: false # Prepare substitute responses for offline or unreachable upstream
-      paths: [] # Path list to fetch in advance (default is empty)
-        # - "/config"
-        # - "/user/profile"
-        # - "/assets/app.css"
-      timeout: 30 # Timeout for each path (seconds)
-      maxConcurrency: 3 # Number of concurrent executions
-      onFailure: "continue" # continue/abort
-
-    # TTL settings (seconds)
-    ttl:
-      "text/html": 3600 # 1 hour
-      "text/css": 86400 # 24 hours
-      "application/javascript": 86400 # 24 hours
-      "image/*": 604800 # 7 days
-      "default": 86400 # 24 hours
-
-    # Stale period settings (retention period after TTL expiration)
-    stale:
-      "text/html": 86400 # 1 day
-      "text/css": 604800 # 7 days
-      "image/*": 2592000 # 30 days
-      "default": 259200 # 3 days
-      maxPeriodSeconds: 2592000 # Maximum 30 days
-
-  # Request queue settings
-  queue:
-    drainIntervalSeconds: 3 # Queue drain interval
-    retryBackoffSeconds: [1, 2, 5, 10, 20, 30, 60] # Backoff interval
-    jitterPercent: 20 # ±20%
-
-  # Timeout settings (seconds)
-  timeouts:
-    connect: 10 # TCP connection establishment
-    send: 15 # Request send
-    receive: 30 # Response receive
-    request: 60 # Entire request
-
-  # Idempotency settings
-  idempotency:
-    retentionHours: 24 # Idempotency key retention period
-
-  # Header rewriting settings (default is empty, configure as needed)
-  headers: {} # Empty object=default behavior (default)
-    # authorization: "passthrough"  # Example: passthrough/inject/off
-    # cookies: "jar"                # Example: jar/passthrough/off
-    # setCookies: "capture"         # Example: capture/passthrough
-    # origin: "replace"             # Example: replace/passthrough/remove
-    # referer: "replace"            # Example: replace/passthrough/remove
-    # location: "rewrite"           # Example: rewrite/passthrough
-
-  # Fallback settings
-  fallback:
-    offlinePage: "assets/fallback/offline.html"
-    errorPage: "assets/fallback/error.html"
-
-  # Logging settings
-  logging:
-    level: "info" # debug/info/warn/error
-    maskSensitiveHeaders: true # Mask Authorization/Cookie, etc.
-
-  # Access restriction
-  access:
-    requireAccessToken: false # true refuses requests without the secret with 403
-    addCorsHeaders: true # false stops adding CORS headers to responses other than the internal endpoints
-
-  # Development/debug settings
-  debug:
-    enableAdminApi: false # Security-focused, recommend true only during development
-    cacheInspection: false # Security-focused, recommend true only during development
-    detailedHeaders: false # Performance-focused, recommend true only during development
+```dart
+final port = await proxy.start(
+  config: const ProxyConfig(
+    origin: 'https://api.example.com',
+    cacheMaxSize: 200 * 1024 * 1024, // 200 MB (0 disables the limit)
+    cacheTtl: {
+      'text/html': 3600, // 1 hour
+      'text/css': 86400, // 24 hours
+      'application/javascript': 86400, // 24 hours
+      'text/javascript': 86400, // 24 hours
+      'image/*': 604800, // 7 days
+      'default': 86400, // 24 hours
+    },
+    cacheStale: {
+      'text/html': 86400, // 1 day
+      'text/css': 604800, // 7 days
+      'image/*': 2592000, // 30 days
+      'default': 259200, // 3 days
+    },
+    forceCachePaths: ['/app/**'],
+    encryptResponseCache: true,
+    retryBackoffSeconds: [1, 2, 5, 10, 20, 30],
+  ),
+);
 ```
+
+- **`cacheTtl` and `cacheStale`**: A value replaces the defaults as a whole. List every type that should keep its default, as in the example
+- **Purging expired entries**: Every hour (not configurable)
+- **Sending from the queue**: Every 5 seconds (not configurable)
 
 ## [17] Thread Safety
 
@@ -1660,7 +1586,7 @@ INFO: GET /api/user → 200 OK (Authorization: ***, Cookie: ***)
 Starts the proxy server.
 
 - **Parameters**:
-  - `config`: Configuration object (uses default or file configuration when omitted)
+  - `config`: Configuration object (when omitted, the defaults only; `origin` is then empty, so nothing is forwarded upstream. No configuration file is read)
 - **Return Value**: Actually used port number
 - **Exceptions**:
   - `ProxyStartException`: When server startup fails, including when the server is already running or still starting, or when a retention limit is negative
@@ -2218,7 +2144,7 @@ for (final request in quarantined) {
 Resumes sending from a queue paused by `authRequiredStatusCodes` ("Pausing on an Authentication-Required Answer" in [5]).
 
 - **Return Value**: None
-- **Note**: Sending starts from the request that caused the pause. It can be called when the queue is not paused; then a request already being sent before the call does not pause the queue even when answered with a listed code. Does nothing while the proxy is stopped
+- **Note**: Sending starts from the request that caused the pause. It can be called when the queue is not paused; then a request already being sent before the call does not pause the queue even when answered with a listed code. Does nothing while the proxy is stopped. It does not end the hold after a 429 (`rateLimited`), which ends on its own at `queuePausedUntil`
 
 ```dart
 // Call after the user signs in again
@@ -2232,10 +2158,11 @@ Removes the request that paused the queue and resumes sending, so that a request
 - **Return Value**: `true` when removed. `false` when the queue is not paused, when the proxy is stopped, or when the request is no longer in the queue (in the last case the pause still ends)
 - **Exceptions**:
   - `QueueOperationException`: When the request cannot be written to the quarantine store or the dropped history, or when the queue, quarantine or dropped-history lock cannot be acquired within 30 seconds. The request stays in the queue and the queue stays paused
-- **Note**: The request goes to the quarantine store or the dropped history according to `dropPolicy`, with reason `authentication_required`. With `quarantine`, a request that alone exceeds `quarantineMaxBytes` is recorded in the dropped history as `quarantine_too_large`
+- **Note**: The request goes to the quarantine store or the dropped history according to `dropPolicy`, with reason `authentication_required`. With `quarantine`, a request that alone exceeds `quarantineMaxBytes` is recorded in the dropped history as `quarantine_too_large`. The hold after a 429 (`rateLimited`) is not covered, and `false` is returned
 
 ```dart
-if ((await proxy.getStats()).queuePausedReason != null) {
+if ((await proxy.getStats()).queuePausedReason ==
+    QueuePauseReason.authenticationRequired) {
   await proxy.skipPausedRequest();
 }
 ```
@@ -2521,13 +2448,15 @@ class ProxyStats {
   final int droppedRequestsCount; // Dropped request count
   final int unacknowledgedDroppedCount; // Dropped history entries not yet acknowledged
   final int quarantinedCount; // Number of quarantined requests
-  final QueuePauseReason? queuePausedReason; // Why sending from the queue is paused (null when it is not)
+  final QueuePauseReason? queuePausedReason; // Why sending from the queue is stopped (null when it is not)
+  final DateTime? queuePausedUntil; // When sending resumes on its own (UTC; rateLimited only)
   final DateTime startedAt; // Proxy server start date/time
   final Duration uptime; // Operation time
 }
 
 enum QueuePauseReason {
-  authenticationRequired // A queued request was answered with one of authRequiredStatusCodes ([5])
+  authenticationRequired, // A queued request was answered with one of authRequiredStatusCodes ([5])
+  rateLimited // A queued request was answered with 429 and sending is held until it is due ([5])
 }
 ```
 

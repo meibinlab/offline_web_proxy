@@ -272,7 +272,7 @@ const config = ProxyConfig(
 - `upstreamFailureThreshold` は、上流へ到達できない状態が連続した場合に転送を止めるまでの回数です。リンク層は接続済みでも上流が落ちている環境で、リクエストが毎回タイムアウトまで待たされるのを防ぎます。0 を指定すると無効になります。
 - `upstreamProbePath`、`upstreamProbeMethod`、`upstreamProbeTimeout`、`upstreamProbeBackoffSeconds` は、転送を止めている間の復帰確認に使います。応答が返れば到達可能と判定するため、ステータスコードは問いません。
 - `queuedResponse` と `offlineMissResponse` は、proxy が自分で生成する応答の内容です。既定はどちらも JSON で、Web アプリ側の `response.json()` が成功します。
-- `dropPolicy` は、上流が 4xx で拒否した更新系リクエストの扱いです（`authRequiredStatusCodes` に指定した状態コードを除く）。既定の `quarantine` では本文を保持したまま隔離し、`getQuarantinedRequests()` で確認して再送または破棄を判断できます（1 件で `quarantineMaxBytes` を超える要求は隔離せず、本文を捨ててドロップ履歴へ `quarantine_too_large` で記録します）。`drop` を指定すると従来どおり破棄し、履歴のみ残します。
+- `dropPolicy` は、上流が 4xx で拒否した更新系リクエストの扱いです（`authRequiredStatusCodes` に指定した状態コードを除く）。408 と 429 は一時的な状態のため取り除かず、5xx と同じく再試行します。`Retry-After` があれば（1 時間を上限に）その時刻まで待ち、429 の間はキュー全体の送信を控えます。303 は届いたものとみなします。既定の `quarantine` では本文を保持したまま隔離し、`getQuarantinedRequests()` で確認して再送または破棄を判断できます（1 件で `quarantineMaxBytes` を超える要求は隔離せず、本文を捨ててドロップ履歴へ `quarantine_too_large` で記録します）。`drop` を指定すると従来どおり破棄し、履歴のみ残します。
 - `quarantineMaxCount`（既定 1000 件）、`quarantineRetention`（既定 30 日）、`quarantineMaxBytes`（既定 20 MB）、`droppedRequestMaxCount`（既定 1000 件）、`droppedRequestRetention`（既定 30 日）は、隔離とドロップ履歴の保持上限です。`0`（`Duration.zero`）を指定するとその上限は無くなり、負の値を指定すると `start()` が `ProxyStartException` を投げます。「隔離とドロップ履歴の保持上限」を参照してください。
 - `enableIdempotencyKey` は更新系リクエストへのべき等性キー付与です。最初の転送と再送で同じキーを送るため、応答を受け取れなかったリクエストが再送で二重に適用されることを上流側で防げます。**重複の排除自体は上流サーバでの実装が必要です。**
 - `forceCachePaths` は `Cache-Control: no-store` を無視して保存するパスです。全応答に `no-store` を付与するサーバでは、既定のままだとオフラインで返せる応答が残りません。既定は空で、指定が無い限り従来どおり保存しません。全体を一括で無効化する設定は用意していません。
@@ -298,7 +298,7 @@ const config = ProxyConfig(
   - 一時停止すると `ProxyEventType.authenticationRequired` を 1 回発行し、`getStats()` と状態通知の `queuePausedReason` が `authenticationRequired` になります。キーで照会した状態は `queued` のままです。
   - 再開するのは、`resumeQueue()` を呼んだときと、`authResumePaths` に一致する要求（ログイン）が proxy を通って 2xx か 3xx を返したときです。3xx を含めるのは、フォームのログインが成功後にリダイレクトすることが多いためです。再開後に同じ要求がまた同じ状態コードを返した場合は、再び一時停止します。
   - ログインし直しても通らない要求は、`skipPausedRequest()` で `dropPolicy` に従って隔離またはドロップ履歴へ移し（理由は `authentication_required`）、残りを送ります。
-  - 指定できるのは 300〜499 です。ログイン画面へのリダイレクト（`302` など）も指定できます。ただし `POST` への `303` は従来どおり `dart:io` が転送先をたどるため、一時停止しません（転送先の状態コードで判定します）。`POST` のセッション切れは `401`・`302`・`307` のいずれかで返してください。**権限不足でも返る `403` のような状態コードを指定すると、ログインで解決しない要求でキューが止まります。** 古いセッションの CSRF トークンを含む要求も同じです。
+  - 指定できるのは 300〜499 です。ログイン画面へのリダイレクト（`302` など）も指定できます。指定しない場合、`303` は届いたものとみなすため、セッション切れを `303` で返す上流では `303` を指定してください。**権限不足でも返る `403` のような状態コードを指定すると、ログインで解決しない要求でキューが止まります。** 古いセッションの CSRF トークンを含む要求も同じです。
   - 一時停止の状態は保存しません。proxy を停止すると解除し、次の起動では先頭から送り直します。
 - `enableAcceptedAtHeader` と `acceptedAtHeaderName` は、proxy が最初にリクエストを受け付けた時刻を上流へ伝える設定です。初回転送と以降の再送で同じ値（UTC の ISO 8601）を送るため、上流は「業務日時が未指定ならこのヘッダを使う」と 1 箇所で実装できます。オフラインで積んだ会計が復帰時刻で記録される問題を避けられます。既定で有効です。
   - 隔離からの再送でも値は変わりません。`queuedAt` は再送のたびに更新されるため流用できません。
@@ -564,11 +564,13 @@ if (!status.isOnline) {
   "quarantinedCount": 0,
   "unacknowledgedDroppedCount": 0,
   "queuePausedReason": null,
+  "queuePausedUntil": null,
   "recentResendResults": []
 }
 ```
 
-- `queuePausedReason` は、キューの送信を一時停止している理由です（`authRequiredStatusCodes`）。一時停止していなければ `null`、認証待ちなら `"authenticationRequired"` です。画面にログインを促す表示を出す判断に使えます。
+- `queuePausedReason` は、キューの送信を止めている理由です。止めていなければ `null`、認証待ち（`authRequiredStatusCodes`）なら `"authenticationRequired"`、上流が 429 を返して控えているなら `"rateLimited"` です。`"authenticationRequired"` は、画面にログインを促す表示を出す判断に使えます。
+- `queuePausedUntil` は、`"rateLimited"` の場合に送信を再開する時刻（UTC の ISO 8601）です。それ以外は `null` です。
 - `GET` のみで、上流へは転送されず、統計にも計上されず、要求ログにも出力されません。
 - proxy 自身の origin からの要求だけを受け付けます。別 origin の `Origin` を伴う要求には `403` を返し、`Access-Control-Allow-Origin: *` も付与しません。
 - `Origin` の無い要求は許可するため、端末内の別アプリからも到達できます。WebView に限る場合は `requireAccessToken` を併用してください（「WebView 以外からの到達を防ぐ」）。
@@ -595,7 +597,7 @@ for (const item of (await response.json()).requests) {
 }
 ```
 
-- `state` は、`queued`（送信待ち。認証待ちで一時停止している場合を含む）、`quarantined`（4xx で隔離）、`delivered`（送信待ちから送り、上流が 2xx を返した。`idempotencyRetention` の間だけ）、`dropped`（ドロップ履歴にある）、`unknown`（どこにも無い）のいずれかです。`quarantined` と `dropped` には `statusCode` が付きます。
+- `state` は、`queued`（送信待ち。認証待ちで一時停止している場合を含む）、`quarantined`（4xx で隔離）、`delivered`（送信待ちから送り、上流が 2xx か 303 を返した。`idempotencyRetention` の間だけ）、`dropped`（ドロップ履歴にある）、`unknown`（どこにも無い）のいずれかです。`quarantined` と `dropped` には `statusCode` が付きます。
 - 同じキーが複数の場所にある場合は、`delivered` → `queued` → `quarantined` → `dropped` の順で先に当てはまるものを返します。
 - 最初の転送で上流が 5xx 以外を返した要求は `unknown` です。画面はその応答を直接受け取るためです。5xx を返した場合や上流へ到達できなかった場合は送信待ちへ入るため、`queued` です（`queueExcludePaths` に一致する要求は送信待ちへ入らないため、`unknown` です）。
 - キーは 50 件まで、長さは 200 文字までです。超えると `400` を返します。保存領域を読めない場合は、`unknown` ではなく `503` を返します。

@@ -272,6 +272,20 @@ const String _quarantineExpiredDropReason = 'quarantine_expired';
 /// 1 件で隔離の合計バイト数の上限を超えたため、隔離せずに記録したときの理由。
 const String _quarantineTooLargeDropReason = 'quarantine_too_large';
 
+/// キューからの再送で、4xx でも取り除かずに再試行する状態コード。
+///
+/// 408（Request Timeout）と 429（Too Many Requests）は一時的な状態を表し、
+/// 時間をおいて送り直せば通る見込みがあるため。
+const Set<int> _retryableClientErrorStatusCodes = {
+  HttpStatus.requestTimeout,
+  HttpStatus.tooManyRequests,
+};
+
+/// キューからの再送で、`Retry-After` に従って待つ時間の上限。
+///
+/// 異常に大きな値でキューが止まり続けないようにするため。
+const Duration _maxRetryAfter = Duration(hours: 1);
+
 /// キューを一時停止させた要求を [OfflineWebProxy.skipPausedRequest] で
 /// 取り除いたときの理由。
 const String _authenticationRequiredDropReason = 'authentication_required';
@@ -627,6 +641,11 @@ class OfflineWebProxy {
   /// 永続化せず、起動と停止のたびに解除する。
   QueuePauseReason? _queuePauseReason;
 
+  /// 上流が 429 を返したため、キュー全体の送信を控える期限。
+  ///
+  /// 控えていない場合は `null`。永続化せず、起動と停止のたびに解除する。
+  DateTime? _queueHoldUntil;
+
   /// キューを一時停止させた要求のキュー上のキー。一時停止していない場合は `null`。
   Object? _pausedQueueKey;
 
@@ -970,6 +989,7 @@ class OfflineWebProxy {
       _compileConfiguredPatterns();
       _resetRecoveryState();
       _clearQueuePause();
+      _queueHoldUntil = null;
 
       // ストレージを初期化
       await _initializeStorage();
@@ -1140,8 +1160,9 @@ class OfflineWebProxy {
       _accessToken = null;
       // 障害解析のため診断値は残し、実行制御状態のみ初期化する
       _resetRecoveryControlState();
-      // 一時停止は永続化しないため、停止で解除する
+      // 一時停止と送信の控えは永続化しないため、停止で解除する
       _clearQueuePause();
+      _queueHoldUntil = null;
       // 閉じた Box を共有しないよう、次の起動や Cookie API で初期化し直す
       _keyStageFuture = null;
       _keyStageCompleted = false;
@@ -1603,6 +1624,7 @@ class OfflineWebProxy {
       'quarantinedCount': stats.quarantinedCount,
       'unacknowledgedDroppedCount': stats.unacknowledgedDroppedCount,
       'queuePausedReason': stats.queuePausedReason?.name,
+      'queuePausedUntil': stats.queuePausedUntil?.toIso8601String(),
       'recentResendResults': _recentResendResults
           .map((result) => result.toMap())
           .toList(growable: false),
@@ -3459,7 +3481,7 @@ class OfflineWebProxy {
   ///
   /// 画面が自分で決めたキー（`Idempotency-Key` など）で送った要求について、
   /// 送信待ち・隔離・届いた・ドロップのどれにあるかを返します。送信待ち・隔離・
-  /// ドロップ履歴と、キューから送って上流が 2xx を返したキーの記録
+  /// ドロップ履歴と、キューから送って上流が 2xx か 303 を返したキーの記録
   /// （[ProxyConfig.idempotencyRetention] の間）を探します。暗号化する前の
   /// 保存領域から移行を待っている分も探します。
   ///
@@ -3673,7 +3695,9 @@ class OfflineWebProxy {
   ///
   /// 一時停止していない場合も呼び出せます。その場合、呼び出す前から送信中の
   /// 要求が認証が必要との応答を返しても、古いセッションで送った要求として
-  /// 一時停止しません。停止中は何もしません。
+  /// 一時停止しません。停止中は何もしません。429 による送信の控え
+  /// （[QueuePauseReason.rateLimited]）は解除しません。控えは
+  /// [ProxyStats.queuePausedUntil] に自動で解けます。
   Future<void> resumeQueue() async {
     if (!_isRunning) {
       return;
@@ -3689,7 +3713,8 @@ class OfflineWebProxy {
   /// に従って隔離またはドロップ履歴へ移し、理由は `authentication_required`
   /// です。ただし隔離する方針で、1 件で [ProxyConfig.quarantineMaxBytes] を
   /// 超える要求は、4xx の場合と同じく本文を持たないドロップ履歴へ
-  /// `quarantine_too_large` として記録します。
+  /// `quarantine_too_large` として記録します。429 による送信の控え
+  /// （[QueuePauseReason.rateLimited]）は対象外で、`false` を返します。
   ///
   /// Returns: 取り除いた場合は `true`。一時停止していない場合、停止中の場合、
   ///   要求が既にキューに無い場合は `false` です。最後の場合も一時停止は
@@ -4032,6 +4057,7 @@ class OfflineWebProxy {
       final uptime = _startedAt != null
           ? DateTime.now().difference(_startedAt!)
           : Duration.zero;
+      final queuePause = _currentQueuePause();
 
       return ProxyStats(
         totalRequests: _totalRequests,
@@ -4042,7 +4068,8 @@ class OfflineWebProxy {
         droppedRequestsCount: droppedRequestsCount,
         unacknowledgedDroppedCount: unacknowledgedDroppedCount,
         quarantinedCount: quarantinedCount,
-        queuePausedReason: _queuePauseReason,
+        queuePausedReason: queuePause.reason,
+        queuePausedUntil: queuePause.until,
         startedAt: _startedAt ?? DateTime.now(),
         uptime: uptime,
       );
@@ -4095,12 +4122,12 @@ class OfflineWebProxy {
 
   /// デフォルト設定を読み込みます。
   ///
-  /// assets/config/config.yamlファイルが存在する場合はその内容を読み込み、
-  /// 存在しない場合はビルトインのデフォルト設定を使用します。
+  /// [start] で設定を省略した場合に使う、ビルトインの既定の設定を返します。
+  /// 設定ファイルは読み込みません。`origin` が空のため、上流へは転送しません。
   ///
   /// Returns: プロキシサーバの設定オブジェクト。
   Future<ProxyConfig> _loadDefaultConfig() async {
-    // assets/config/config.yamlが存在する場合は読み込み、無い場合はデフォルト設定を使用
+    // 設定ファイルは読み込まず、ビルトインの既定値を使う
     return ProxyConfig(
       origin: '',
       host: '127.0.0.1',
@@ -9147,17 +9174,6 @@ window.__offline_web_proxy_web_storage_bridge = {
     return settings['default'] ?? fallbackSeconds;
   }
 
-  /// レスポンスのキャッシュ有効期限を算出します。
-  ///
-  /// Cache-Controlヘッダのmax-ageを優先し、
-  /// 指定がない場合は設定ファイルのTTLを使用します。
-  ///
-  /// [response] 有効期限を算出するレスポンス。
-  ///
-  /// Returns: キャッシュ有効期限の日時。
-  // 注: _calculateExpirationは未使用のためアナライザ警告を避けるために削除されました。
-  // 必要に応じて_calculateExpirationFromHeadersまたは_calculateStaleExpirationを使用してください。
-
   /// キャッシュのStale有効期限を算出します。
   ///
   /// TTL期限切れ後でも一定期間はStaleキャッシュとして
@@ -9195,12 +9211,61 @@ window.__offline_web_proxy_web_storage_bridge = {
   }
 
   /// キューデータのリトライスケジュールを更新します。
-  void _updateRetrySchedule(Map data) {
+  ///
+  /// 再試行回数を 1 増やし、[ProxyConfig.retryBackoffSeconds] の待ち時間の後を
+  /// 次の送信時刻にします。[retryAfter] がそれより後の場合は [retryAfter] を
+  /// 使います。ただし、今から [_maxRetryAfter] より後にはしません（通常の
+  /// 待ち時間の方が長い場合は、通常の待ち時間を使います）。
+  ///
+  /// [data] 更新するキューデータ。
+  /// [retryAfter] 上流が `Retry-After` で指定した送信時刻。無い場合は `null`。
+  void _updateRetrySchedule(Map data, {DateTime? retryAfter}) {
     final retryCount = (data['retryCount'] as int? ?? 0) + 1;
     final backoffSeconds = _getBackoffDelay(retryCount);
+    final now = DateTime.now();
+    var nextRetryAt = now.add(Duration(seconds: backoffSeconds));
+    if (retryAfter != null && retryAfter.isAfter(nextRetryAt)) {
+      final limit = now.add(_maxRetryAfter);
+      if (!retryAfter.isAfter(limit)) {
+        nextRetryAt = retryAfter.toLocal();
+      } else if (limit.isAfter(nextRetryAt)) {
+        nextRetryAt = limit;
+      }
+    }
     data['retryCount'] = retryCount;
-    data['nextRetryAt'] =
-        DateTime.now().add(Duration(seconds: backoffSeconds)).toIso8601String();
+    data['nextRetryAt'] = nextRetryAt.toIso8601String();
+  }
+
+  /// `Retry-After` ヘッダの値を、送信してよい時刻へ変換します。
+  ///
+  /// 秒数（`120`。数字だけ）と HTTP の日時（`Wed, 21 Oct 2026 07:28:00 GMT`）の
+  /// どちらの形式も受け付けます。秒数は [_maxRetryAfter] で抑えてから時刻に
+  /// するため、桁の大きな値でも例外になりません。
+  ///
+  /// [value] ヘッダの値。無い場合は `null`。
+  ///
+  /// Returns: 送信してよい時刻。値が無い場合と、解釈できない場合は `null`。
+  DateTime? _parseRetryAfter(String? value) {
+    final trimmed = value?.trim() ?? '';
+    if (trimmed.isEmpty) {
+      return null;
+    }
+
+    if (RegExp(r'^\d+$').hasMatch(trimmed)) {
+      // int に収まらない桁数も、上限の秒数として扱う
+      final seconds = int.tryParse(trimmed);
+      final maxSeconds = _maxRetryAfter.inSeconds;
+      return DateTime.now().add(Duration(
+        seconds: seconds == null || seconds > maxSeconds ? maxSeconds : seconds,
+      ));
+    }
+
+    try {
+      return HttpDate.parse(trimmed).toLocal();
+    } catch (_) {
+      // 形式の誤り（HttpException）に限らず、解釈できない値は無視する
+      return null;
+    }
   }
 
   /// 保存領域内で重複しない一意なキーを生成します。
@@ -9557,6 +9622,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         queueBox == null ||
         !queueBox.isOpen ||
         _queuePauseReason != null ||
+        _isQueueHeld() ||
         _isDrainingQueue ||
         _queueDrainLock.isLocked) {
       return;
@@ -9572,12 +9638,14 @@ window.__offline_web_proxy_web_storage_bridge = {
         final keys = _sortQueueKeysByQueuedAt(queueBox);
         for (var i = 0; i < keys.length; i++) {
           // 停止した場合や上流断を検知した場合は、残りを待たせずに打ち切る。
-          // 認証待ちで一時停止した場合は、順序を保つため後続を送らない
+          // 認証待ちで一時停止した場合は、順序を保つため後続を送らない。
+          // 429 で送信を控えている間は、同じ上流へ後続を送らない
           if (!_isRunning ||
               _isStopping ||
               !queueBox.isOpen ||
               !_isUpstreamReachable ||
-              _queuePauseReason != null) {
+              _queuePauseReason != null ||
+              _isQueueHeld()) {
             break;
           }
 
@@ -9590,6 +9658,42 @@ window.__offline_web_proxy_web_storage_bridge = {
     } finally {
       _isDrainingQueue = false;
     }
+  }
+
+  /// キューの送信を止めている理由と、自動で再開する時刻を返します。
+  ///
+  /// 認証待ちの一時停止は利用者の操作が必要なため、429 の控えより優先して
+  /// 返します。
+  ///
+  /// Returns: 止めている理由（止めていなければ `null`）と、429 の控えの場合に
+  ///   再開する時刻（UTC）。
+  ({QueuePauseReason? reason, DateTime? until}) _currentQueuePause() {
+    final pauseReason = _queuePauseReason;
+    if (pauseReason != null) {
+      return (reason: pauseReason, until: null);
+    }
+    final holdUntil = _queueHoldUntil;
+    if (_isQueueHeld() && holdUntil != null) {
+      return (reason: QueuePauseReason.rateLimited, until: holdUntil.toUtc());
+    }
+    return (reason: null, until: null);
+  }
+
+  /// 429 を受けて、キュー全体の送信を控えているかどうかを返します。
+  ///
+  /// 期限を過ぎていれば控えを解除します。
+  ///
+  /// Returns: 控えている場合は `true`。
+  bool _isQueueHeld() {
+    final holdUntil = _queueHoldUntil;
+    if (holdUntil == null) {
+      return false;
+    }
+    if (DateTime.now().isBefore(holdUntil)) {
+      return true;
+    }
+    _queueHoldUntil = null;
+    return false;
   }
 
   /// キューのキーを保存日時の昇順に並べ替えて返します。
@@ -9694,8 +9798,14 @@ window.__offline_web_proxy_web_storage_bridge = {
             _emitEvent(event.type, itemUrl, event.data);
           }
         } else {
-          _updateRetrySchedule(data);
+          _updateRetrySchedule(data, retryAfter: result.retryAfter);
           await box.put(key, data);
+          if (result.statusCode == HttpStatus.tooManyRequests) {
+            // 同じ上流へ後続を送り続けるとレート制限が長引くため、この要求を
+            // 送り直す時刻までキュー全体の送信を控える
+            _queueHoldUntil =
+                DateTime.tryParse(data['nextRetryAt'] as String? ?? '');
+          }
           _recordResendResult(
             data,
             statusCode: result.statusCode,
@@ -9918,9 +10028,19 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// キューデータからHTTPリクエストを再構築し、
   /// 上流サーバに送信して成功判定を行います。
   ///
+  /// 2xx と 303（See Other。上流が処理し、結果を別の場所で示す）を成功と
+  /// みなします。リダイレクトはたどりません。たどると、POST への 303 を
+  /// `dart:io` が GET で転送先へたどり、転送先の状態コードで判定してしまう
+  /// ためです。[ProxyConfig.authRequiredStatusCodes] に含まれる状態コードは
+  /// 成功とみなしません。
+  ///
+  /// 4xx は取り除く対象ですが、408 と 429 は再試行の対象にし、
+  /// `Retry-After` を返します。
+  ///
   /// [data] キューデータ。
   ///
-  /// Returns: 送信成功時は `true`。
+  /// Returns: 成否、取り除くかどうか、上流が返したステータスコード、
+  ///   取り除く理由、エラーメッセージ、`Retry-After` が示す送信時刻。
   Future<
       ({
         bool success,
@@ -9928,6 +10048,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         int statusCode,
         String? dropReason,
         String? errorMessage,
+        DateTime? retryAfter,
       })> _sendQueuedRequest(Map data) async {
     if (_config?.origin.isEmpty ?? true) {
       return (
@@ -9936,6 +10057,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         statusCode: 0,
         dropReason: null,
         errorMessage: 'No upstream origin configured',
+        retryAfter: null,
       );
     }
 
@@ -9953,6 +10075,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         statusCode: HttpStatus.ok,
         dropReason: null,
         errorMessage: null,
+        retryAfter: null,
       );
     }
 
@@ -9974,6 +10097,7 @@ window.__offline_web_proxy_web_storage_bridge = {
             statusCode: 0,
             dropReason: null,
             errorMessage: 'No upstream origin configured',
+            retryAfter: null,
           );
         }
 
@@ -9981,6 +10105,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       }
       final request =
           await client.openUrl(method, uri).timeout(_remainingUntil(deadline));
+      // 3xx は上流の応答として判定し、転送先の応答と取り違えない
+      request.followRedirects = false;
 
       await _applyQueuedRequestHeaders(
         request,
@@ -10014,9 +10140,11 @@ window.__offline_web_proxy_web_storage_bridge = {
       // 本文を読み捨てないと接続が解放されず、後続の再送が空き待ちで止まる
       await _drainResponse(response, deadline);
 
-      // 2xxステータスコードを成功とみなす
+      // 2xx と 303 を成功とみなす（認証が必要として指定した状態コードを除く）
       final statusCode = response.statusCode;
-      if (statusCode >= 200 && statusCode < 300) {
+      if ((statusCode >= 200 && statusCode < 300 ||
+              statusCode == HttpStatus.seeOther) &&
+          !_isAuthRequiredStatusCode(statusCode)) {
         if (idempotencyKey != null) {
           await _recordIdempotencyKey(idempotencyKey);
         }
@@ -10027,16 +10155,21 @@ window.__offline_web_proxy_web_storage_bridge = {
           statusCode: statusCode,
           dropReason: null,
           errorMessage: null,
+          retryAfter: null,
         );
       }
 
-      if (statusCode >= 400 && statusCode < 500) {
+      // 408 と 429 は一時的な状態のため、取り除かずに再試行する
+      if (statusCode >= 400 &&
+          statusCode < 500 &&
+          !_retryableClientErrorStatusCodes.contains(statusCode)) {
         return (
           success: false,
           shouldDrop: true,
           statusCode: statusCode,
           dropReason: '4xx_error',
           errorMessage: 'HTTP $statusCode',
+          retryAfter: null,
         );
       }
 
@@ -10046,6 +10179,9 @@ window.__offline_web_proxy_web_storage_bridge = {
         statusCode: statusCode,
         dropReason: null,
         errorMessage: 'HTTP $statusCode',
+        retryAfter: _retryableClientErrorStatusCodes.contains(statusCode)
+            ? _parseRetryAfter(response.headers.value('retry-after'))
+            : null,
       );
     } catch (e) {
       // 画面操作が無い状況でも上流断を検知できるよう、再送の失敗も判定に含める。
@@ -10060,6 +10196,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         statusCode: 0,
         dropReason: null,
         errorMessage: e.toString(),
+        retryAfter: null,
       );
     } finally {
       // 共有クライアントをここで閉じない

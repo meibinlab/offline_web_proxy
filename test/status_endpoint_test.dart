@@ -209,6 +209,8 @@ void main() {
         // 一時停止していない場合も、項目は null として返すこと
         expect(decoded.containsKey('queuePausedReason'), isTrue);
         expect(decoded['queuePausedReason'], isNull);
+        expect(decoded.containsKey('queuePausedUntil'), isTrue);
+        expect(decoded['queuePausedUntil'], isNull);
         expect(decoded['recentResendResults'], isEmpty);
         // 状態は都度変わるため WebView 側にも保存させないこと
         expect(response.cacheControl, equals('no-store'));

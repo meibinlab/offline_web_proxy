@@ -13,4 +13,13 @@ enum QueuePauseReason {
   /// request matching `ProxyConfig.authResumePaths` succeeds through the
   /// proxy.
   authenticationRequired,
+
+  /// A request sent from the queue was answered with `429 Too Many Requests`.
+  ///
+  /// Sending resumes on its own at `ProxyStats.queuePausedUntil`, when that
+  /// request is due again (its `Retry-After`, up to one hour, or the usual
+  /// backoff). The hold is kept in memory only and ends when the proxy stops.
+  /// When the queue is also paused by [authenticationRequired], that reason
+  /// is reported instead, because it needs the user to act.
+  rateLimited,
 }
