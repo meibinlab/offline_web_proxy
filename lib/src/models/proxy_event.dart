@@ -106,4 +106,14 @@ enum ProxyEventType {
   /// 照合では問題が無くても Hive が開けない Box（途中の記録が壊れている）は、
   /// `corrupted` として破棄します。破棄した後は再ログインが必要です。
   cookieStorageDiscarded,
+
+  /// キューから送った要求が、認証が必要を示す応答を返したため、キューの送信を
+  /// 一時停止した
+  ///
+  /// `ProxyConfig.authRequiredStatusCodes` を指定した場合だけ発行します。
+  /// 一時停止するたびに 1 回です。`url` は要求の URL、`data` には
+  /// `statusCode`（上流が返した値）、`idempotencyKey`、`queueId`（キュー上の
+  /// キー）が入ります。ログインし直した後に `resumeQueue()` を呼ぶか、
+  /// `ProxyConfig.authResumePaths` のログインを成功させると再開します。
+  authenticationRequired,
 }

@@ -88,6 +88,7 @@ import 'src/models/proxy_stats.dart';
 import 'src/models/proxy_webview_navigation_recommendation.dart';
 import 'src/models/quarantined_request.dart';
 import 'src/models/queue_exclude_rule.dart';
+import 'src/models/queue_pause_reason.dart';
 import 'src/models/queue_resend_result.dart';
 import 'src/models/queued_request.dart';
 import 'src/models/request_status.dart';
@@ -124,6 +125,7 @@ export 'src/models/proxy_stats.dart';
 export 'src/models/proxy_webview_navigation_recommendation.dart';
 export 'src/models/quarantined_request.dart';
 export 'src/models/queue_exclude_rule.dart';
+export 'src/models/queue_pause_reason.dart';
 export 'src/models/queue_resend_result.dart';
 export 'src/models/queued_request.dart';
 export 'src/models/request_status.dart';
@@ -269,6 +271,10 @@ const String _quarantineExpiredDropReason = 'quarantine_expired';
 
 /// 1 件で隔離の合計バイト数の上限を超えたため、隔離せずに記録したときの理由。
 const String _quarantineTooLargeDropReason = 'quarantine_too_large';
+
+/// キューを一時停止させた要求を [OfflineWebProxy.skipPausedRequest] で
+/// 取り除いたときの理由。
+const String _authenticationRequiredDropReason = 'authentication_required';
 
 /// 暗号化する前のキューの Box 名（移行元）。
 const String _legacyQueueBoxName = 'proxy_queue';
@@ -616,6 +622,24 @@ class OfflineWebProxy {
   /// キュー消化が実行中かを示すフラグ（重複実行防止）。
   bool _isDrainingQueue = false;
 
+  /// キューの送信を一時停止している理由。一時停止していない場合は `null`。
+  ///
+  /// 永続化せず、起動と停止のたびに解除する。
+  QueuePauseReason? _queuePauseReason;
+
+  /// キューを一時停止させた要求のキュー上のキー。一時停止していない場合は `null`。
+  Object? _pausedQueueKey;
+
+  /// キューを一時停止させた応答のステータスコード。一時停止していない場合は `null`。
+  int? _pausedStatusCode;
+
+  /// 再開の契機（ログインの成功と [resumeQueue] の呼び出し）が起きた回数。
+  ///
+  /// 送信を始めた後にログインが成功した場合、その要求は古いセッションで
+  /// 送っているため、認証が必要との応答でも一時停止しない。送信の前後で
+  /// この値を比べて判定する。
+  int _authResumeGeneration = 0;
+
   /// 上流サーバへのリクエスト用HTTPクライアント（dart:io）。
   HttpClient? _httpClient;
 
@@ -675,6 +699,10 @@ class OfflineWebProxy {
   /// 起動時に構築した、`no-store` を無視して保存するパスのパターン一覧。
   /// リクエストのたびに正規表現を組み立てないよう保持する。
   List<PathPattern> _forceCachePatterns = const [];
+
+  /// 起動時に構築した、一時停止したキューを再開させるログインのパスの
+  /// パターン一覧（[ProxyConfig.authResumePaths]）。
+  List<PathPattern> _authResumePatterns = const [];
 
   /// 起動時に構築した、キューへ入れない更新系リクエストの規則一覧。
   List<({PathPattern pattern, QueueExcludeRule rule})> _queueExcludeRules =
@@ -938,8 +966,10 @@ class OfflineWebProxy {
       _validateAutoReloadSettings();
       _validateRetentionSettings();
       _validateMirroredOrigins();
+      _validateAuthRequiredStatusCodes();
       _compileConfiguredPatterns();
       _resetRecoveryState();
+      _clearQueuePause();
 
       // ストレージを初期化
       await _initializeStorage();
@@ -1096,6 +1126,7 @@ class OfflineWebProxy {
       _staticResourceAssetMap.clear();
       _staticResourceEntityTags.clear();
       _forceCachePatterns = const [];
+      _authResumePatterns = const [];
       _queueExcludeRules = const [];
       _mirroredOrigins = const [];
     } catch (e) {
@@ -1109,6 +1140,8 @@ class OfflineWebProxy {
       _accessToken = null;
       // 障害解析のため診断値は残し、実行制御状態のみ初期化する
       _resetRecoveryControlState();
+      // 一時停止は永続化しないため、停止で解除する
+      _clearQueuePause();
       // 閉じた Box を共有しないよう、次の起動や Cookie API で初期化し直す
       _keyStageFuture = null;
       _keyStageCompleted = false;
@@ -1569,6 +1602,7 @@ class OfflineWebProxy {
       'queueLength': stats.queueLength,
       'quarantinedCount': stats.quarantinedCount,
       'unacknowledgedDroppedCount': stats.unacknowledgedDroppedCount,
+      'queuePausedReason': stats.queuePausedReason?.name,
       'recentResendResults': _recentResendResults
           .map((result) => result.toMap())
           .toList(growable: false),
@@ -1817,6 +1851,25 @@ class OfflineWebProxy {
     }
   }
 
+  /// 認証が必要を示すステータスコードの設定値を検証します。
+  ///
+  /// 2xx は成功、5xx は再試行として扱いが決まっているため、3xx と 4xx だけを
+  /// 受け付けます。
+  ///
+  /// Throws:
+  ///   * [ProxyStartException] 300 から 499 の範囲外の値がある場合。
+  void _validateAuthRequiredStatusCodes() {
+    for (final statusCode
+        in _config?.authRequiredStatusCodes ?? const <int>{}) {
+      if (statusCode < 300 || statusCode > 499) {
+        throw ProxyStartException(
+          'authRequiredStatusCodes must be between 300 and 499: $statusCode',
+          null,
+        );
+      }
+    }
+  }
+
   /// 設定に含まれるパスパターンを起動時に組み立てます。
   ///
   /// リクエストのたびに正規表現を生成しないよう、`start()` で一度だけ
@@ -1824,6 +1877,8 @@ class OfflineWebProxy {
   void _compileConfiguredPatterns() {
     _forceCachePatterns =
         PathPattern.compileAll(_config?.forceCachePaths ?? const []);
+    _authResumePatterns =
+        PathPattern.compileAll(_config?.authResumePaths ?? const []);
     _queueExcludeRules = (_config?.queueExcludePaths ?? const [])
         .map((rule) => (pattern: PathPattern(rule.path), rule: rule))
         .toList(growable: false);
@@ -3608,6 +3663,114 @@ class OfflineWebProxy {
         _QuarantineOperationResult.done;
   }
 
+  /// 認証待ちで一時停止したキューの送信を再開します。
+  ///
+  /// [ProxyConfig.authRequiredStatusCodes] の応答で一時停止したキューを、
+  /// 利用者がログインし直した後に再開します。一時停止の原因になった要求から
+  /// 順に送ります。別の処理がキューを扱っている間は、その後の定期処理
+  /// （5 秒ごと）で送ります。同じ要求がまた同じ応答を返した場合は、再び
+  /// 一時停止します。
+  ///
+  /// 一時停止していない場合も呼び出せます。その場合、呼び出す前から送信中の
+  /// 要求が認証が必要との応答を返しても、古いセッションで送った要求として
+  /// 一時停止しません。停止中は何もしません。
+  Future<void> resumeQueue() async {
+    if (!_isRunning) {
+      return;
+    }
+    _resumeQueueAfterAuthentication();
+  }
+
+  /// キューを一時停止させた要求をキューから取り除き、送信を再開します。
+  ///
+  /// ログインし直しても同じ応答が返る要求（権限の不足や、古いセッションの
+  /// CSRF トークンを含む要求など）で、キューが止まり続けないようにします。
+  /// 取り除いた要求は、4xx で拒否された要求と同じく [ProxyConfig.dropPolicy]
+  /// に従って隔離またはドロップ履歴へ移し、理由は `authentication_required`
+  /// です。ただし隔離する方針で、1 件で [ProxyConfig.quarantineMaxBytes] を
+  /// 超える要求は、4xx の場合と同じく本文を持たないドロップ履歴へ
+  /// `quarantine_too_large` として記録します。
+  ///
+  /// Returns: 取り除いた場合は `true`。一時停止していない場合、停止中の場合、
+  ///   要求が既にキューに無い場合は `false` です。最後の場合も一時停止は
+  ///   解除して送信を再開します。
+  ///
+  /// Throws:
+  ///   * [QueueOperationException] 隔離またはドロップ履歴へ記録できなかった
+  ///     場合と、キュー・隔離・ドロップ履歴のいずれかのロックを 30 秒以内に
+  ///     取得できなかった場合。要求はキューに残り、一時停止も続きます。
+  Future<bool> skipPausedRequest() async {
+    if (!_isRunning || _queuePauseReason == null) {
+      return false;
+    }
+
+    final bool removed;
+    try {
+      removed = await _queueDrainLock.synchronized(() async {
+        final key = _pausedQueueKey;
+        final box = _queueBox;
+        if (_queuePauseReason == null ||
+            key == null ||
+            box == null ||
+            !box.isOpen ||
+            _isClosingStorage) {
+          return false;
+        }
+
+        final data = box.get(key) as Map?;
+        if (data == null) {
+          _clearQueuePause();
+          return false;
+        }
+
+        // 保存が終わるまで stop() が Box を閉じないよう、保存中であることを示す
+        final saving = Completer<void>();
+        _queuedItemSaving = saving.future;
+        try {
+          final statusCode = _pausedStatusCode ?? 0;
+          final removal = await _removeRejectedQueuedItem(
+            box,
+            key,
+            data,
+            statusCode: statusCode,
+            reason: _authenticationRequiredDropReason,
+            errorMessage: 'HTTP $statusCode',
+          );
+          if (!removal.removed) {
+            throw QueueOperationException(
+              'skipPaused',
+              '一時停止させた要求を隔離またはドロップ履歴へ記録できませんでした',
+              null,
+            );
+          }
+
+          _clearQueuePause();
+          final event = removal.event;
+          if (event != null) {
+            _emitEvent(event.type, data['url'] as String? ?? '', event.data);
+          }
+          return true;
+        } finally {
+          saving.complete();
+          if (identical(_queuedItemSaving, saving.future)) {
+            _queuedItemSaving = null;
+          }
+        }
+      }, timeout: _storageLockTimeout);
+    } on QueueOperationException {
+      rethrow;
+    } catch (e) {
+      throw QueueOperationException(
+          'skipPaused', '一時停止させた要求を取り除けませんでした: $e', e is Exception ? e : null);
+    }
+
+    if (_queuePauseReason == null) {
+      // ignore: discarded_futures
+      _drainQueue();
+    }
+    return removed;
+  }
+
   /// 隔離されたリクエストをキューへ戻し、操作の結果を返します。
   ///
   /// 隔離のロックの中でキューへ戻し、ロックを離してからキュー消化を始めます
@@ -3879,6 +4042,7 @@ class OfflineWebProxy {
         droppedRequestsCount: droppedRequestsCount,
         unacknowledgedDroppedCount: unacknowledgedDroppedCount,
         quarantinedCount: quarantinedCount,
+        queuePausedReason: _queuePauseReason,
         startedAt: _startedAt ?? DateTime.now(),
         uptime: uptime,
       );
@@ -7259,6 +7423,10 @@ window.__offline_web_proxy_web_storage_bridge = {
       // 上流が応答した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
       _recordUpstreamSuccess();
 
+      // ログインが成功した場合は、認証待ちで止めたキューを再開する。
+      // 応答の Cookie は転送の中で保存済みのため、新しいセッションで送られる
+      _resumeQueueIfSignedIn(request.url.path, result.statusCode);
+
       final redirectResponse = _tryBuildHandledRedirectResponse(
         request: request,
         upstreamRequestUri: result.upstreamUri,
@@ -9388,6 +9556,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         !_isUpstreamReachable ||
         queueBox == null ||
         !queueBox.isOpen ||
+        _queuePauseReason != null ||
         _isDrainingQueue ||
         _queueDrainLock.isLocked) {
       return;
@@ -9402,11 +9571,13 @@ window.__offline_web_proxy_web_storage_bridge = {
       await _queueDrainLock.synchronized(() async {
         final keys = _sortQueueKeysByQueuedAt(queueBox);
         for (var i = 0; i < keys.length; i++) {
-          // 停止した場合や上流断を検知した場合は、残りを待たせずに打ち切る
+          // 停止した場合や上流断を検知した場合は、残りを待たせずに打ち切る。
+          // 認証待ちで一時停止した場合は、順序を保つため後続を送らない
           if (!_isRunning ||
               _isStopping ||
               !queueBox.isOpen ||
-              !_isUpstreamReachable) {
+              !_isUpstreamReachable ||
+              _queuePauseReason != null) {
             break;
           }
 
@@ -9455,6 +9626,8 @@ window.__offline_web_proxy_web_storage_bridge = {
       }
     }
 
+    // 送信中にログインが成功したかを、応答を受け取った後に判定するため控える
+    final authResumeGeneration = _authResumeGeneration;
     try {
       final result = await _sendQueuedRequest(data);
 
@@ -9480,100 +9653,45 @@ window.__offline_web_proxy_web_storage_bridge = {
             'statusCode': result.statusCode,
             'idempotencyKey': data['idempotencyKey'],
           });
+        } else if (_isAuthRequiredStatusCode(result.statusCode)) {
+          // ログインし直せば結果が変わるため、取り除かずに残してキューを止める
+          _recordResendResult(
+            data,
+            statusCode: result.statusCode,
+            success: false,
+            willRetry: true,
+          );
+          _pauseQueueForAuthentication(
+            key as Object,
+            data,
+            statusCode: result.statusCode,
+            authResumeGeneration: authResumeGeneration,
+          );
         } else if (result.shouldDrop) {
           final reason = result.dropReason ?? 'dropped';
-          final errorMessage =
-              result.errorMessage ?? 'HTTP ${result.statusCode}';
-
-          if ((_config?.dropPolicy ?? DropPolicy.quarantine) ==
-              DropPolicy.quarantine) {
-            // 本文ごと隔離してから取り除き、退避に失敗した場合は消さない
-            final quarantine = await _quarantineRequest(
-              data,
-              statusCode: result.statusCode,
-              reason: reason,
-              errorMessage: errorMessage,
-              queueBox: box,
-              queueKey: key,
-            );
-            if (quarantine.tooLarge) {
-              // 1 件で隔離の合計バイト数の上限を超えるため、本文を持たない履歴へ
-              // 記録し、同じ 4xx を再試行し続けないようキューから取り除いた
-              _recordResendResult(
-                data,
-                statusCode: result.statusCode,
-                success: false,
-                dropReason: reason,
-                willRetry: false,
-              );
-              _emitEvent(ProxyEventType.requestDropped, itemUrl, {
-                'statusCode': result.statusCode,
-                'dropReason': _quarantineTooLargeDropReason,
-              });
-              return;
-            }
-
-            final quarantineId = quarantine.quarantineId;
-            if (quarantineId == null) {
-              // 退避できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
-              _updateRetrySchedule(data);
-              await box.put(key, data);
-              _recordResendResult(
-                data,
-                statusCode: result.statusCode,
-                success: false,
-                dropReason: reason,
-                willRetry: true,
-              );
-              return;
-            }
-
-            // キューからは、隔離した直後に隔離のロックの中で取り除いている
-            _recordResendResult(
-              data,
-              statusCode: result.statusCode,
-              success: false,
-              dropReason: reason,
-              willRetry: false,
-            );
-            _emitEvent(ProxyEventType.requestQuarantined, itemUrl, {
-              'quarantineId': quarantineId,
-              'statusCode': result.statusCode,
-              'reason': reason,
-            });
-          } else {
-            // 履歴を残してから取り除き、キューから消えたのに記録が無い状態を作らない
-            final recorded = await _recordDroppedRequest(
-              data,
-              statusCode: result.statusCode,
-              dropReason: reason,
-              errorMessage: errorMessage,
-            );
-            if (!recorded) {
-              // 記録できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
-              _updateRetrySchedule(data);
-              await box.put(key, data);
-              _recordResendResult(
-                data,
-                statusCode: result.statusCode,
-                success: false,
-                dropReason: reason,
-                willRetry: true,
-              );
-              return;
-            }
-            await box.delete(key);
-            _recordResendResult(
-              data,
-              statusCode: result.statusCode,
-              success: false,
-              dropReason: reason,
-              willRetry: false,
-            );
-            _emitEvent(ProxyEventType.requestDropped, itemUrl, {
-              'statusCode': result.statusCode,
-              'dropReason': result.dropReason,
-            });
+          final removal = await _removeRejectedQueuedItem(
+            box,
+            key as Object,
+            data,
+            statusCode: result.statusCode,
+            reason: reason,
+            errorMessage: result.errorMessage ?? 'HTTP ${result.statusCode}',
+          );
+          if (!removal.removed) {
+            // 記録できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
+            _updateRetrySchedule(data);
+            await box.put(key, data);
+          }
+          _recordResendResult(
+            data,
+            statusCode: result.statusCode,
+            success: false,
+            dropReason: reason,
+            willRetry: !removal.removed,
+          );
+          final event = removal.event;
+          if (event != null) {
+            _emitEvent(event.type, itemUrl, event.data);
           }
         } else {
           _updateRetrySchedule(data);
@@ -9605,6 +9723,193 @@ window.__offline_web_proxy_web_storage_bridge = {
         success: false,
         willRetry: true,
       );
+    }
+  }
+
+  /// 上流が拒否した要求を、[ProxyConfig.dropPolicy] に従ってキューから
+  /// 取り除きます。
+  ///
+  /// 隔離またはドロップ履歴へ記録してから取り除き、キューから消えたのに
+  /// 記録が無い状態を作りません。記録できなかった場合はキューに残し、
+  /// 扱いは呼び出し側が決めます。イベントは再送結果を記録した後に
+  /// 発行できるよう、呼び出し側へ返します。
+  ///
+  /// [box] キューの保存領域。
+  /// [key] 要求のキュー上のキー。
+  /// [data] 要求のキューデータ。
+  /// [statusCode] 上流が返したステータスコード。
+  /// [reason] 取り除く理由。
+  /// [errorMessage] 記録するエラーメッセージ。
+  ///
+  /// Returns: 取り除いたかどうかと、取り除いた場合に発行するイベント。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 隔離または履歴のロックを上限時間内に取得できなかった場合。
+  Future<
+      ({
+        bool removed,
+        ({ProxyEventType type, Map<String, dynamic> data})? event,
+      })> _removeRejectedQueuedItem(
+    Box box,
+    Object key,
+    Map data, {
+    required int statusCode,
+    required String reason,
+    required String errorMessage,
+  }) async {
+    if ((_config?.dropPolicy ?? DropPolicy.quarantine) ==
+        DropPolicy.quarantine) {
+      // 本文ごと隔離してから取り除き、退避に失敗した場合は消さない
+      final quarantine = await _quarantineRequest(
+        data,
+        statusCode: statusCode,
+        reason: reason,
+        errorMessage: errorMessage,
+        queueBox: box,
+        queueKey: key,
+      );
+      if (quarantine.tooLarge) {
+        // 1 件で隔離の合計バイト数の上限を超えるため、本文を持たない履歴へ
+        // 記録し、同じ応答を再試行し続けないようキューから取り除いた
+        return (
+          removed: true,
+          event: (
+            type: ProxyEventType.requestDropped,
+            data: <String, dynamic>{
+              'statusCode': statusCode,
+              'dropReason': _quarantineTooLargeDropReason,
+            },
+          ),
+        );
+      }
+
+      final quarantineId = quarantine.quarantineId;
+      if (quarantineId == null) {
+        return (removed: false, event: null);
+      }
+
+      // キューからは、隔離した直後に隔離のロックの中で取り除いている
+      return (
+        removed: true,
+        event: (
+          type: ProxyEventType.requestQuarantined,
+          data: <String, dynamic>{
+            'quarantineId': quarantineId,
+            'statusCode': statusCode,
+            'reason': reason,
+          },
+        ),
+      );
+    }
+
+    // 履歴を残してから取り除き、キューから消えたのに記録が無い状態を作らない
+    final recorded = await _recordDroppedRequest(
+      data,
+      statusCode: statusCode,
+      dropReason: reason,
+      errorMessage: errorMessage,
+    );
+    if (!recorded) {
+      return (removed: false, event: null);
+    }
+    await box.delete(key);
+    return (
+      removed: true,
+      event: (
+        type: ProxyEventType.requestDropped,
+        data: <String, dynamic>{
+          'statusCode': statusCode,
+          'dropReason': reason,
+        },
+      ),
+    );
+  }
+
+  /// ステータスコードが、認証が必要を示すものとして設定されているかを返します。
+  ///
+  /// [statusCode] 上流が返したステータスコード。
+  ///
+  /// Returns: [ProxyConfig.authRequiredStatusCodes] に含まれる場合は `true`。
+  bool _isAuthRequiredStatusCode(int statusCode) =>
+      _config?.authRequiredStatusCodes.contains(statusCode) ?? false;
+
+  /// 認証が必要との応答を受けて、キューの送信を一時停止します。
+  ///
+  /// 送信を始めた後に再開の契機が起きていた場合は、古いセッションで送った
+  /// 要求の応答とみなして一時停止しません。要求はキューに残り、次の周回で
+  /// 新しいセッションで送ります。既に一時停止している場合は何もしません。
+  ///
+  /// [key] 一時停止の原因になった要求のキュー上のキー。
+  /// [data] その要求のキューデータ。
+  /// [statusCode] 上流が返したステータスコード。
+  /// [authResumeGeneration] 送信を始めたときの [_authResumeGeneration]。
+  void _pauseQueueForAuthentication(
+    Object key,
+    Map data, {
+    required int statusCode,
+    required int authResumeGeneration,
+  }) {
+    if (authResumeGeneration != _authResumeGeneration ||
+        _queuePauseReason != null) {
+      return;
+    }
+
+    _queuePauseReason = QueuePauseReason.authenticationRequired;
+    _pausedQueueKey = key;
+    _pausedStatusCode = statusCode;
+    _emitEvent(
+      ProxyEventType.authenticationRequired,
+      data['url'] as String? ?? '',
+      {
+        'statusCode': statusCode,
+        'idempotencyKey': data['idempotencyKey'],
+        'queueId': key,
+      },
+    );
+  }
+
+  /// キューの一時停止を解除します。送信は始めません。
+  void _clearQueuePause() {
+    _queuePauseReason = null;
+    _pausedQueueKey = null;
+    _pausedStatusCode = null;
+  }
+
+  /// 再開の契機が起きたことを記録し、一時停止していればキューの送信を
+  /// 再開します。
+  void _resumeQueueAfterAuthentication() {
+    _authResumeGeneration++;
+    if (_queuePauseReason == null) {
+      return;
+    }
+
+    _clearQueuePause();
+    // ignore: discarded_futures
+    _drainQueue();
+  }
+
+  /// ログインの要求が成功した場合に、一時停止したキューを再開します。
+  ///
+  /// [ProxyConfig.authResumePaths] に一致するパスで、上流が 2xx か 3xx を
+  /// 返した場合に再開します。応答の Cookie は保存した後に呼び出します。
+  /// 別 origin の中継（[ProxyConfig.mirroredOrigins]）のパスは照合しません。
+  ///
+  /// [path] 要求のパス。
+  /// [statusCode] 上流が返したステータスコード。
+  void _resumeQueueIfSignedIn(String path, int statusCode) {
+    if (_authResumePatterns.isEmpty || statusCode < 200 || statusCode >= 400) {
+      return;
+    }
+
+    // 照合対象はパスのみのため、クエリとフラグメントを落とす
+    final pathOnly = path.split('?').first.split('#').first;
+    // 別 origin のログインでは、設定済み origin のセッションは変わらない
+    if (_isMirroredOriginPath(
+        pathOnly.startsWith('/') ? pathOnly : '/$pathOnly')) {
+      return;
+    }
+    if (_authResumePatterns.any((pattern) => pattern.matches(pathOnly))) {
+      _resumeQueueAfterAuthentication();
     }
   }
 
