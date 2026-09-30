@@ -91,9 +91,11 @@ cannot vary</li>
 <p>A skipped response raises <code>ProxyEventType.cacheSkipped</code> with the reason,
 so a path that never becomes available offline can be diagnosed.</p>
 <p><strong>Security</strong>: <code>no-store</code> asks the client not to write the response to
-storage at all. The response cache is not encrypted, so the body of a
-listed path is kept on the device in the clear. Weigh that against what
-the screen contains before listing it.</p>
+storage at all. The response cache is encrypted by default; with
+<a href="../../offline_web_proxy/ProxyConfig/encryptResponseCache.html">encryptResponseCache</a> switched off, the body of a listed path stays on
+the device in the clear. Even when encrypted, the box keys (the SHA-256
+of the URL) stay readable, so weigh what the screen contains before
+listing it.</p>
 <p><strong>Freshness</strong>: A response that says <code>no-store</code> usually says <code>max-age=0</code>
 as well. Honouring it would make the entry stale the moment it is stored,
 so the upstream freshness directives are ignored for a listed path and

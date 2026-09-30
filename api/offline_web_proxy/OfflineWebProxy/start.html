@@ -122,8 +122,10 @@
     _validateAutoReloadSettings();
     _validateRetentionSettings();
     _validateMirroredOrigins();
+    _validateAuthRequiredStatusCodes();
     _compileConfiguredPatterns();
     _resetRecoveryState();
+    _clearQueuePause();
 
     &#47;&#47; ストレージを初期化
     await _initializeStorage();

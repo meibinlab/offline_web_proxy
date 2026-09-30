@@ -394,6 +394,24 @@
 
 </dd>
 
+            <dt id="authenticationRequired" class="constant">
+    <span class="name ">authenticationRequired</span>
+  <span class="signature">&#8594; const <a href="../offline_web_proxy/ProxyEventType.html">ProxyEventType</a></span>
+  
+
+</dt>
+<dd>
+  <p>キューから送った要求が、認証が必要を示す応答を返したため、キューの送信を
+一時停止した</p>
+<p><code>ProxyConfig.authRequiredStatusCodes</code> を指定した場合だけ発行します。
+一時停止するたびに 1 回です。<code>url</code> は要求の URL、<code>data</code> には
+<code>statusCode</code>（上流が返した値）、<code>idempotencyKey</code>、<code>queueId</code>（キュー上の
+キー）が入ります。ログインし直した後に <code>resumeQueue()</code> を呼ぶか、
+<code>ProxyConfig.authResumePaths</code> のログインを成功させると再開します。</p>
+  
+
+</dd>
+
         </dl>
       </section>
 

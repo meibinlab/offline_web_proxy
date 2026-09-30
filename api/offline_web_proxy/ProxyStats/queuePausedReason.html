@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the dropPolicy property from the ProxyConfig class, for the Dart programming language.">
-  <title>dropPolicy property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the queuePausedReason property from the ProxyStats class, for the Dart programming language.">
+  <title>queuePausedReason property - ProxyStats class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">dropPolicy property</li>
+    <li><a href="../../offline_web_proxy/ProxyStats-class.html">ProxyStats</a></li>
+    <li class="self-crumb">queuePausedReason property</li>
   </ol>
-  <div class="self-name">dropPolicy</div>
+  <div class="self-name">queuePausedReason</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,36 +54,32 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;ProxyStats-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">dropPolicy</span> property 
+<h1><span class="kind-property">queuePausedReason</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
-        <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy</a>
-        <span class="name ">dropPolicy</span>
+        <a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason</a>?
+        <span class="name ">queuePausedReason</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>What happens to a queued update request the upstream rejected with 4xx.</p>
-<p>Resending cannot change a 4xx result, so the request leaves the queue.
-Codes listed in <a href="../../offline_web_proxy/ProxyConfig/authRequiredStatusCodes.html">authRequiredStatusCodes</a> pause the queue instead.
-<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a> keeps it, body included, in a quarantine store so
-that it can be resent after the cause is fixed, or discarded on purpose.
-<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.drop</a> discards it and keeps only a history entry.</p>
-<p>The default keeps the request, because silently discarding business data
-such as a sales record is rarely acceptable.</p>
-<p><strong>Default</strong>: <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a></p>
+  <p>Why sending from the offline queue is paused, or <code>null</code> when it is not.</p>
+<p><a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.authenticationRequired</a> means that a queued request
+was answered with one of <code>ProxyConfig.authRequiredStatusCodes</code>. The
+requests stay in the queue until the user signs in again and the queue
+resumes. The pause is not persisted and ends when the proxy stops.</p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final DropPolicy dropPolicy;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final QueuePauseReason? queuePausedReason;</code></pre>
 </section>
 
 
@@ -100,12 +96,12 @@ such as a sales record is rarely acceptable.</p>
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">dropPolicy property</li>
+    <li><a href="../../offline_web_proxy/ProxyStats-class.html">ProxyStats</a></li>
+    <li class="self-crumb">queuePausedReason property</li>
 </ol>
 
 
-  <h5>ProxyConfig class</h5>
+  <h5>ProxyStats class</h5>
   <div id="dartdoc-sidebar-left-content"></div>
 </div><!--/.sidebar-offcanvas-->
 

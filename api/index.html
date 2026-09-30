@@ -246,6 +246,8 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
       ),
     ),
   ],
+  authRequiredStatusCodes: {401},
+  authResumePaths: ['/api/login.json'],
   enableAcceptedAtHeader: true,
   acceptedAtHeaderName: 'X-Offline-Accepted-At',
   enableReplayHeader: true,
@@ -312,7 +314,7 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <li><code>upstreamFailureThreshold</code> is how many consecutive unreachable attempts stop forwarding. It prevents every request from waiting for the timeout when the link layer is up but the upstream is down. Set it to <code>0</code> to disable the behavior.</li>
 <li><code>upstreamProbePath</code>, <code>upstreamProbeMethod</code>, <code>upstreamProbeTimeout</code> and <code>upstreamProbeBackoffSeconds</code> control the reachability probe used while forwarding is stopped. Any response counts as reachable, regardless of status code.</li>
 <li><code>queuedResponse</code> and <code>offlineMissResponse</code> define the responses the proxy generates itself. Both default to JSON so that <code>response.json()</code> succeeds in the web app.</li>
-<li><code>dropPolicy</code> decides what happens to an update request the upstream rejected with 4xx. The default <code>quarantine</code> keeps it, body included, so <code>getQuarantinedRequests()</code> can surface it for a resend-or-discard decision (a request that alone exceeds <code>quarantineMaxBytes</code> is not quarantined; it is recorded in the dropped history as <code>quarantine_too_large</code>, without its body). <code>drop</code> discards it and keeps only a history entry, as before.</li>
+<li><code>dropPolicy</code> decides what happens to an update request the upstream rejected with 4xx (other than the codes listed in <code>authRequiredStatusCodes</code>). The default <code>quarantine</code> keeps it, body included, so <code>getQuarantinedRequests()</code> can surface it for a resend-or-discard decision (a request that alone exceeds <code>quarantineMaxBytes</code> is not quarantined; it is recorded in the dropped history as <code>quarantine_too_large</code>, without its body). <code>drop</code> discards it and keeps only a history entry, as before.</li>
 <li><code>quarantineMaxCount</code> (1000 by default), <code>quarantineRetention</code> (30 days), <code>quarantineMaxBytes</code> (20 MB), <code>droppedRequestMaxCount</code> (1000) and <code>droppedRequestRetention</code> (30 days) limit what the quarantine store and the dropped history keep. <code>0</code> (<code>Duration.zero</code>) removes a limit, and a negative value makes <code>start()</code> throw <code>ProxyStartException</code>. See <a href="#retention-limits-for-quarantine-and-dropped-history">Retention limits for quarantine and dropped history</a>.</li>
 <li><code>enableIdempotencyKey</code> attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. <strong>Deduplication itself must be implemented on the upstream server.</strong></li>
 <li><code>forceCachePaths</code> lists the paths stored even when the response says <code>Cache-Control: no-store</code>. On a server that sends <code>no-store</code> everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes <code>no-store</code> handling proxy-wide.
@@ -340,6 +342,16 @@ class _ProxyPageState extends State&lt;ProxyPage&gt; {
 <ul>
 <li>The rules apply while offline, when the upstream is unreachable, and when the upstream answered 5xx. A 5xx response is still returned as-is, because the upstream did answer; only the queueing is skipped.</li>
 <li>The answer carries <code>X-Offline-Queued: 0</code> and <code>X-Offline-Excluded: 1</code>.</li>
+</ul>
+</li>
+<li><code>authRequiredStatusCodes</code> and <code>authResumePaths</code> hold queued requests until the user signs in again, when the upstream session expired while the device was offline, instead of quarantining them. Both are empty by default, so every 4xx still leaves the queue according to <code>dropPolicy</code>.
+<ul>
+<li>When a request sent from the queue is answered with one of <code>authRequiredStatusCodes</code> (for example <code>{401}</code>), the request stays in the queue (its retry count is not increased) and the queue pauses. Later requests are not sent either, so their order is kept.</li>
+<li>A pause raises <code>ProxyEventType.authenticationRequired</code> once, and <code>queuePausedReason</code> in <code>getStats()</code> and in the status endpoint becomes <code>authenticationRequired</code>. A status query by key keeps answering <code>queued</code>.</li>
+<li>The queue resumes when <code>resumeQueue()</code> is called, or when a request matching <code>authResumePaths</code> (the sign-in) is answered with 2xx or 3xx through the proxy. A 3xx counts because a sign-in form usually redirects after it succeeds. If the same request is answered with the same code again, the queue pauses again.</li>
+<li>A request that signing in does not fix is moved out with <code>skipPausedRequest()</code>, to the quarantine store or the dropped history according to <code>dropPolicy</code> (reason <code>authentication_required</code>), and the rest are sent.</li>
+<li>Codes from 300 to 499 are accepted, so a redirect to the sign-in page (such as <code>302</code>) can be listed. A <code>POST</code> answered with <code>303</code>, however, is followed to the target by <code>dart:io</code> as before and does not pause the queue (the status code of the target decides); answer an expired session on a <code>POST</code> with <code>401</code>, <code>302</code> or <code>307</code>. <strong>A code that is also returned for other reasons, such as <code>403</code> for a missing permission, pauses the queue on a request that signing in cannot fix.</strong> So does a request that carries a CSRF token of the old session.</li>
+<li>The pause is not persisted. It ends when the proxy stops, and the next start sends from the head of the queue again.</li>
 </ul>
 </li>
 <li><code>enableAcceptedAtHeader</code> and <code>acceptedAtHeaderName</code> tell the upstream when the proxy first accepted a request. The same UTC ISO 8601 value is sent on the first forward and on every resend, so the upstream needs one rule — use this header when the payload carries no business timestamp — to stop offline sales from being recorded at reconnection time. Enabled by default.
@@ -578,10 +590,12 @@ if (!status.isOnline) {
   "queueLength": 0,
   "quarantinedCount": 0,
   "unacknowledgedDroppedCount": 0,
+  "queuePausedReason": null,
   "recentResendResults": []
 }
 </code></pre>
 <ul>
+<li><code>queuePausedReason</code> tells why sending from the queue is paused (<code>authRequiredStatusCodes</code>): <code>null</code> when it is not, <code>"authenticationRequired"</code> while it waits for a sign-in. The page can use it to ask the user to sign in.</li>
 <li><code>GET</code> only, never forwarded upstream, excluded from statistics, and omitted from the request log.</li>
 <li>Only callers on the proxy's own origin are served. A request carrying another <code>Origin</code> is answered with <code>403</code>, and <code>Access-Control-Allow-Origin: *</code> is never attached.</li>
 <li>A request without an <code>Origin</code> is allowed, so other apps on the device can reach it too. To limit it to the WebView, enable <code>requireAccessToken</code> as well ("Keeping Other Apps Away from the Proxy").</li>
@@ -605,7 +619,7 @@ for (const item of (await response.json()).requests) {
 }
 </code></pre>
 <ul>
-<li><code>state</code> is one of <code>queued</code> (waiting in the queue), <code>quarantined</code> (rejected with 4xx), <code>delivered</code> (sent from the queue and answered with 2xx, for <code>idempotencyRetention</code>), <code>dropped</code> (in the dropped history) or <code>unknown</code> (found nowhere). <code>quarantined</code> and <code>dropped</code> carry <code>statusCode</code>.</li>
+<li><code>state</code> is one of <code>queued</code> (waiting in the queue, including while the queue is paused for a sign-in), <code>quarantined</code> (rejected with 4xx), <code>delivered</code> (sent from the queue and answered with 2xx, for <code>idempotencyRetention</code>), <code>dropped</code> (in the dropped history) or <code>unknown</code> (found nowhere). <code>quarantined</code> and <code>dropped</code> carry <code>statusCode</code>.</li>
 <li>When the same key sits in several places, the first match in the order <code>delivered</code> → <code>queued</code> → <code>quarantined</code> → <code>dropped</code> wins.</li>
 <li>A request the upstream answered on its first forward with anything but 5xx is <code>unknown</code>, because the page receives that answer directly. A 5xx or an unreachable upstream puts the request in the queue, so it is <code>queued</code> (a request matching <code>queueExcludePaths</code> is never queued, so it stays <code>unknown</code>).</li>
 <li>Up to 50 keys of up to 200 characters each; beyond that the answer is <code>400</code>. When the stores cannot be read the answer is <code>503</code>, never <code>unknown</code>.</li>
@@ -754,6 +768,11 @@ for (final request in quarantined) {
   // 原因を解消したら再送、送らないと判断したら破棄する
   await proxy.retryQuarantinedRequest(request.id);
 }
+
+// A queue paused for a sign-in (authRequiredStatusCodes) resumes after the
+// user signs in again; a request that still fails can be moved out
+await proxy.resumeQueue();
+await proxy.skipPausedRequest();
 
 final stats = await proxy.getStats();
 print('requests=${stats.totalRequests} hitRate=${stats.cacheHitRate}');

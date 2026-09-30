@@ -69,7 +69,9 @@
       </section>
       
 <section class="desc markdown">
-  <p>隔離理由（"4xx_error" 等）</p>
+  <p>隔離理由</p>
+<p>上流が 4xx で拒否した場合は <code>"4xx_error"</code>、キューを一時停止させた要求を
+<code>skipPausedRequest()</code> で取り除いた場合は <code>"authentication_required"</code> です。</p>
 </section>
 
       

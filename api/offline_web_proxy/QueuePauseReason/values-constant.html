@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the dropPolicy property from the ProxyConfig class, for the Dart programming language.">
-  <title>dropPolicy property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the values constant from the QueuePauseReason enum, for the Dart programming language.">
+  <title>values constant - QueuePauseReason enum - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">dropPolicy property</li>
+    <li><a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason</a></li>
+    <li class="self-crumb">values constant</li>
   </ol>
-  <div class="self-name">dropPolicy</div>
+  <div class="self-name">values</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,37 +54,25 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;QueuePauseReason-enum-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">dropPolicy</span> property 
+<h1><span class="kind-property">values</span> constant 
 </h1></div>
 
       <section class="multi-line-signature">
         
-        <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy</a>
-        <span class="name ">dropPolicy</span>
-        <div class="features"><span class="feature">final</span></div>
+        <a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason</a></span>&gt;</span>
+        const <span class="name ">values</span>
+        
 
       </section>
       
 <section class="desc markdown">
-  <p>What happens to a queued update request the upstream rejected with 4xx.</p>
-<p>Resending cannot change a 4xx result, so the request leaves the queue.
-Codes listed in <a href="../../offline_web_proxy/ProxyConfig/authRequiredStatusCodes.html">authRequiredStatusCodes</a> pause the queue instead.
-<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a> keeps it, body included, in a quarantine store so
-that it can be resent after the cause is fixed, or discarded on purpose.
-<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.drop</a> discards it and keeps only a history entry.</p>
-<p>The default keeps the request, because silently discarding business data
-such as a sales record is rarely acceptable.</p>
-<p><strong>Default</strong>: <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a></p>
+  <p>A constant List of the values in this enum, in order of their declaration.</p>
 </section>
 
       
-<section class="summary source-code" id="source">
-  <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final DropPolicy dropPolicy;</code></pre>
-</section>
 
 
 </div> <!-- /.main-content -->
@@ -100,12 +88,12 @@ such as a sales record is rarely acceptable.</p>
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">dropPolicy property</li>
+    <li><a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason</a></li>
+    <li class="self-crumb">values constant</li>
 </ol>
 
 
-  <h5>ProxyConfig class</h5>
+  <h5>QueuePauseReason enum</h5>
   <div id="dartdoc-sidebar-left-content"></div>
 </div><!--/.sidebar-offcanvas-->
 

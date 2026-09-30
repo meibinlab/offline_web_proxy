@@ -72,7 +72,9 @@
   <p>ドロップ理由</p>
 <p>キューからの除外は <code>"4xx_error"</code> など、隔離の保持上限による追い出しは
 <code>"quarantine_limit"</code>（件数・合計バイト数）と <code>"quarantine_expired"</code>（期間）、
-1 件で隔離の合計バイト数の上限を超えた場合は <code>"quarantine_too_large"</code> です。</p>
+1 件で隔離の合計バイト数の上限を超えた場合は <code>"quarantine_too_large"</code>、
+キューを一時停止させた要求を <code>skipPausedRequest()</code> で取り除いた場合は
+<code>"authentication_required"</code> です。</p>
 </section>
 
       

@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the dropPolicy property from the ProxyConfig class, for the Dart programming language.">
-  <title>dropPolicy property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the authRequiredStatusCodes property from the ProxyConfig class, for the Dart programming language.">
+  <title>authRequiredStatusCodes property - ProxyConfig class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -31,9 +31,9 @@
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
     <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">dropPolicy property</li>
+    <li class="self-crumb">authRequiredStatusCodes property</li>
   </ol>
-  <div class="self-name">dropPolicy</div>
+  <div class="self-name">authRequiredStatusCodes</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -57,33 +57,55 @@
     data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">dropPolicy</span> property 
+<h1><span class="kind-property">authRequiredStatusCodes</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
-        <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy</a>
-        <span class="name ">dropPolicy</span>
+        <a href="https://api.flutter.dev/flutter/dart-core/Set-class.html">Set</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a></span>&gt;</span>
+        <span class="name ">authRequiredStatusCodes</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>What happens to a queued update request the upstream rejected with 4xx.</p>
-<p>Resending cannot change a 4xx result, so the request leaves the queue.
-Codes listed in <a href="../../offline_web_proxy/ProxyConfig/authRequiredStatusCodes.html">authRequiredStatusCodes</a> pause the queue instead.
-<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a> keeps it, body included, in a quarantine store so
-that it can be resent after the cause is fixed, or discarded on purpose.
-<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.drop</a> discards it and keeps only a history entry.</p>
-<p>The default keeps the request, because silently discarding business data
-such as a sales record is rarely acceptable.</p>
-<p><strong>Default</strong>: <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a></p>
+  <p>Status codes with which the upstream says that the session has expired.</p>
+<p>A session kept in a cookie often expires on the upstream while the
+device is offline, so every queued update is rejected when the
+connection returns. Without this setting a 4xx moves each of them out of
+the queue (see <a href="../../offline_web_proxy/ProxyConfig/dropPolicy.html">dropPolicy</a>) before the user has a chance to sign in
+again.</p>
+<p>When a request sent from the queue is answered with one of these codes,
+the proxy keeps it in the queue, without counting a retry, and pauses
+the queue: no later request is sent, so their order is kept. It raises
+<code>ProxyEventType.authenticationRequired</code> once per pause and reports
+<code>QueuePauseReason.authenticationRequired</code> through
+<code>ProxyStats.queuePausedReason</code> and the status endpoint. A status query
+by idempotency key keeps answering <code>queued</code>.</p>
+<p>Sending resumes when <code>OfflineWebProxy.resumeQueue()</code> is called, or when
+a request matching <a href="../../offline_web_proxy/ProxyConfig/authResumePaths.html">authResumePaths</a> succeeds through the proxy. If the
+same request is answered with one of these codes again, the queue pauses
+again. <code>OfflineWebProxy.skipPausedRequest()</code> moves that request out of
+the queue when signing in does not help.</p>
+<p>Codes from 300 to 499 are accepted, so that a redirect to the sign-in
+page such as <code>302</code> can be listed; other values are rejected by <code>start()</code>
+with a <code>ProxyStartException</code>. A <code>POST</code> answered with <code>303</code> is followed
+to the redirect target by <code>dart:io</code>, as before, so the code of the
+target decides; list <code>302</code> or <code>307</code> for a <code>POST</code>. The pause is kept in
+memory only and ends when the proxy stops.</p>
+<p><strong>Warning</strong>: List only codes that mean "sign in again". A code that is
+also returned for other reasons, such as <code>403</code> for a missing permission
+or an expired CSRF token, keeps the queue paused for a request that
+signing in cannot fix, until <code>skipPausedRequest()</code> is called.</p>
+<p><strong>Example</strong>: <code>{401}</code>
+<strong>Default</strong>: <code>{}</code> (every 4xx leaves the queue as described in
+<a href="../../offline_web_proxy/ProxyConfig/dropPolicy.html">dropPolicy</a>)</p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final DropPolicy dropPolicy;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final Set&lt;int&gt; authRequiredStatusCodes;</code></pre>
 </section>
 
 
@@ -101,7 +123,7 @@ such as a sales record is rarely acceptable.</p>
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">dropPolicy property</li>
+    <li class="self-crumb">authRequiredStatusCodes property</li>
 </ol>
 
 

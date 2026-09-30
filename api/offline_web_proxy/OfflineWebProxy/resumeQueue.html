@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the dropPolicy property from the ProxyConfig class, for the Dart programming language.">
-  <title>dropPolicy property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the resumeQueue method from the OfflineWebProxy class, for the Dart programming language.">
+  <title>resumeQueue method - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">dropPolicy property</li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">resumeQueue method</li>
   </ol>
-  <div class="self-name">dropPolicy</div>
+  <div class="self-name">resumeQueue</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,43 +54,51 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">dropPolicy</span> property 
+<h1><span class="kind-method">resumeQueue</span> method 
 </h1></div>
 
-      <section class="multi-line-signature">
-        
-        <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy</a>
-        <span class="name ">dropPolicy</span>
-        <div class="features"><span class="feature">final</span></div>
-
-      </section>
+    <section class="multi-line-signature">
       
+
+<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+<span class="name ">resumeQueue</span>(<wbr>)
+
+      
+
+    </section>
+    
 <section class="desc markdown">
-  <p>What happens to a queued update request the upstream rejected with 4xx.</p>
-<p>Resending cannot change a 4xx result, so the request leaves the queue.
-Codes listed in <a href="../../offline_web_proxy/ProxyConfig/authRequiredStatusCodes.html">authRequiredStatusCodes</a> pause the queue instead.
-<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a> keeps it, body included, in a quarantine store so
-that it can be resent after the cause is fixed, or discarded on purpose.
-<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.drop</a> discards it and keeps only a history entry.</p>
-<p>The default keeps the request, because silently discarding business data
-such as a sales record is rarely acceptable.</p>
-<p><strong>Default</strong>: <a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.quarantine</a></p>
+  <p>認証待ちで一時停止したキューの送信を再開します。</p>
+<p><a href="../../offline_web_proxy/ProxyConfig/authRequiredStatusCodes.html">ProxyConfig.authRequiredStatusCodes</a> の応答で一時停止したキューを、
+利用者がログインし直した後に再開します。一時停止の原因になった要求から
+順に送ります。別の処理がキューを扱っている間は、その後の定期処理
+（5 秒ごと）で送ります。同じ要求がまた同じ応答を返した場合は、再び
+一時停止します。</p>
+<p>一時停止していない場合も呼び出せます。その場合、呼び出す前から送信中の
+要求が認証が必要との応答を返しても、古いセッションで送った要求として
+一時停止しません。停止中は何もしません。</p>
 </section>
 
-      
+
+    
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final DropPolicy dropPolicy;</code></pre>
+  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; resumeQueue() async {
+  if (!_isRunning) {
+    return;
+  }
+  _resumeQueueAfterAuthentication();
+}</code></pre>
 </section>
 
 
-</div> <!-- /.main-content -->
+  </div> <!-- /.main-content -->
 
-<div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
-  <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+  <div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+    <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
 <header id="header-search-sidebar" class="hidden-l">
   <form class="search-sidebar" role="search">
     <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
@@ -100,16 +108,16 @@ such as a sales record is rarely acceptable.</p>
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
-    <li class="self-crumb">dropPolicy property</li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">resumeQueue method</li>
 </ol>
 
 
-  <h5>ProxyConfig class</h5>
-  <div id="dartdoc-sidebar-left-content"></div>
-</div><!--/.sidebar-offcanvas-->
+    <h5>OfflineWebProxy class</h5>
+    <div id="dartdoc-sidebar-left-content"></div>
+  </div><!--/.sidebar-offcanvas-->
 
-<div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+  <div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
 </div><!--/.sidebar-offcanvas-->
 
 </main>

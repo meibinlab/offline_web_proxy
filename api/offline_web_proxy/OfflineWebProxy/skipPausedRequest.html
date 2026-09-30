@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="API docs for the skipPausedRequest method from the OfflineWebProxy class, for the Dart programming language.">
+  <title>skipPausedRequest method - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../../static-assets/styles.css?v1">
+  <link rel="icon" href="../../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">skipPausedRequest method</li>
+  </ol>
+  <div class="self-name">skipPausedRequest</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html"
+    data-below-sidebar="">
+    <div>
+<h1><span class="kind-method">skipPausedRequest</span> method 
+</h1></div>
+
+    <section class="multi-line-signature">
+      
+
+<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a></span>&gt;</span></span>
+<span class="name ">skipPausedRequest</span>(<wbr>)
+
+      
+
+    </section>
+    
+<section class="desc markdown">
+  <p>キューを一時停止させた要求をキューから取り除き、送信を再開します。</p>
+<p>ログインし直しても同じ応答が返る要求（権限の不足や、古いセッションの
+CSRF トークンを含む要求など）で、キューが止まり続けないようにします。
+取り除いた要求は、4xx で拒否された要求と同じく <a href="../../offline_web_proxy/ProxyConfig/dropPolicy.html">ProxyConfig.dropPolicy</a>
+に従って隔離またはドロップ履歴へ移し、理由は <code>authentication_required</code>
+です。ただし隔離する方針で、1 件で <a href="../../offline_web_proxy/ProxyConfig/quarantineMaxBytes.html">ProxyConfig.quarantineMaxBytes</a> を
+超える要求は、4xx の場合と同じく本文を持たないドロップ履歴へ
+<code>quarantine_too_large</code> として記録します。</p>
+<p>Returns: 取り除いた場合は <code>true</code>。一時停止していない場合、停止中の場合、
+  要求が既にキューに無い場合は <code>false</code> です。最後の場合も一時停止は
+  解除して送信を再開します。</p>
+<p>Throws:</p>
+<ul>
+<li><a href="../../offline_web_proxy/QueueOperationException-class.html">QueueOperationException</a> 隔離またはドロップ履歴へ記録できなかった
+場合と、キュー・隔離・ドロップ履歴のいずれかのロックを 30 秒以内に
+取得できなかった場合。要求はキューに残り、一時停止も続きます。</li>
+</ul>
+</section>
+
+
+    
+<section class="summary source-code" id="source">
+  <h2><span>Implementation</span></h2>
+  <pre class="language-dart"><code class="language-dart">Future&lt;bool&gt; skipPausedRequest() async {
+  if (!_isRunning || _queuePauseReason == null) {
+    return false;
+  }
+
+  final bool removed;
+  try {
+    removed = await _queueDrainLock.synchronized(() async {
+      final key = _pausedQueueKey;
+      final box = _queueBox;
+      if (_queuePauseReason == null ||
+          key == null ||
+          box == null ||
+          !box.isOpen ||
+          _isClosingStorage) {
+        return false;
+      }
+
+      final data = box.get(key) as Map?;
+      if (data == null) {
+        _clearQueuePause();
+        return false;
+      }
+
+      &#47;&#47; 保存が終わるまで stop() が Box を閉じないよう、保存中であることを示す
+      final saving = Completer&lt;void&gt;();
+      _queuedItemSaving = saving.future;
+      try {
+        final statusCode = _pausedStatusCode ?? 0;
+        final removal = await _removeRejectedQueuedItem(
+          box,
+          key,
+          data,
+          statusCode: statusCode,
+          reason: _authenticationRequiredDropReason,
+          errorMessage: &#39;HTTP $statusCode&#39;,
+        );
+        if (!removal.removed) {
+          throw QueueOperationException(
+            &#39;skipPaused&#39;,
+            &#39;一時停止させた要求を隔離またはドロップ履歴へ記録できませんでした&#39;,
+            null,
+          );
+        }
+
+        _clearQueuePause();
+        final event = removal.event;
+        if (event != null) {
+          _emitEvent(event.type, data[&#39;url&#39;] as String? ?? &#39;&#39;, event.data);
+        }
+        return true;
+      } finally {
+        saving.complete();
+        if (identical(_queuedItemSaving, saving.future)) {
+          _queuedItemSaving = null;
+        }
+      }
+    }, timeout: _storageLockTimeout);
+  } on QueueOperationException {
+    rethrow;
+  } catch (e) {
+    throw QueueOperationException(
+        &#39;skipPaused&#39;, &#39;一時停止させた要求を取り除けませんでした: $e&#39;, e is Exception ? e : null);
+  }
+
+  if (_queuePauseReason == null) {
+    &#47;&#47; ignore: discarded_futures
+    _drainQueue();
+  }
+  return removed;
+}</code></pre>
+</section>
+
+
+  </div> <!-- /.main-content -->
+
+  <div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+    <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
+    <li class="self-crumb">skipPausedRequest method</li>
+</ol>
+
+
+    <h5>OfflineWebProxy class</h5>
+    <div id="dartdoc-sidebar-left-content"></div>
+  </div><!--/.sidebar-offcanvas-->
+
+  <div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+</div><!--/.sidebar-offcanvas-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.22.0
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../../static-assets/highlight.pack.js?v1"></script>
+<script src="../../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+

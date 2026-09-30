@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the RequestState enum from the offline_web_proxy library, for the Dart programming language.">
-  <title>RequestState enum - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the QueuePauseReason enum from the offline_web_proxy library, for the Dart programming language.">
+  <title>QueuePauseReason enum - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,9 +30,9 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../index.html">offline_web_proxy</a></li>
     <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li class="self-crumb">RequestState enum</li>
+    <li class="self-crumb">QueuePauseReason enum</li>
   </ol>
-  <div class="self-name">RequestState</div>
+  <div class="self-name">QueuePauseReason</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,11 +54,11 @@
     id="dartdoc-main-content"
     class="main-content"
     data-above-sidebar="offline_web_proxy&#47;offline_web_proxy-library-sidebar.html"
-    data-below-sidebar="offline_web_proxy&#47;RequestState-enum-sidebar.html">
+    data-below-sidebar="offline_web_proxy&#47;QueuePauseReason-enum-sidebar.html">
     <div>
 
       <h1>
-        <span class="kind-enum">RequestState</span>
+        <span class="kind-enum">QueuePauseReason</span>
         enum 
  
 
@@ -67,9 +67,11 @@
 
     
 <section class="desc markdown">
-  <p>Where an update request stands, looked up by its idempotency key.</p>
-<p>Returned inside <a href="../offline_web_proxy/RequestStatus-class.html">RequestStatus</a> by <code>OfflineWebProxy.getRequestStatuses</code> and
-by the status endpoint when it is called with <code>idempotencyKey</code>.</p>
+  <p>Reason why the proxy stopped sending requests from the offline queue.</p>
+<p>While the queue is paused, requests stay in the queue in their original
+order and nothing is sent from it. The value appears as
+<code>ProxyStats.queuePausedReason</code> and as <code>queuePausedReason</code> in the status
+endpoint, where it is written with its <code>name</code>.</p>
 </section>
 
 
@@ -81,7 +83,7 @@ by the status endpoint when it is called with <code>idempotencyKey</code>.</p>
     <ul class="gt-separated dark eNum-relationships">
       <li><a href="https://api.flutter.dev/flutter/dart-core/Object-class.html">Object</a></li>
         <li><a href="https://api.flutter.dev/flutter/dart-core/Enum-class.html">Enum</a></li>
-      <li>RequestState</li>
+      <li>QueuePauseReason</li>
     </ul>
   </dd>
 
@@ -98,8 +100,8 @@ by the status endpoint when it is called with <code>idempotencyKey</code>.</p>
     <h2>Constructors</h2>
 
     <dl class="constructor-summary-list">
-        <dt id="RequestState" class="callable">
-          <span class="name"><a href="../offline_web_proxy/RequestState/RequestState.html">RequestState</a></span><span class="signature">()</span>
+        <dt id="QueuePauseReason" class="callable">
+          <span class="name"><a href="../offline_web_proxy/QueuePauseReason/QueuePauseReason.html">QueuePauseReason</a></span><span class="signature">()</span>
         </dt>
         <dd>
           
@@ -112,74 +114,19 @@ by the status endpoint when it is called with <code>idempotencyKey</code>.</p>
         <h2>Values</h2>
 
         <dl class="properties">
-            <dt id="queued" class="constant">
-    <span class="name ">queued</span>
-  <span class="signature">&#8594; const <a href="../offline_web_proxy/RequestState.html">RequestState</a></span>
+            <dt id="authenticationRequired" class="constant">
+    <span class="name ">authenticationRequired</span>
+  <span class="signature">&#8594; const <a href="../offline_web_proxy/QueuePauseReason.html">QueuePauseReason</a></span>
   
 
 </dt>
 <dd>
-  <p>Waiting in the queue to be sent, including a request whose attempts keep
-failing with 5xx or an unreachable upstream, and a request held while the
-queue is paused by <code>ProxyConfig.authRequiredStatusCodes</code>.</p>
-  
-
-</dd>
-
-            <dt id="quarantined" class="constant">
-    <span class="name ">quarantined</span>
-  <span class="signature">&#8594; const <a href="../offline_web_proxy/RequestState.html">RequestState</a></span>
-  
-
-</dt>
-<dd>
-  <p>Rejected by the upstream with 4xx and kept in quarantine.</p>
-  
-
-</dd>
-
-            <dt id="delivered" class="constant">
-    <span class="name ">delivered</span>
-  <span class="signature">&#8594; const <a href="../offline_web_proxy/RequestState.html">RequestState</a></span>
-  
-
-</dt>
-<dd>
-  <p>Sent from the queue and answered with 2xx by the upstream, within
-<code>ProxyConfig.idempotencyRetention</code>.</p>
-<p>A request the upstream answered on its first forward with anything but
-5xx is not recorded, because the page receives that answer directly; it is
-reported as <a href="../offline_web_proxy/RequestState.html">unknown</a>. A 5xx on the first forward puts the request in the
-queue, so it is reported as <a href="../offline_web_proxy/RequestState.html">queued</a>, unless its path matches
-<code>ProxyConfig.queueExcludePaths</code>.</p>
-  
-
-</dd>
-
-            <dt id="dropped" class="constant">
-    <span class="name ">dropped</span>
-  <span class="signature">&#8594; const <a href="../offline_web_proxy/RequestState.html">RequestState</a></span>
-  
-
-</dt>
-<dd>
-  <p>Recorded in the dropped-request history.</p>
-  
-
-</dd>
-
-            <dt id="unknown" class="constant">
-    <span class="name ">unknown</span>
-  <span class="signature">&#8594; const <a href="../offline_web_proxy/RequestState.html">RequestState</a></span>
-  
-
-</dt>
-<dd>
-  <p>Found nowhere.</p>
-<p>Also reported once a record has left every store — after a quarantined
-request is discarded, a dropped record expires, or a delivered record
-passes its retention — and for every key while
-<code>ProxyConfig.enableIdempotencyKey</code> is <code>false</code>.</p>
+  <p>A request sent from the queue was answered with one of
+<code>ProxyConfig.authRequiredStatusCodes</code>.</p>
+<p>The session on the upstream has most likely expired while the device was
+offline. Sending resumes after <code>OfflineWebProxy.resumeQueue()</code>, or when a
+request matching <code>ProxyConfig.authResumePaths</code> succeeds through the
+proxy.</p>
   
 
 </dd>
@@ -295,8 +242,8 @@ passes its retention — and for every key while
 
     <dl class="properties">
         <dt id="values" class="constant">
-    <span class="name "><a href="../offline_web_proxy/RequestState/values-constant.html">values</a></span>
-  <span class="signature">&#8594; const <a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/RequestState.html">RequestState</a></span>&gt;</span></span>
+    <span class="name "><a href="../offline_web_proxy/QueuePauseReason/values-constant.html">values</a></span>
+  <span class="signature">&#8594; const <a href="https://api.flutter.dev/flutter/dart-core/List-class.html">List</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/QueuePauseReason.html">QueuePauseReason</a></span>&gt;</span></span>
   
 
 </dt>
@@ -321,7 +268,7 @@ passes its retention — and for every key while
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../index.html">offline_web_proxy</a></li>
     <li><a href="../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li class="self-crumb">RequestState enum</li>
+    <li class="self-crumb">QueuePauseReason enum</li>
 </ol>
 
 
