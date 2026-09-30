@@ -984,7 +984,7 @@ Android の自動バックアップ（Auto Backup）の対象には、Hive の�
 ## サンプルと参照先
 
 - `example/` に WebView delegate 連携のサンプルがあります。
-- API リファレンスはリポジトリ内の `doc/api/` にあります。
+- API リファレンスは [pub.dev](https://pub.dev/documentation/offline_web_proxy/latest/) で公開しています。
 - リリースノートは `CHANGELOG.md` にあります。
 
 ## 開発者向けセットアップ
