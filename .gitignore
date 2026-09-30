@@ -39,6 +39,9 @@ migrate_working_dir/
 **/build/
 /coverage/
 
+# Generated API reference (`dart doc --output doc/api`); CI builds it for gh-pages
+/doc/api/
+
 # Local agent instructions (kept locally, not tracked)
 CLAUDE.md
 .github/agents/

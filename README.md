@@ -984,7 +984,7 @@ Reference it from `android/app/src/main/AndroidManifest.xml`:
 ## Example and Reference
 
 - See `example/` for a working WebView integration sample focused on navigation delegates.
-- API reference is published under `doc/api/` in this repository.
+- The API reference is published on [pub.dev](https://pub.dev/documentation/offline_web_proxy/latest/).
 - Release notes are tracked in `CHANGELOG.md`.
 
 ## Developer Setup
