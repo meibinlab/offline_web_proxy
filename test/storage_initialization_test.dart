@@ -366,11 +366,12 @@ void main() {
         ),
         throwsA(isA<ProxyStartException>()),
       );
-      await Hive.box('proxy_cache_index_secure').close();
+      // 応答キャッシュは段階 2 では開かないため、段階 2 の Box を閉じる
+      await Hive.box('proxy_web_storage').close();
 
       await proxy.start(config: const ProxyConfig(origin: _origin));
 
-      expect(Hive.isBoxOpen('proxy_cache_index_secure'), isTrue);
+      expect(Hive.isBoxOpen('proxy_web_storage'), isTrue);
     });
 
     /// 段階 2 の失敗時は、この呼び出しで開いた Box だけを閉じ、他の処理が

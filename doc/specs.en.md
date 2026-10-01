@@ -362,12 +362,13 @@ Storage initialization runs in two stages, inside one serialization shared by ev
 | Stage | Work | Run by |
 | --- | --- | --- |
 | Stage 1 (key) | Locate the storage, read and verify the key, generate the key and discard the cookie box as the decision tables say (deleting the encrypted response cache when the key is regenerated), open the cookie box, migrate the legacy plain cookie box | `start()` and cookie APIs (callable before startup and after `stop()`) |
-| Stage 2 (business data) | Open the cache box (plain or encrypted as `encryptResponseCache` says, moving or deleting it when the setting changed), the web storage and idempotency boxes and the encrypted queue, quarantine and dropped-history boxes, migrate the legacy plain boxes (section [5]) | `start()` only |
+| Stage 2 (business data) | Open the web storage and idempotency boxes and the encrypted queue, quarantine and dropped-history boxes, migrate the legacy plain boxes (section [5]) | `start()` only |
 
 - A failed stage closes the boxes it opened, is not shared, and is retried by the next call. The result of stage 1 (the cookie box) stays usable after stage 2 fails
 - `stop()` discards the results of both stages, so a cookie API called after `stop()` and the next `start()` check again from stage 1
 - Cookie APIs report an initialization failure as a `CookieOperationException` whose `cause` is the original exception
 - Only calls within one isolate are serialized, and using several instances at the same time is not supported (see "Instances and Isolates" in [17])
+- The response cache is not opened in stage 2 but in the background after `start()` ("When the Cache Is Opened" in [8]). Choosing plain or encrypted storage as `encryptResponseCache` says, and moving or deleting it when the setting changed, also happen then
 
 #### Storage Location and Content
 
@@ -1039,15 +1040,28 @@ The response cache is split across two Hive boxes (see "Data Stored on the Devic
 - **Concurrent writes**: Stores and removals run one at a time (see "Capacity Limit" in [16])
 - **Deletion**: Hive deletes logically. A deleted entry stays in the file until Hive compacts it automatically
 
+#### When the Cache Is Opened
+
+Even with bodies read one at a time, Hive reads and checks the whole file when it opens a box, so opening takes time in proportion to the size of the cache ("Encrypting the Response Cache" in [16]). The response cache is therefore not opened during storage initialization in `start()`; it is opened in the background after `start()`, which returns without waiting.
+
+- **An online GET while the cache is opening**: It is forwarded upstream and the response is not stored (`ProxyEventType.cacheSkipped`, `reason: cacheOpening`), so that storing never delays the response
+- **A request answered from the cache while it is opening** (offline, upstream unreachable, upstream timeout): It waits for the cache to open. The limit is `requestTimeout` when offline, and the time left until `requestTimeout` from when the request was received after a forward upstream (so the wait upstream and the wait for the cache together stay within `requestTimeout`). After that the cache is treated as empty
+- **Cache APIs** (`clearCache()`, `clearExpiredCache()`, `clearCacheForUrl()`, `getCacheList()`, `getCacheStats()`, `warmupCache()`): They wait for the cache to open before running
+- **Waiting for the cache**: `cacheReady` completes once the cache is open. Use it before showing a screen offline right after startup
+- **When the cache cannot be opened**: The proxy keeps running without the response cache and reports it with `ProxyEventType.errorOccurred` (`phase: cacheOpen`); `start()` does not fail, since the responses can be fetched again. Hive still reports the exception as an unhandled zone error after the proxy has caught it
+- **Stopping and failed starts**: `stop()` waits for the opening to finish before closing the boxes, and interrupts the migration (below) if it is under way. Hive's opening of a box itself cannot be interrupted, so a `stop()` right after startup may wait until it ends (a few seconds for 200 MB). A failed start likewise interrupts and waits, then closes only the boxes this opening opened. It stays in the starting state while waiting, so another `start()` is refused
+- **Several instances**: The response cache boxes are shared by the instances, so they are opened by one instance at a time
+
 #### Migrating from 0.21.0 and Earlier
 
-Up to 0.21.0, each entry kept its metadata and body in one value in `proxy_cache` (plain) or `proxy_cache_secure` (encrypted). At startup (during storage initialization inside `start()`), these are moved into the new pair as follows.
+Up to 0.21.0, each entry kept its metadata and body in one value in `proxy_cache` (plain) or `proxy_cache_secure` (encrypted). They are moved into the new pair as follows when the response cache is opened (see "When the Cache Is Opened" above; in the background after `start()`).
 
 - The source is opened for reading one entry at a time, so the whole cache is never loaded into memory
 - Once the move is done, the source file is deleted
 - An entry that cannot be moved is dropped and the rest keep moving; the count is reported at the end (`ProxyEventType.errorOccurred`, `failedCount`). `phase` is `cacheEncryptionMigration` when moving into the encrypted pair and `cacheFormatMigration` when moving into the plain pair
 - When the destination already has the same key, the one with the later stored time (`createdAt`) is kept, since both can receive entries while the encryption setting is being switched
 - With `encryptResponseCache` off, `proxy_cache_secure` is deleted without being restored in plain form
+- **Interruption**: When `stop()` is called or the start fails, the move is checked before each entry and stops. The source file is kept rather than deleted, and the rest is moved the next time the cache is opened. Entries already moved also stay in the source, but the one with the later stored time is kept when the destination has the same key, so nothing is duplicated
 - For the time the move takes, see "Encrypting the Response Cache" in [16]
 
 ### Cache Key
@@ -1342,7 +1356,7 @@ Preserve original Cache-Control header as much as possible even in offline respo
 While `ProxyConfig.encryptResponseCache` (default `true`) is on, the response cache (status code, headers and body) is stored in AES-256 encrypted boxes (`proxy_cache_index_secure` and `proxy_cache_body_secure`) with the same key as the cookies, the queue and the quarantine store. APIs that return personal or business data can be kept with `forceCachePaths` without leaving them on the device in the clear.
 
 - **Not encrypted**: The box keys (the SHA-256 of the normalized URL) stay readable. Anyone who can guess a URL can tell whether it is cached
-- **Cost**: Bodies are read one at a time (see "Storage Format" in [8]), so startup does not decrypt every entry. Measured on a desktop CPU (AOT) with 30 KB bodies, the results were as follows; a phone is expected to take several times longer (not measured on a device)
+- **Cost**: Bodies are read one at a time (see "Storage Format" in [8]), so opening the cache does not decrypt every entry. Measured on a desktop CPU (AOT) with 30 KB bodies, the results were as follows
 
 | Cache total | Open (plain) | Open (encrypted) | Memory added on open | Read of one entry when served (encrypted) | Store of one entry (plain / encrypted) |
 | --- | --- | --- | --- | --- | --- |
@@ -1351,8 +1365,15 @@ While `ProxyConfig.encryptResponseCache` (default `true`) is on, the response ca
 | 199 MB | 656 ms | 749 ms | about 5–6 MB | 0.9 ms | 0.4 ms / 1.3 ms |
 
   - The open time is Hive reading the whole file to check its CRCs, and barely depends on encryption. With the 0.21.0 format (every entry in one box), encryption took 436 ms for 29 MB and 3,170 ms for 199 MB, and the whole cache stayed in memory
+  - Measured on an Android emulator (Pixel_10_Pro_XL, 1.5 GB RAM, profile build), the results were as follows. Opening took about 9 times as long as on the desktop, about 30 ms per MB, so about 6 s for the default limit of 200 MB (estimated). This is why the cache is opened in the background after `start()` ("When the Cache Is Opened" in [8]). A real device may differ (not measured)
+
+| Cache total | Open (plain / encrypted) | Read of one entry when served (plain / encrypted) | Store of one entry (plain / encrypted) | Writing every entry (plain / encrypted) |
+| --- | --- | --- | --- | --- |
+| 29 MB | about 1.1 s / about 0.9 s | 2.8 ms / 5.8 ms | 2.9 ms / 6.5 ms | 3.8 s / 6.2 s |
+| 88 MB | about 2.7 s / about 2.7 s | 2.7 ms / 5.8 ms | 3.0 ms / 6.5 ms | 9.5 s / 18.2 s |
+
 - **When switched on** (including an update from the default of 0.21.0 and earlier): An existing plain pair (`proxy_cache_index`, `proxy_cache_body`) or a `proxy_cache` of 0.21.0 and earlier is read one entry at a time into the encrypted pair, and the plain files are deleted. An entry that cannot be moved is dropped and the rest keep moving; the count is reported at the end (`ProxyEventType.errorOccurred`, `phase: cacheEncryptionMigration`, `failedCount`), since leaving no plain file behind comes first
-  - The move runs inside `start()` (inside storage initialization), and cookie APIs wait for it. On a desktop CPU with 30 KB bodies, moving a `proxy_cache` of 0.21.0 and earlier took about 1.1 s for 29 MB and 7.5 s for 199 MB. It happens only once
+  - The move runs when the response cache is opened in the background after `start()` ("When the Cache Is Opened" in [8]); neither `start()` nor the cookie APIs wait for it. Until it ends, requests answered from the cache and the cache APIs wait for the cache to open. On a desktop CPU with 30 KB bodies, moving a `proxy_cache` of 0.21.0 and earlier took about 1.1 s for 29 MB and 7.5 s for 199 MB. On the emulator, just writing every entry into the encrypted pair took about 18 s for 88 MB, so over 40 s is expected for 200 MB (estimated). It happens only once; when `stop()` interrupts it, the rest is moved at the next start
   - The files are deleted the ordinary way; erasing the underlying flash storage is not guaranteed. If the deletion fails, the move is retried at the next startup
 - **When switched off**: The encrypted pair (and a `proxy_cache_secure` of 0.21.0) is deleted without being restored in plain form; the cache starts empty. A failed deletion does not stop startup (`ProxyEventType.errorOccurred`, `phase: cacheEncryptionCleanup`)
 - **Key check**: The cache is not part of the startup check (section [4], "Decision Tables"). When the key does not match, the cache is emptied rather than failing startup, because the responses can be fetched again. The encrypted pair is deleted when the key is regenerated and when `recoverEncryptedStorage()` deletes the key (it is not listed in the result of `recoverEncryptedStorage()`)
@@ -1510,6 +1531,7 @@ Cache operations (put/get/purge) implement exclusive control through serializati
 Using several `OfflineWebProxy` instances at the same time in one app is not supported.
 
 - Storage initialization (stages 1 and 2 in [4]) and the recovery API are serialized across instances within one isolate
+- Opening the response cache (migration included; "When the Cache Is Opened" in [8]) is serialized across instances, but under a separate exclusion from the above, since the migration can take long and must not hold up the cookie APIs. It does not overlap the recovery API, which refuses to run while any instance is running or starting (`StorageRecoveryRejection.proxyActive`); `stop()` and a failed start leave the running instances only after the opening has finished
 - The queue-drain exclusion, the quarantine lock and the history lock (retention limits and migration included) belong to each instance and are not serialized across instances
 - Running instances with different `encryptResponseCache` settings at the same time lets the one started later close or delete the response cache box of the other
 - When the proxy is used from several isolates at once, even storage initialization and recovery are not serialized
@@ -1593,6 +1615,7 @@ Starts the proxy server.
   - `StorageIntegrityException`: When the encrypted storage cannot be used (see the decision tables in [4]). A subclass of `ProxyStartException`, thrown without wrapping. Nothing has been deleted
   - `PortBindException`: When port binding fails
 - **Storage**: After storage initialization, the retention limits of the quarantine store and the dropped history are checked (see [5])
+- **Response cache**: Returns without waiting for it to open; it is opened in the background ("When the Cache Is Opened" in [8], `cacheReady`)
 
 ```dart
 final proxy = OfflineWebProxy();
@@ -1609,9 +1632,23 @@ Stops the proxy server.
   - `ProxyStopException`: When server stop fails, including when the exclusion with rebind recovery (such as `ensureRunning()`) cannot be acquired within the time limit (30 seconds; `cause` is the `TimeoutException`, and the server is not stopped)
 - **Queue draining**: A drain in progress exits instead of moving on to the next item. A deferred migration that has not started copying is cancelled; one that is copying is awaited
 - **Item being saved**: The save of a queued item whose send has finished is awaited before the boxes are closed. An item that tries to start saving after closing has begun stays queued and is resent at the next startup
+- **Response cache**: If it is still opening, the migration is interrupted and the opening is awaited before the cache is closed. The rest is moved at the next start
 
 ```dart
 await proxy.stop();
+```
+
+#### `Future<void> get cacheReady`
+
+Returns a `Future` that completes once the response cache is open ("When the Cache Is Opened" in [8]).
+
+- **Return Value**: A `Future` that completes once the cache is open. It completes at once when the proxy is not running, and also completes without throwing when the cache cannot be opened (reported with `ProxyEventType.errorOccurred`, `phase: cacheOpen`)
+- **Note**: Until the cache is open, responses to online GETs are not stored, and requests answered from the cache wait for up to `requestTimeout`. Read it after `start()` has completed (read earlier, it may complete at once)
+
+```dart
+await proxy.start(config: config);
+// Wait for the cache before showing a screen offline right after startup
+await proxy.cacheReady;
 ```
 
 #### `bool get isRunning`
@@ -2640,7 +2677,7 @@ enum ProxyEventType {
 
 The `data` of `cacheSkipped` carries why the response was not stored.
 
-- `reason`: One of `set-cookie`, `vary` or `authorization` (the safety exclusions of `forceCachePaths`), or `cacheMaxSize` when the body alone exceeds `cacheMaxSize`
+- `reason`: One of `set-cookie`, `vary` or `authorization` (the safety exclusions of `forceCachePaths`); `cacheMaxSize` when the body alone exceeds `cacheMaxSize`; `cacheOpening` while the response cache is being opened after startup ("When the Cache Is Opened" in [8])
 
 The `data` of `cacheEvicted` holds `reason` (`cacheMaxSize`), `evictedCount` (entries) and `evictedBytes` (body bytes). `cacheCleared` is raised only when `clearCache()` removes everything.
 
@@ -2677,6 +2714,8 @@ The `url` of `authenticationRequired` is the URL of the request that paused the 
 - `statusCode`: Status code returned by the upstream
 - `idempotencyKey`: Idempotency key of the request (`null` when there is none)
 - `queueId`: Key of the request in the queue
+
+For `errorOccurred` raised when the response cache cannot be opened, `data` carries `phase` (`cacheOpen`) and `error` ("When the Cache Is Opened" in [8]).
 
 For `errorOccurred` raised when the idempotency key records are rebuilt, `data` carries `phase` (`idempotencyStoreRecovery`) and `error` ("Retention Period" in [6]).
 

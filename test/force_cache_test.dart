@@ -201,6 +201,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
 
         await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
         expect((await proxy.getCacheStats()).totalEntries, equals(1));
@@ -311,6 +312,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
 
         final skippedReasons = <String>[];
         proxy.events
@@ -347,6 +349,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
 
         final skippedReasons = <String>[];
         proxy.events
@@ -458,6 +461,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
 
         final skippedReasons = <String>[];
         proxy.events
@@ -542,6 +546,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
 
         final skippedReasons = <String>[];
         proxy.events
@@ -592,6 +597,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
 
         await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
         expect((await proxy.getCacheStats()).freshEntries, equals(1));
@@ -617,6 +623,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
 
         await _performGet(
           Uri.parse('http://127.0.0.1:$firstPort/app/index.html'),
@@ -628,6 +635,7 @@ void main() {
         final secondPort = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
+        await proxy.cacheReady;
         // 前回の保存内容と区別するため、判定前に空にする
         await proxy.clearCache();
         expect((await proxy.getCacheStats()).totalEntries, equals(0));
@@ -650,6 +658,7 @@ void main() {
             forceCachePaths: const ['/app/index.html'],
           ),
         );
+        await proxy.cacheReady;
 
         await _performGet(
           Uri.parse('http://127.0.0.1:$port/app/index.html?v=20260909'),
@@ -675,6 +684,7 @@ void main() {
         final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
+        await proxy.cacheReady;
 
         final response = await _performGet(
           Uri.parse('http://127.0.0.1:$port/app/index.html'),
@@ -699,6 +709,7 @@ void main() {
         final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
+        await proxy.cacheReady;
 
         await _performGet(Uri.parse('http://127.0.0.1:$port/app/index.html'));
 
@@ -719,6 +730,7 @@ void main() {
         final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
+        await proxy.cacheReady;
 
         final errorPhases = <String>[];
         proxy.events

@@ -458,6 +458,7 @@ void main() {
         final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
+        await proxy.cacheReady;
 
         // キャッシュを 1 件作る
         await _performGet(Uri.parse('http://127.0.0.1:$port/page'));
