@@ -52,7 +52,8 @@ enum ProxyEventType {
   ///
   /// `data['reason']` に理由が入ります。`forceCachePaths` の安全側の除外
   /// （`set-cookie`・`vary`・`authorization`）と、本文だけで
-  /// `ProxyConfig.cacheMaxSize` を超えた場合（`cacheMaxSize`）です。
+  /// `ProxyConfig.cacheMaxSize` を超えた場合（`cacheMaxSize`）と、起動の後に
+  /// 応答キャッシュを開いている間（`cacheOpening`）です。
   cacheSkipped,
 
   /// リクエストキューイング

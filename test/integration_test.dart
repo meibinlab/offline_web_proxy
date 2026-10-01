@@ -310,6 +310,7 @@ void main() {
               requestTimeout: const Duration(milliseconds: 300),
             ),
           );
+          await proxy.cacheReady;
 
           final firstResponse =
               await _performProxyRequest(proxyPort, '/api/online-preferred');
@@ -373,6 +374,7 @@ void main() {
               requestTimeout: const Duration(milliseconds: 100),
             ),
           );
+          await proxy.cacheReady;
 
           final seededResponse =
               await _performProxyRequest(proxyPort, '/api/timeout-fallback');
@@ -435,6 +437,7 @@ void main() {
               requestTimeout: const Duration(milliseconds: 500),
             ),
           );
+          await proxy.cacheReady;
 
           final seededResponse =
               await _performProxyRequest(proxyPort, '/api/error-no-fallback');

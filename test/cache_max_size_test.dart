@@ -149,14 +149,18 @@ void main() {
   ///
   /// [cacheMaxSize] は応答キャッシュの上限です。戻り値は proxy のポートです。
   /// 上流は起動済みのものがあれば使い回し、キャッシュのキーを揃える。
+  /// 応答キャッシュを開き終わるまで待ってから返す。
   Future<int> startProxy(int cacheMaxSize) async {
     upstream ??= await _startMockUpstream();
-    return proxy.start(
+    final port = await proxy.start(
       config: ProxyConfig(
         origin: upstream!.origin,
         cacheMaxSize: cacheMaxSize,
       ),
     );
+    // 応答キャッシュは start() の後に裏で開くため、開き終わるのを待つ
+    await proxy.cacheReady;
+    return port;
   }
 
   /// 指定したパスを順に取得し、キャッシュへ保存させる。

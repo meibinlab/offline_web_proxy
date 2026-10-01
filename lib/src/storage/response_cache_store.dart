@@ -118,8 +118,13 @@ class ResponseCacheStore {
   ///   後続の処理に失敗したときに閉じるために使います。
   /// [onMigrationError] 移行の失敗を知らせる関数。
   /// [beforeEntryMoved] 1 件移す直前に呼ぶ関数（テスト用）。
+  /// [shouldStopMigration] 移行を打ち切る場合に `true` を返す関数。1 件移す
+  ///   たびに確かめます。打ち切った場合、移し元のファイルは削除せずに残し、
+  ///   次に開くときに残りを移します（移し先に同じキーがあれば保存日時の
+  ///   新しい方を残すため、二重にはなりません）。
   ///
-  /// Returns: 開いた応答キャッシュ。
+  /// Returns: 開いた応答キャッシュ。移行を打ち切った場合も、それまでに
+  ///   移した記録を持つ応答キャッシュを返します。
   ///
   /// Throws:
   ///   * [HiveError] または `FileSystemException` Box を開けない場合。
@@ -130,6 +135,7 @@ class ResponseCacheStore {
     required List<BoxBase> openedBoxes,
     CacheMigrationErrorReporter? onMigrationError,
     Future<void> Function(Object key)? beforeEntryMoved,
+    bool Function()? shouldStopMigration,
   }) async {
     final cipher = encrypt ? HiveAesCipher(encryptionKey) : null;
     final indexName =
@@ -167,6 +173,7 @@ class ResponseCacheStore {
       directoryPath: directoryPath,
       onError: onMigrationError,
       beforeEntryMoved: beforeEntryMoved,
+      shouldStop: shouldStopMigration,
     );
     if (encrypt) {
       await migration.movePair(
@@ -394,6 +401,7 @@ class _CacheMigration {
     required this.directoryPath,
     required this.onError,
     required this.beforeEntryMoved,
+    required this.shouldStop,
   });
 
   /// 移し先の応答キャッシュ。
@@ -408,6 +416,23 @@ class _CacheMigration {
   /// 1 件移す直前に呼ぶ関数（テスト用）。
   final Future<void> Function(Object key)? beforeEntryMoved;
 
+  /// 移行を打ち切る場合に `true` を返す関数。
+  final bool Function()? shouldStop;
+
+  /// 移行を打ち切ったかどうか。打ち切った後は、残りの移し元に手を付けません。
+  bool _stopped = false;
+
+  /// 移行を打ち切るよう求められているかどうかを返し、求められていれば
+  /// 打ち切ったことを控えます。
+  ///
+  /// Returns: 打ち切る場合は `true`。一度 `true` を返した後は、ずっと `true`。
+  bool _checkStop() {
+    if (!_stopped && (shouldStop?.call() ?? false)) {
+      _stopped = true;
+    }
+    return _stopped;
+  }
+
   /// 平文の組（メタデータと本文）を、暗号化した組へ移します。
   ///
   /// 例外は送出しません。
@@ -419,6 +444,9 @@ class _CacheMigration {
     required String bodyName,
   }) async {
     const phase = cacheEncryptionMigrationPhase;
+    if (_checkStop()) {
+      return;
+    }
     try {
       if (!await Hive.boxExists(indexName, path: directoryPath) &&
           !await Hive.boxExists(bodyName, path: directoryPath)) {
@@ -452,8 +480,11 @@ class _CacheMigration {
     } catch (error) {
       onError?.call(phase, error);
     } finally {
-      await _deleteBox(indexName, phase);
-      await _deleteBox(bodyName, phase);
+      // 打ち切った場合は、移していない記録を失わないよう移し元を残す
+      if (!_stopped) {
+        await _deleteBox(indexName, phase);
+        await _deleteBox(bodyName, phase);
+      }
     }
   }
 
@@ -471,6 +502,9 @@ class _CacheMigration {
     required String phase,
     HiveCipher? cipher,
   }) async {
+    if (_checkStop()) {
+      return;
+    }
     try {
       if (!await Hive.boxExists(name, path: directoryPath)) {
         return;
@@ -497,11 +531,17 @@ class _CacheMigration {
     } catch (error) {
       onError?.call(phase, error);
     } finally {
-      await _deleteBox(name, phase);
+      // 打ち切った場合は、移していない記録を失わないよう移し元を残す
+      if (!_stopped) {
+        await _deleteBox(name, phase);
+      }
     }
   }
 
   /// 記録を 1 件ずつ移し、移せなかった件数を知らせます。
+  ///
+  /// 1 件ごとに [shouldStop] を確かめ、打ち切りを求められたら残りを移さずに
+  /// 戻ります。
   ///
   /// 移し先に同じキーがある場合は、保存日時（`createdAt`）の新しい方を
   /// 残します。暗号化の設定を切り替える間に、両方へ保存されることがあるためです。
@@ -517,6 +557,9 @@ class _CacheMigration {
     var failedCount = 0;
     Object? lastError;
     for (final key in keys) {
+      if (_checkStop()) {
+        break;
+      }
       try {
         await beforeEntryMoved?.call(key as Object);
         final value = await read(key);

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -185,12 +186,14 @@ void main() {
   /// 指定せず、既定値を使います。
   /// [cacheMaxSize] は応答キャッシュの上限です（`0` で上限なし）。
   ///
+  /// 応答キャッシュを開き終わるまで待ってから返す。
+  ///
   /// Returns: proxy のポート。
   Future<int> startProxy({bool? encrypt, int cacheMaxSize = 0}) async {
     upstream ??= _MockUpstream(
       await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
     );
-    return proxy.start(
+    final port = await proxy.start(
       config: encrypt == null
           ? ProxyConfig(
               origin: upstream!.origin,
@@ -202,6 +205,9 @@ void main() {
               cacheMaxSize: cacheMaxSize,
             ),
     );
+    // 応答キャッシュは start() の後に裏で開くため、開き終わるのを待つ
+    await proxy.cacheReady;
+    return port;
   }
 
   /// Box のファイル（.hive・.hivec・.lock）が 1 つでも残っているかを返す。
@@ -669,6 +675,233 @@ void main() {
         await proxy.clearCache();
         expect(Hive.box(_plainPair.index).length, equals(0));
         expect(Hive.lazyBox(_plainPair.body).length, equals(0));
+      });
+    });
+  });
+
+  group('応答キャッシュを開く時機（doc/specs.ja.md 【8】保存形式）', () {
+    /// 平文の応答キャッシュを 2 件ためてから、移行を止められる proxy を作る。
+    ///
+    /// [gate] 完了するまで、移行の 1 件目を止める。
+    Future<void> prepareBlockedMigration(Completer<void> gate) async {
+      final port = await startProxy(encrypt: false);
+      await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
+      await _get(Uri.parse('http://127.0.0.1:$port/api/b'));
+      await restartProxy();
+      proxy = OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(beforeCacheEntryMoved: (_) => gate.future),
+      );
+    }
+
+    /// 移行が終わるのを待たずに start() が返り、開いている間は保存せず、
+    /// キャッシュから返す要求と API は開き終わるのを待つこと
+    test('returns from start before the cache is open', () async {
+      await withRealHttpClient(() async {
+        final gate = Completer<void>();
+        await prepareBlockedMigration(gate);
+        final skipped = <ProxyEvent>[];
+        final subscription = proxy.events
+            .where((event) => event.type == ProxyEventType.cacheSkipped)
+            .listen(skipped.add);
+
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin, cacheMaxSize: 0),
+        );
+
+        var ready = false;
+        unawaited(proxy.cacheReady.then((_) => ready = true));
+        var statsDone = false;
+        final stats =
+            proxy.getCacheStats().whenComplete(() => statsDone = true);
+
+        // 開いている間のオンラインの GET は、上流から返して保存しない
+        final online = await _get(Uri.parse('http://127.0.0.1:$port/api/c'));
+        expect(online.statusCode, equals(HttpStatus.ok));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(skipped.single.data['reason'], equals('cacheOpening'));
+        expect(ready, isFalse);
+        expect(statsDone, isFalse);
+
+        // キャッシュから返す要求は、開き終わるのを待ってから返す
+        await _emitConnectivity(['none']);
+        final offline = _get(Uri.parse('http://127.0.0.1:$port/api/a'));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        gate.complete();
+        final served = await offline;
+        await _emitConnectivity(['wifi']);
+
+        expect(served.statusCode, equals(HttpStatus.ok));
+        expect(served.offlineSource, equals('cache'));
+        await proxy.cacheReady;
+        expect(ready, isTrue);
+        // 開いている間に取得した /api/c は保存していないこと
+        expect((await stats).totalEntries, equals(2));
+        await subscription.cancel();
+      });
+    });
+
+    /// キャッシュから返す要求は、requestTimeout を上限に待つこと
+    test('stops waiting for the cache at the request timeout', () async {
+      await withRealHttpClient(() async {
+        final gate = Completer<void>();
+        await prepareBlockedMigration(gate);
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            requestTimeout: const Duration(milliseconds: 500),
+          ),
+        );
+
+        await _emitConnectivity(['none']);
+        final stopwatch = Stopwatch()..start();
+        final response = await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
+        stopwatch.stop();
+        await _emitConnectivity(['wifi']);
+        gate.complete();
+
+        expect(response.offlineSource, isNot(equals('cache')));
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
+      });
+    });
+
+    /// 停止すると移行を打ち切り、移していない記録は次の起動で移すこと
+    test('resumes an interrupted migration at the next start', () async {
+      await withRealHttpClient(() async {
+        final gate = Completer<void>();
+        await prepareBlockedMigration(gate);
+        await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
+
+        final stopping = proxy.stop();
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        gate.complete();
+        await stopping;
+
+        // 移し元は、移していない記録を失わないよう残っていること
+        expect(pairFilesExist(_plainPair), isTrue);
+        expect(Hive.isBoxOpen(_encryptedPair.index), isFalse);
+
+        await restartProxy();
+        await startProxy();
+
+        expect(pairFilesExist(_plainPair), isFalse);
+        expect((await proxy.getCacheStats()).totalEntries, equals(2));
+      });
+    });
+
+    /// 開けない場合も start() は成功し、キャッシュを使わずに動くこと
+    test('keeps running without the cache when it cannot be opened', () async {
+      await withRealHttpClient(() async {
+        upstream ??= _MockUpstream(
+          await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+        );
+        // Box のファイル名と同じディレクトリを置き、開くときに失敗させる
+        Directory(
+          '$hiveTestDirectory${Platform.pathSeparator}'
+          '${_encryptedPair.index}.hive',
+        ).createSync();
+        final errors = <ProxyEvent>[];
+        final subscription = proxy.events
+            .where((event) => event.type == ProxyEventType.errorOccurred)
+            .listen(errors.add);
+
+        // Hive は開けなかった例外を、捕まえた後も未捕捉のエラーとして報告する
+        final uncaughtErrors = <Object>[];
+        late int port;
+        await runZonedGuarded(() async {
+          port = await proxy.start(
+            config: ProxyConfig(origin: upstream!.origin),
+          );
+          await proxy.cacheReady;
+        }, (error, stackTrace) => uncaughtErrors.add(error));
+        await Future<void>.delayed(Duration.zero);
+
+        expect(proxy.isRunning, isTrue);
+        // 開けなかった例外以外の未捕捉エラーが紛れていないこと
+        expect(uncaughtErrors, isNotEmpty);
+        expect(uncaughtErrors, everyElement(isA<FileSystemException>()));
+        expect(errors.single.data['phase'], equals('cacheOpen'));
+        final response = await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
+        expect(response.statusCode, equals(HttpStatus.ok));
+        expect((await proxy.getCacheStats()).totalEntries, equals(0));
+        await subscription.cancel();
+      });
+    });
+
+    /// 起動に失敗した場合は、開き始めた応答キャッシュを閉じること
+    test('closes the cache when start fails', () async {
+      final occupied = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(occupied.close);
+
+      await expectLater(
+        proxy.start(
+          config: ProxyConfig(origin: 'http://127.0.0.1', port: occupied.port),
+        ),
+        throwsA(isA<ProxyStartException>()),
+      );
+
+      expect(Hive.isBoxOpen(_encryptedPair.index), isFalse);
+      expect(Hive.isBoxOpen(_encryptedPair.body), isFalse);
+      await proxy.cacheReady;
+    });
+
+    /// 起動に失敗した場合は、開く処理が終わるまで別の start() を受け付けず、
+    /// 移行を始めずに移し元を残すこと
+    test('waits for the cache opening when start fails', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(encrypt: false);
+        await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
+        await restartProxy();
+        final gate = Completer<void>();
+        proxy = OfflineWebProxy.withStorageTestHooks(
+          ProxyStorageTestHooks(beforeCacheOpened: () => gate.future),
+        );
+        final occupied =
+            await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(occupied.close);
+
+        final failing = proxy.start(
+          config: ProxyConfig(origin: upstream!.origin, port: occupied.port),
+        );
+        var failed = false;
+        unawaited(failing.then((_) {}, onError: (_) => failed = true));
+        // ポートの確保に失敗した後、開く処理が終わるのを待っている間
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(failed, isFalse);
+        await expectLater(
+          proxy.start(config: ProxyConfig(origin: upstream!.origin)),
+          throwsA(isA<ProxyStartException>().having(
+              (error) => error.message, 'message', contains('starting'))),
+        );
+        gate.complete();
+        await expectLater(failing, throwsA(isA<ProxyStartException>()));
+
+        expect(pairFilesExist(_plainPair), isTrue);
+        expect(pairFilesExist(_encryptedPair), isFalse);
+        expect(Hive.isBoxOpen(_encryptedPair.index), isFalse);
+      });
+    });
+
+    /// 起動に失敗しても、別のインスタンスが開いている応答キャッシュは閉じないこと
+    test('keeps the cache of another instance open when start fails', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+        final occupied =
+            await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(occupied.close);
+        final other = OfflineWebProxy();
+
+        await expectLater(
+          other.start(
+            config: ProxyConfig(origin: upstream!.origin, port: occupied.port),
+          ),
+          throwsA(isA<ProxyStartException>()),
+        );
+
+        expect(Hive.isBoxOpen(_encryptedPair.index), isTrue);
+        await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
+        expect((await proxy.getCacheStats()).totalEntries, equals(1));
       });
     });
   });

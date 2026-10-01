@@ -193,6 +193,7 @@ void main() {
         final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
+        await proxy.cacheReady;
         final pageUri = Uri.parse('http://127.0.0.1:$port/page');
 
         final online = await _performRequest(pageUri);

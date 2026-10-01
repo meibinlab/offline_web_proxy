@@ -941,6 +941,7 @@ void main() {
     test('does not replay Set-Cookie from the cache', () async {
       await withRealHttpClient(() async {
         final port = await startProxy(requireAccessToken: false);
+        await proxy.cacheReady;
         upstream!.setCookies['/page'] = setCookies;
         final uri = Uri.parse('http://127.0.0.1:$port/page');
 

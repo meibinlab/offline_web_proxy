@@ -672,6 +672,34 @@ class OfflineWebProxy {
   /// 鍵と合わない場合は、上流から取り直せるため空にして続けます。
   ResponseCacheStore? _cacheStore;
 
+  /// 応答キャッシュを開く処理。`start()` が始め、`start()` の完了を待たずに
+  /// 裏で進めます。起動していない場合は `null` です。
+  ///
+  /// 開けなかった場合も例外を送出せずに完了します（[_openCacheInBackground]）。
+  Future<void>? _cacheOpening;
+
+  /// 応答キャッシュを開く処理が終わったかどうか。
+  ///
+  /// [_cacheOpeningGeneration] が一致する処理だけが立てます。
+  bool _cacheOpeningDone = false;
+
+  /// 応答キャッシュを開く処理の世代。`start()` のたびに 1 増やします。
+  ///
+  /// 前の起動の開く処理が遅れて終わっても、今の起動の状態を変えないために
+  /// 使います。
+  int _cacheOpeningGeneration = 0;
+
+  /// 応答キャッシュを開く処理（移行を含む）を打ち切るよう求めているかどうか。
+  ///
+  /// 起動に失敗した場合に立てます。停止は [_isStopping] で判定します。
+  bool _abortCacheOpening = false;
+
+  /// 応答キャッシュを開く処理が新たに開いた Box。
+  ///
+  /// 起動に失敗した場合に、別のインスタンスが開いていた Box を閉じずに、
+  /// この処理が開いた Box だけを閉じるために使います。
+  List<BoxBase> _cacheOpenedBoxes = const [];
+
   /// 応答キャッシュの本文の大きさの合計。分からない場合は `null`。
   ///
   /// 保存のたびに全件を数え直さないよう、[_cacheWriteLock] の中で増減させて
@@ -806,6 +834,13 @@ class OfflineWebProxy {
   /// フィールドと Hive への登録は isolate ごとのため、複数の isolate から同時に
   /// 使う場合は対象外。
   static final AsyncLock _storageInitializationLock = AsyncLock();
+
+  /// 応答キャッシュを開く処理（移行を含む）の排他制御。
+  ///
+  /// 応答キャッシュの Box はインスタンスで共有されるため、インスタンスを
+  /// またいで直列化する。移行は長くかかり得るため、Cookie API も使う
+  /// [_storageInitializationLock] とは分ける。
+  static final AsyncLock _cacheOpeningLock = AsyncLock();
 
   /// この isolate で稼働中または起動処理中の proxy。
   ///
@@ -997,6 +1032,11 @@ class OfflineWebProxy {
       // 隔離とドロップ履歴の保持上限を判定する（ロックを取れない場合は定期処理へ回す）
       await _enforceRetentionLimits();
 
+      // 応答キャッシュは大きいほど開く時間と移行が長いため、起動を待たせずに裏で開く
+      _cacheOpeningDone = false;
+      _abortCacheOpening = false;
+      _cacheOpening = _openCacheInBackground(++_cacheOpeningGeneration);
+
       // 旧ポート URL の読み替え対象として、直前のバインドポートを記録
       final persistedPort = await _loadPersistedPortForHost(_config!.host);
       if (persistedPort != null && persistedPort > 0) {
@@ -1055,12 +1095,137 @@ class OfflineWebProxy {
       throw ProxyStartException(
           'Failed to start proxy server: $e', e is Exception ? e : null);
     } finally {
-      _isStarting = false;
       if (!_isRunning) {
+        // 起動に失敗した場合は、開き始めた応答キャッシュの移行を打ち切って閉じる。
+        // 待つ間に別の start() を受け付けないよう、起動処理中のまま待つ。
+        // 別のインスタンスが開いていた Box は閉じない
+        _abortCacheOpening = true;
+        await _closeCacheAfterOpening(closeShared: false);
         _activeInstances.remove(this);
         _accessToken = null;
       }
+      _isStarting = false;
     }
+  }
+
+  /// 応答キャッシュを開く処理です。`start()` の完了を待たずに裏で進めます。
+  ///
+  /// 開いた後に、古い形式や暗号化の設定を変える前の記録を移します
+  /// （[ResponseCacheStore.open]）。停止を始めた場合と起動に失敗した場合は、
+  /// 移行を打ち切ります。残りは次に開くときに移します。
+  ///
+  /// 開けなかった場合は応答キャッシュを使わずに動作を続け、
+  /// [ProxyEventType.errorOccurred]（`phase: cacheOpen`）で知らせます。
+  /// 例外は送出しません。
+  ///
+  /// [generation] この処理の世代（[_cacheOpeningGeneration]）。
+  Future<void> _openCacheInBackground(int generation) async {
+    final encryptionKey = _storageEncryptionKey;
+    final directoryPath = _hiveDirectoryPath;
+    final openedBoxes = <BoxBase>[];
+    _cacheOpenedBoxes = openedBoxes;
+    try {
+      if (encryptionKey == null || directoryPath == null) {
+        return;
+      }
+      await _storageTestHooks?.beforeCacheOpened?.call();
+      await _cacheOpeningLock.synchronized(() async {
+        // 起動の失敗や停止で、開く前に打ち切られた場合は開かない
+        if (_shouldStopCacheOpening) {
+          return;
+        }
+        _cacheStore = await _openCacheStore(
+          directoryPath,
+          encryptionKey,
+          openedBoxes,
+        );
+        _cacheTotalBytes = null;
+      });
+    } catch (error) {
+      await _closeBoxesQuietly(openedBoxes);
+      _cacheStore = null;
+      _cacheTotalBytes = null;
+      _emitEvent(ProxyEventType.errorOccurred, '', {
+        'phase': 'cacheOpen',
+        'error': error.toString(),
+      });
+    } finally {
+      if (generation == _cacheOpeningGeneration) {
+        _cacheOpeningDone = true;
+      }
+    }
+  }
+
+  /// 応答キャッシュを開く処理を打ち切るべきかどうかです。
+  ///
+  /// 停止を始めた場合と、起動に失敗した場合に `true` です。
+  bool get _shouldStopCacheOpening => _isStopping || _abortCacheOpening;
+
+  /// 応答キャッシュを開く処理が終わるのを待ち、開いた応答キャッシュを
+  /// 閉じます。
+  ///
+  /// 移行は [_shouldStopCacheOpening] を見て打ち切られるため、呼び出す前に
+  /// 停止中か起動の失敗の状態にしておきます。例外は送出しません。
+  ///
+  /// [closeShared] 別のインスタンスと共有している Box も閉じる場合は `true`
+  ///   （`stop()`）。`false` の場合は、開く処理が新たに開いた Box だけを
+  ///   閉じます（起動の失敗）。
+  Future<void> _closeCacheAfterOpening({required bool closeShared}) async {
+    final opening = _cacheOpening;
+    if (opening != null) {
+      await opening;
+    }
+    try {
+      if (closeShared) {
+        await _cacheStore?.close();
+      } else {
+        await _closeBoxesQuietly(_cacheOpenedBoxes);
+      }
+    } catch (_) {
+      // 閉じられなくても停止を続ける
+    }
+    _cacheStore = null;
+    _cacheTotalBytes = null;
+    _cacheOpening = null;
+    _cacheOpenedBoxes = const [];
+  }
+
+  /// 応答キャッシュを開き終わるまで待ち、開いた応答キャッシュを返します。
+  ///
+  /// [timeout] 待つ時間の上限。省略した場合は開き終わるまで待ちます。
+  ///
+  /// Returns: 開いた応答キャッシュ。起動していない場合、開けなかった場合、
+  ///   上限までに開き終わらなかった場合は `null`。
+  Future<ResponseCacheStore?> _waitForCacheStore({Duration? timeout}) async {
+    final opening = _cacheOpening;
+    if (opening != null && !_cacheOpeningDone) {
+      if (timeout == null) {
+        await opening;
+      } else {
+        await opening.timeout(timeout, onTimeout: () {});
+      }
+    }
+    final store = _cacheStore;
+    return store != null && store.isOpen ? store : null;
+  }
+
+  /// 応答キャッシュを開き終わると完了する `Future` です。
+  ///
+  /// `start()` は応答キャッシュを開き終わるのを待たずに返ります。開き終わる
+  /// までは、オンラインの GET の応答を保存せず
+  /// （[ProxyEventType.cacheSkipped]、`reason: cacheOpening`）、キャッシュから
+  /// 返す要求は [ProxyConfig.requestTimeout] を上限に開き終わるのを待ちます。
+  /// 起動直後にオフラインで画面を表示する前に、待っておきたい場合に使います。
+  ///
+  /// 起動していない場合はすぐに完了します。`start()` の完了を待ってから
+  /// 参照してください（完了前に参照すると、すぐに完了することがあります）。
+  /// 開けなかった場合も、例外を送出せずに完了します
+  /// （[ProxyEventType.errorOccurred]、`phase: cacheOpen` で知らせます）。
+  Future<void> get cacheReady {
+    final opening = _cacheOpening;
+    return opening == null || _cacheOpeningDone
+        ? Future<void>.value()
+        : opening;
   }
 
   /// プロキシサーバを停止します。
@@ -1127,8 +1292,11 @@ class OfflineWebProxy {
         await queuedItemSaving;
       }
 
+      // 応答キャッシュを開く処理（移行を含む）は、停止中のため打ち切られる。
+      // 終わるのを待ってから閉じ、閉じた Box へ書き込まないようにする
+      await _closeCacheAfterOpening(closeShared: true);
+
       // Hiveボックスを閉じる
-      await _cacheStore?.close();
       await _queueBox?.close();
       await _cookieBox?.close();
       await _portPreferenceBox?.close();
@@ -1175,6 +1343,11 @@ class OfflineWebProxy {
       _pendingLegacyKeys.clear();
       // 停止後の getStats() が前回の件数を返さないよう、未確認件数のキャッシュを捨てる
       _unacknowledgedDroppedCount = null;
+      // 途中で失敗して閉じていない場合も、開く処理が終わってから復旧 API を
+      // 受け付ける（稼働中のインスタンスから外す）
+      if (_cacheOpening != null) {
+        await _closeCacheAfterOpening(closeShared: true);
+      }
       _activeInstances.remove(this);
       _isClosingStorage = false;
       _finishStopCall();
@@ -2494,10 +2667,14 @@ class OfflineWebProxy {
 
   /// 全キャッシュを即座に削除します。
   ///
+  /// 起動の後に応答キャッシュを開いている間は、開き終わるのを待ってから
+  /// 削除します（[cacheReady]）。
+  ///
   /// Throws:
   ///   * [CacheOperationException] キャッシュ削除に失敗した場合。
   Future<void> clearCache() async {
     try {
+      await _waitForCacheStore();
       await _cacheWriteLock.synchronized(() async {
         await _cacheStore?.clear();
         _cacheTotalBytes = null;
@@ -2512,6 +2689,7 @@ class OfflineWebProxy {
   /// 期限切れキャッシュのみを削除します。
   ///
   /// Expired状態のキャッシュエントリのみが削除対象となります。
+  /// 応答キャッシュを開いている間は、開き終わるのを待ちます（[cacheReady]）。
   ///
   /// Throws:
   ///   * [CacheOperationException] キャッシュ削除に失敗した場合。
@@ -2519,7 +2697,7 @@ class OfflineWebProxy {
     try {
       final keysToDelete = <String>[];
 
-      final store = _cacheStore;
+      final store = await _waitForCacheStore();
       if (store != null) {
         final keys = store.keys.toList(growable: false);
         for (var i = 0; i < keys.length; i++) {
@@ -2562,6 +2740,8 @@ class OfflineWebProxy {
 
   /// 特定URLのキャッシュを削除します。
   ///
+  /// 応答キャッシュを開いている間は、開き終わるのを待ちます（[cacheReady]）。
+  ///
   /// [url] 削除対象のURL。正規化されてからハッシュ化されます。
   ///
   /// Throws:
@@ -2575,6 +2755,7 @@ class OfflineWebProxy {
     try {
       final normalizedUrl = _normalizeUrl(url);
       final cacheKey = _generateCacheKey(normalizedUrl);
+      await _waitForCacheStore();
       await _cacheWriteLock.synchronized(() async {
         await _cacheStore?.delete(cacheKey);
         _cacheTotalBytes = null;
@@ -2587,6 +2768,8 @@ class OfflineWebProxy {
 
   /// キャッシュエントリの一覧を取得します。
   ///
+  /// 応答キャッシュを開いている間は、開き終わるのを待ちます（[cacheReady]）。
+  ///
   /// [limit] 取得する最大エントリ数。省略した場合は上限を設けず、
   ///     [offset] 以降のエントリをすべて返します。
   /// [offset] スキップするエントリ数。省略した場合は 0 です。
@@ -2598,7 +2781,7 @@ class OfflineWebProxy {
   Future<List<CacheEntry>> getCacheList({int? limit, int? offset}) async {
     try {
       final entries = <CacheEntry>[];
-      final store = _cacheStore;
+      final store = await _waitForCacheStore();
       final keys = store?.keys.toList() ?? [];
 
       final startIndex = offset ?? 0;
@@ -2623,6 +2806,8 @@ class OfflineWebProxy {
 
   /// キャッシュの統計情報を取得します。
   ///
+  /// 応答キャッシュを開いている間は、開き終わるのを待ちます（[cacheReady]）。
+  ///
   /// Returns: キャッシュのサイズやヒット率などの統計情報。
   ///
   /// Throws:
@@ -2635,7 +2820,7 @@ class OfflineWebProxy {
       int expiredEntries = 0;
       int totalSize = 0;
 
-      final store = _cacheStore;
+      final store = await _waitForCacheStore();
       if (store != null) {
         for (final key in store.keys) {
           final entry = store.metadata(key as Object);
@@ -2678,6 +2863,10 @@ class OfflineWebProxy {
   /// [start] はこのメソッドを自動では呼びません。認証が必要な資源も
   /// 取得できるよう、利用側が必要な時点で呼び出します。
   ///
+  /// 応答キャッシュを開いている間は、開き終わるのを待ってから取得を始めます
+  /// （[cacheReady]）。この待ち時間は [timeout] の対象外で、0.21.0 以前から
+  /// 更新した直後の移行中は数十秒かかることがあります。
+  ///
   /// [paths] ウォームアップ対象の相対パス一覧。省略した場合は
   ///   [ProxyConfig.startupPaths] を使用します。
   /// [timeout] 各リクエストの締め切り秒数。省略時は
@@ -2714,6 +2903,8 @@ class OfflineWebProxy {
       );
     }
 
+    // 開いている間は保存しないため、開き終わってから取得を始める
+    await _waitForCacheStore();
     final startTime = DateTime.now();
     final entries = <WarmupEntry>[];
 
@@ -4157,8 +4348,8 @@ class OfflineWebProxy {
 
   /// Hiveデータベースの初期化を行います。
   ///
-  /// 段階 1（鍵と Cookie Box）と段階 2（キャッシュ、キュー、べき等性キー
-  /// などの Box）を順に完了させます。
+  /// 段階 1（鍵と Cookie Box）と段階 2（キュー、べき等性キーなどの Box）を
+  /// 順に完了させます。応答キャッシュは含みません（[_openCacheInBackground]）。
   Future<void> _initializeStorage() async {
     await _ensureDataStage();
   }
@@ -4213,7 +4404,6 @@ class OfflineWebProxy {
   /// 保存領域の世代が変わっていない場合に `true` です。
   bool get _isDataStageFresh =>
       _keyStageGeneration == _storageGeneration &&
-      (_cacheStore?.isOpen ?? false) &&
       _dataStageBoxes.every((box) => box != null && box.isOpen);
 
   /// 段階 2 で開く Box の一覧を返します（移行を待つ旧平文 Box と、応答
@@ -4230,7 +4420,7 @@ class OfflineWebProxy {
 
   /// 段階 2 の本体です。
   ///
-  /// キャッシュ、WebStorage、べき等性キーの Box と、段階 1 で確定した鍵で
+  /// WebStorage、べき等性キーの Box と、段階 1 で確定した鍵で
   /// キュー・隔離・ドロップ履歴の暗号化 Box を開き、旧平文 Box を移行します。
   /// このインスタンスで鍵を生成した場合は、旧平文 Box を開いてキーの一覧を
   /// 持つだけにし、移行は待ち時間の後へ遅らせます。
@@ -4263,12 +4453,7 @@ class OfflineWebProxy {
 
     final openedBoxes = <BoxBase>[];
     try {
-      _cacheStore = await _openCacheStore(
-        directoryPath,
-        encryptionKey,
-        openedBoxes,
-      );
-      _cacheTotalBytes = null;
+      // 応答キャッシュは段階 2 では開かない（[_openCacheInBackground]）
       _webStorageBox = await _openBoxTracked(_webStorageBoxName, openedBoxes);
       _idempotencyBox = await _openIdempotencyBox(directoryPath, openedBoxes);
       _queueBox = await _openBoxTracked(
@@ -4291,8 +4476,6 @@ class OfflineWebProxy {
       await _prepareLegacyMigration(directoryPath, openedBoxes);
     } catch (_) {
       await _closeBoxesQuietly(openedBoxes);
-      _cacheStore = null;
-      _cacheTotalBytes = null;
       _webStorageBox = null;
       _idempotencyBox = null;
       _queueBox = null;
@@ -5867,7 +6050,8 @@ class OfflineWebProxy {
   /// （[ResponseCacheStore.open]）。移行の失敗は
   /// [ProxyEventType.errorOccurred] で知らせ、起動は続けます。
   ///
-  /// 段階 2 の中で、初期化のロックを保持したまま呼びます。
+  /// `start()` の後に裏で、[_cacheOpeningLock] を保持したまま呼びます。
+  /// 移行は [_shouldStopCacheOpening] が `true` になると打ち切ります。
   ///
   /// [directoryPath] Hive の保存先ディレクトリ。
   /// [encryptionKey] 暗号化 Box の鍵。
@@ -5897,6 +6081,7 @@ class OfflineWebProxy {
         });
       },
       beforeEntryMoved: _storageTestHooks?.beforeCacheEntryMoved,
+      shouldStopMigration: () => _shouldStopCacheOpening,
     );
   }
 
@@ -7411,6 +7596,10 @@ window.__offline_web_proxy_web_storage_bridge = {
   ///
   /// Returns: HTTPレスポンス。
   Future<shelf.Response> _handleOnlineRequest(shelf.Request request) async {
+    // 応答キャッシュを開き終わるのを待つ場合も、受け付けてから requestTimeout
+    // を超えて待たせない
+    final deadline =
+        DateTime.now().add(_config?.requestTimeout ?? _defaultRequestTimeout);
     final upstreamUrl = _buildUpstreamUrl(request);
     final cacheKey = _generateCacheKey(upstreamUrl);
 
@@ -7550,7 +7739,10 @@ window.__offline_web_proxy_web_storage_bridge = {
       // 上流へ到達できなかった read 系だけキャッシュフォールバックを許可
       if (_isReadRequestMethod(request.method) &&
           _isUpstreamUnreachableError(e)) {
-        final cachedEntry = await _loadCachedFallbackEntry(cacheKey);
+        final cachedEntry = await _loadCachedFallbackEntry(
+          cacheKey,
+          maxWait: _remainingUntil(deadline),
+        );
         if (cachedEntry != null &&
             _shouldServeCachedFallback(cachedEntry.status)) {
           _cacheHits++;
@@ -7639,6 +7831,15 @@ window.__offline_web_proxy_web_storage_bridge = {
   }
 
   /// フォールバックに利用可能なキャッシュエントリを読み込みます。
+  ///
+  /// 応答キャッシュを開いている途中なら、[maxWait] を上限に開き終わるのを
+  /// 待ちます。
+  ///
+  /// [cacheKey] キャッシュのキー。
+  /// [maxWait] 開き終わるのを待つ時間の上限。
+  ///
+  /// Returns: 読み込んだエントリ。無い場合と、上限までに開き終わらなかった
+  ///   場合は `null`。
   Future<
       ({
         CacheStatus status,
@@ -7648,8 +7849,12 @@ window.__offline_web_proxy_web_storage_bridge = {
           Map<String, String> headers,
           Uint8List bodyBytes,
         })? rangeEntry,
-      })?> _loadCachedFallbackEntry(String cacheKey) async {
-    final data = await _cacheStore?.read(cacheKey);
+      })?> _loadCachedFallbackEntry(
+    String cacheKey, {
+    required Duration maxWait,
+  }) async {
+    final store = await _waitForCacheStore(timeout: maxWait);
+    final data = await store?.read(cacheKey);
     if (data == null) {
       return null;
     }
@@ -7917,7 +8122,11 @@ window.__offline_web_proxy_web_storage_bridge = {
     if (_isReadRequestMethod(request.method)) {
       final upstreamUrl = _buildUpstreamUrl(request);
       final cacheKey = _generateCacheKey(upstreamUrl);
-      final cachedEntry = await _loadCachedFallbackEntry(cacheKey);
+      // 開いている途中なら、requestTimeout を上限に開き終わるのを待つ
+      final cachedEntry = await _loadCachedFallbackEntry(
+        cacheKey,
+        maxWait: _config?.requestTimeout ?? _defaultRequestTimeout,
+      );
 
       if (cachedEntry != null &&
           _shouldServeCachedFallback(cachedEntry.status)) {
@@ -8773,6 +8982,14 @@ window.__offline_web_proxy_web_storage_bridge = {
     final sanitizedHeaders = _sanitizeResponseHeaders(headers);
     if (!_shouldPersistResponse(statusCode, sanitizedHeaders,
         allowNoStore: allowNoStore)) {
+      return;
+    }
+
+    if (_cacheOpening != null && !_cacheOpeningDone) {
+      // 開き終わるのを待つと応答が遅れるため、開いている間は保存しない
+      _emitEvent(ProxyEventType.cacheSkipped, eventUrl, {
+        'reason': 'cacheOpening',
+      });
       return;
     }
 

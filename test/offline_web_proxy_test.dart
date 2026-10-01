@@ -449,6 +449,7 @@ void main() {
             requestTimeout: const Duration(milliseconds: 50),
           ),
         );
+        await proxy.cacheReady;
 
         final seededResponse =
             await _performProxyRequest(proxyPort, '/api/data');
@@ -1998,6 +1999,7 @@ void main() {
           encryptResponseCache: false,
         ),
       );
+      await proxy.cacheReady;
 
       // 「省略時は 100 件」のような上限が入っていないことを確かめるため、
       // 100 件を超える件数を用意する。
@@ -2041,6 +2043,7 @@ void main() {
           encryptResponseCache: false,
         ),
       );
+      await proxy.cacheReady;
 
       final now = DateTime.now();
       await _putPlainCacheEntry('stale-entry', {

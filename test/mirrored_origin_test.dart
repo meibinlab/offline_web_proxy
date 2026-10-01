@@ -408,6 +408,7 @@ void main() {
             mirroredOrigins: <String>[cdn!.origin],
           ),
         );
+        await proxy.cacheReady;
 
         final uri = Uri.parse(
           'http://127.0.0.1:$port${mirroredPath('/lib/app.js')}',
@@ -434,6 +435,7 @@ void main() {
             mirroredOrigins: <String>[cdn!.origin],
           ),
         );
+        await proxy.cacheReady;
 
         final uri = Uri.parse('http://127.0.0.1:$port/index.html');
         await _performGet(uri);
@@ -1118,6 +1120,7 @@ void main() {
             forceCachePaths: const <String>['/__offline_web_proxy/ext/**'],
           ),
         );
+        await proxy.cacheReady;
 
         await _performGet(
           Uri.parse('http://127.0.0.1:$port${mirroredPath('/lib/app.js')}'),

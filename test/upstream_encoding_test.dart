@@ -331,6 +331,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
         final uri = Uri.parse('http://127.0.0.1:$port/app/index.html');
 
         await _performGet(uri);
@@ -494,6 +495,7 @@ void main() {
             forceCachePaths: const ['/app/**'],
           ),
         );
+        await proxy.cacheReady;
 
         final response = await _performGet(
           Uri.parse('http://127.0.0.1:$port/app/index.html'),
@@ -809,6 +811,7 @@ void main() {
             enableUpstreamCompression: false,
           ),
         );
+        await proxy.cacheReady;
 
         final uri = Uri.parse('http://127.0.0.1:$port/app/index.html');
         final onlineResponse = await _performGet(uri);
