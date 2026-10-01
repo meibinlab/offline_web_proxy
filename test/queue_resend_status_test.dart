@@ -452,9 +452,11 @@ void main() {
           ),
         );
 
-        // 1 件目は送信時刻を待ち、2 件目は控えずに送ること
+        // 1 件目は送信時刻を待ち、2 件目は控えずに送ること。
+        // 上流が受け取ってからキューから消えるまでには間があるため、
+        // キューから消えたことを待ってから確かめる
         await _waitUntil(
-            () => upstream.replays.any((replay) => replay.body == 'second'));
+            () async => (await proxy.getQueuedRequests()).length == 1);
         expect(upstream.replays.map((replay) => replay.body),
             equals(['first', 'second']));
         expect(await proxy.getQueuedRequests(), hasLength(1));
