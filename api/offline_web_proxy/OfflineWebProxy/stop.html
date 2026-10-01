@@ -142,8 +142,11 @@
       await queuedItemSaving;
     }
 
+    &#47;&#47; 応答キャッシュを開く処理（移行を含む）は、停止中のため打ち切られる。
+    &#47;&#47; 終わるのを待ってから閉じ、閉じた Box へ書き込まないようにする
+    await _closeCacheAfterOpening(closeShared: true);
+
     &#47;&#47; Hiveボックスを閉じる
-    await _cacheStore?.close();
     await _queueBox?.close();
     await _cookieBox?.close();
     await _portPreferenceBox?.close();
@@ -190,6 +193,11 @@
     _pendingLegacyKeys.clear();
     &#47;&#47; 停止後の getStats() が前回の件数を返さないよう、未確認件数のキャッシュを捨てる
     _unacknowledgedDroppedCount = null;
+    &#47;&#47; 途中で失敗して閉じていない場合も、開く処理が終わってから復旧 API を
+    &#47;&#47; 受け付ける（稼働中のインスタンスから外す）
+    if (_cacheOpening != null) {
+      await _closeCacheAfterOpening(closeShared: true);
+    }
     _activeInstances.remove(this);
     _isClosingStorage = false;
     _finishStopCall();

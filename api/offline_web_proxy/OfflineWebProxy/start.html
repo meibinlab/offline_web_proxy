@@ -134,6 +134,11 @@
     &#47;&#47; 隔離とドロップ履歴の保持上限を判定する（ロックを取れない場合は定期処理へ回す）
     await _enforceRetentionLimits();
 
+    &#47;&#47; 応答キャッシュは大きいほど開く時間と移行が長いため、起動を待たせずに裏で開く
+    _cacheOpeningDone = false;
+    _abortCacheOpening = false;
+    _cacheOpening = _openCacheInBackground(++_cacheOpeningGeneration);
+
     &#47;&#47; 旧ポート URL の読み替え対象として、直前のバインドポートを記録
     final persistedPort = await _loadPersistedPortForHost(_config!.host);
     if (persistedPort != null &amp;&amp; persistedPort &gt; 0) {
@@ -192,11 +197,16 @@
     throw ProxyStartException(
         &#39;Failed to start proxy server: $e&#39;, e is Exception ? e : null);
   } finally {
-    _isStarting = false;
     if (!_isRunning) {
+      &#47;&#47; 起動に失敗した場合は、開き始めた応答キャッシュの移行を打ち切って閉じる。
+      &#47;&#47; 待つ間に別の start() を受け付けないよう、起動処理中のまま待つ。
+      &#47;&#47; 別のインスタンスが開いていた Box は閉じない
+      _abortCacheOpening = true;
+      await _closeCacheAfterOpening(closeShared: false);
       _activeInstances.remove(this);
       _accessToken = null;
     }
+    _isStarting = false;
   }
 }</code></pre>
 </section>

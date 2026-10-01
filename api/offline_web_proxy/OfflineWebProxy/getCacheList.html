@@ -74,6 +74,7 @@
     
 <section class="desc markdown">
   <p>キャッシュエントリの一覧を取得します。</p>
+<p>応答キャッシュを開いている間は、開き終わるのを待ちます（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。</p>
 <p><code>limit</code> 取得する最大エントリ数。省略した場合は上限を設けず、
     <code>offset</code> 以降のエントリをすべて返します。
 <code>offset</code> スキップするエントリ数。省略した場合は 0 です。</p>
@@ -91,7 +92,7 @@
   <pre class="language-dart"><code class="language-dart">Future&lt;List&lt;CacheEntry&gt;&gt; getCacheList({int? limit, int? offset}) async {
   try {
     final entries = &lt;CacheEntry&gt;[];
-    final store = _cacheStore;
+    final store = await _waitForCacheStore();
     final keys = store?.keys.toList() ?? [];
 
     final startIndex = offset ?? 0;

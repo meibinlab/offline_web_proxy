@@ -204,7 +204,8 @@
   <p>応答の保存を見送った</p>
 <p><code>data['reason']</code> に理由が入ります。<code>forceCachePaths</code> の安全側の除外
 （<code>set-cookie</code>・<code>vary</code>・<code>authorization</code>）と、本文だけで
-<code>ProxyConfig.cacheMaxSize</code> を超えた場合（<code>cacheMaxSize</code>）です。</p>
+<code>ProxyConfig.cacheMaxSize</code> を超えた場合（<code>cacheMaxSize</code>）と、起動の後に
+応答キャッシュを開いている間（<code>cacheOpening</code>）です。</p>
   
 
 </dd>

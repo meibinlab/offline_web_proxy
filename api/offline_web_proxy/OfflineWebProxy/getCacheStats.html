@@ -72,6 +72,7 @@
     
 <section class="desc markdown">
   <p>キャッシュの統計情報を取得します。</p>
+<p>応答キャッシュを開いている間は、開き終わるのを待ちます（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。</p>
 <p>Returns: キャッシュのサイズやヒット率などの統計情報。</p>
 <p>Throws:</p>
 <ul>
@@ -91,7 +92,7 @@
     int expiredEntries = 0;
     int totalSize = 0;
 
-    final store = _cacheStore;
+    final store = await _waitForCacheStore();
     if (store != null) {
       for (final key in store.keys) {
         final entry = store.metadata(key as Object);

@@ -77,15 +77,23 @@ do not stay on the device in plain form. The box keys stay readable;
 they are the SHA-256 of the normalized URL, so anyone who can guess a
 URL can tell whether it is cached.</p>
 <p><strong>Cost</strong>: Bodies are kept in a lazily read box and read one at a time
-when served, so <code>start()</code> does not decrypt the whole cache and the
-cache is not held in memory. On a desktop CPU, opening a 200 MB cache
-took about 0.75 s encrypted (0.66 s plain), reading one entry to serve
-it took under 1 ms, and each store took up to about 1 ms longer; a phone is
-expected to be several times slower.</p>
-<p>When it is enabled, <code>start()</code> moves an existing plain cache, including
-the single-box format of 0.21.0 and earlier, into the encrypted boxes
-and deletes the plain files (about 1.1 s for 30 MB and 7.5 s for 200 MB
-on a desktop CPU, once). The files are deleted the ordinary way, which
+when served, so the whole cache is neither decrypted nor held in memory.
+Opening the cache still reads the whole file, so it takes time in
+proportion to its size, with or without encryption: on a desktop CPU a
+200 MB cache took about 0.75 s, and on an Android emulator (profile
+build) about 30 ms per MB, so about 6 s for 200 MB (estimated). <code>start()</code>
+does not wait for it; see <code>OfflineWebProxy.cacheReady</code>. Reading one
+entry to serve it took under 1 ms on the desktop and about 6 ms on the
+emulator (about 3 ms plain), and a store took about twice as long as
+in plain form.</p>
+<p>When it is enabled, an existing plain cache, including the single-box
+format of 0.21.0 and earlier, is moved into the encrypted boxes and the
+plain files are deleted, once. This happens while the cache is being
+opened after <code>start()</code>, so <code>start()</code> does not wait for it either. It
+took about 7.5 s for 200 MB on a desktop CPU, and writing 88 MB into the
+encrypted boxes took about 18 s on the emulator (over 40 s for 200 MB,
+estimated). <code>stop()</code> interrupts it, and the rest is moved at the next
+start. The files are deleted the ordinary way, which
 does not guarantee that the flash storage is erased; a failed deletion
 is retried at the next startup. Setting it to <code>false</code> deletes the
 encrypted cache without restoring it in plain form, so the cache starts

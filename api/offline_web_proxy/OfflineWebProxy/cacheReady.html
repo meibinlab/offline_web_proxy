@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the clearCache method from the OfflineWebProxy class, for the Dart programming language.">
-  <title>clearCache method - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the cacheReady property from the OfflineWebProxy class, for the Dart programming language.">
+  <title>cacheReady property - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -31,9 +31,9 @@
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
     <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
-    <li class="self-crumb">clearCache method</li>
+    <li class="self-crumb">cacheReady property</li>
   </ol>
-  <div class="self-name">clearCache</div>
+  <div class="self-name">cacheReady</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -57,53 +57,53 @@
     data-above-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-method">clearCache</span> method 
+<h1><span class="kind-property">cacheReady</span> property 
 </h1></div>
+
+
+        
+  <section id="getter">
 
     <section class="multi-line-signature">
       
-
-<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
-<span class="name ">clearCache</span>(<wbr>)
-
+      <span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+      <span class="name ">cacheReady</span>
       
 
     </section>
+
     
 <section class="desc markdown">
-  <p>全キャッシュを即座に削除します。</p>
-<p>起動の後に応答キャッシュを開いている間は、開き終わるのを待ってから
-削除します（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。</p>
-<p>Throws:</p>
-<ul>
-<li><a href="../../offline_web_proxy/CacheOperationException-class.html">CacheOperationException</a> キャッシュ削除に失敗した場合。</li>
-</ul>
+  <p>応答キャッシュを開き終わると完了する <code>Future</code> です。</p>
+<p><code>start()</code> は応答キャッシュを開き終わるのを待たずに返ります。開き終わる
+までは、オンラインの GET の応答を保存せず
+（<a href="../../offline_web_proxy/ProxyEventType.html">ProxyEventType.cacheSkipped</a>、<code>reason: cacheOpening</code>）、キャッシュから
+返す要求は <a href="../../offline_web_proxy/ProxyConfig/requestTimeout.html">ProxyConfig.requestTimeout</a> を上限に開き終わるのを待ちます。
+起動直後にオフラインで画面を表示する前に、待っておきたい場合に使います。</p>
+<p>起動していない場合はすぐに完了します。<code>start()</code> の完了を待ってから
+参照してください（完了前に参照すると、すぐに完了することがあります）。
+開けなかった場合も、例外を送出せずに完了します
+（<a href="../../offline_web_proxy/ProxyEventType.html">ProxyEventType.errorOccurred</a>、<code>phase: cacheOpen</code> で知らせます）。</p>
 </section>
-
 
     
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearCache() async {
-  try {
-    await _waitForCacheStore();
-    await _cacheWriteLock.synchronized(() async {
-      await _cacheStore?.clear();
-      _cacheTotalBytes = null;
-    });
-    _emitEvent(ProxyEventType.cacheCleared, &#39;&#39;, {});
-  } catch (e) {
-    throw CacheOperationException(
-        &#39;clear&#39;, &#39;キャッシュのクリアに失敗しました: $e&#39;, e is Exception ? e : null);
-  }
+  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; get cacheReady {
+  final opening = _cacheOpening;
+  return opening == null || _cacheOpeningDone
+      ? Future&lt;void&gt;.value()
+      : opening;
 }</code></pre>
 </section>
 
+  </section>
 
-  </div> <!-- /.main-content -->
 
-  <div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
-    <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+</div> <!-- /.main-content -->
+
+<div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+  <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
 <header id="header-search-sidebar" class="hidden-l">
   <form class="search-sidebar" role="search">
     <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
@@ -114,15 +114,15 @@
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
-    <li class="self-crumb">clearCache method</li>
+    <li class="self-crumb">cacheReady property</li>
 </ol>
 
 
-    <h5>OfflineWebProxy class</h5>
-    <div id="dartdoc-sidebar-left-content"></div>
-  </div><!--/.sidebar-offcanvas-->
+  <h5>OfflineWebProxy class</h5>
+  <div id="dartdoc-sidebar-left-content"></div>
+</div><!--/.sidebar-offcanvas-->
 
-  <div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+<div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
 </div><!--/.sidebar-offcanvas-->
 
 </main>

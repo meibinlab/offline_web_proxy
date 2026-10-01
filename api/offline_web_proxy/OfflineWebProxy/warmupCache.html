@@ -80,6 +80,9 @@
   <p>指定したパス一覧でキャッシュの事前ウォームアップを実行します。</p>
 <p><a href="../../offline_web_proxy/OfflineWebProxy/start.html">start</a> はこのメソッドを自動では呼びません。認証が必要な資源も
 取得できるよう、利用側が必要な時点で呼び出します。</p>
+<p>応答キャッシュを開いている間は、開き終わるのを待ってから取得を始めます
+（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。この待ち時間は <code>timeout</code> の対象外で、0.21.0 以前から
+更新した直後の移行中は数十秒かかることがあります。</p>
 <p><code>paths</code> ウォームアップ対象の相対パス一覧。省略した場合は
   <a href="../../offline_web_proxy/ProxyConfig/startupPaths.html">ProxyConfig.startupPaths</a> を使用します。
 <code>timeout</code> 各リクエストの締め切り秒数。省略時は
@@ -122,6 +125,8 @@
     );
   }
 
+  &#47;&#47; 開いている間は保存しないため、開き終わってから取得を始める
+  await _waitForCacheStore();
   final startTime = DateTime.now();
   final entries = &lt;WarmupEntry&gt;[];
 
