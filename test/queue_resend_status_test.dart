@@ -258,8 +258,13 @@ void main() {
   }
 
   /// キューが空になるまで待つ。
+  ///
+  /// 送信に成功した要求は、キューから消した後で再送結果を記録するため、
+  /// 上流が受け取った件数分の結果がそろうまで待つ。
   Future<void> waitUntilQueueEmpty() => _waitUntil(
-        () async => (await proxy.getQueuedRequests()).isEmpty,
+        () async =>
+            (await proxy.getQueuedRequests()).isEmpty &&
+            proxy.recentResendResults.length >= upstream.replays.length,
         timeout: const Duration(seconds: 60),
       );
 

@@ -9694,8 +9694,9 @@ window.__offline_web_proxy_web_storage_bridge = {
       queueData[_queueOwnerField] = queueOwner;
     }
 
+    // 停止で閉じた後に、転送中だった要求が失敗して届いても書き込まない
     final box = _queueBox;
-    if (box == null) {
+    if (box == null || !box.isOpen) {
       return null;
     }
 
