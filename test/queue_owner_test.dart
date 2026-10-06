@@ -328,7 +328,13 @@ void main() {
         upstream.replayStatusFor = (_) => HttpStatus.ok;
 
         await signIn(port, 'bob');
-        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        // キューから消した後で再送結果を記録するため、結果がそろうまで待つ
+        await _waitUntil(() async =>
+            (await proxy.getQueuedRequests()).isEmpty &&
+            proxy.recentResendResults
+                    .where((result) => result.dropReason == 'owner_changed')
+                    .length ==
+                3);
 
         // 一時停止の前に送った 1 件のほかは、上流へ送らないこと
         expect(upstream.replays, hasLength(1));
@@ -777,12 +783,18 @@ void main() {
         upstream.loginReceived = Completer<void>();
 
         final port = proxy.port!;
-        final signInB = signIn(port, 'bob').catchError((Object _) {});
+        final signInB = _send(
+          'POST',
+          Uri.parse('http://127.0.0.1:$port$_loginPath'),
+          jsonEncode({'account': 'bob'}),
+        ).catchError((Object _) => -1);
         await upstream.loginReceived.future;
         // 停止し終えてからログインの応答を返し、持ち主を保存できない状態にする
         await proxy.stop();
         upstream.loginGate!.complete();
-        await signInB;
+        // 閉じたキューへは書き込まず、キューへ入れられなかったことを返すこと
+        // （接続が先に切れた場合は -1）
+        expect(await signInB, anyOf(equals(HttpStatus.serviceUnavailable), -1));
 
         // ログインを転送中であることが残っていること
         final preferences = await Hive.openBox('proxy_port_preferences');
