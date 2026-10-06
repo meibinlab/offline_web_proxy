@@ -22,4 +22,19 @@ enum QueuePauseReason {
   /// When the queue is also paused by [authenticationRequired], that reason
   /// is reported instead, because it needs the user to act.
   rateLimited,
+
+  /// `ProxyConfig.queueOwnerResolver` threw for a successful sign-in, or the
+  /// owner could not be determined or saved, so the proxy cannot tell who
+  /// signed in.
+  ///
+  /// Sending the queue under the new session could deliver another user's
+  /// updates, so the queue waits. The proxy then treats the signed-in user as
+  /// a new, unknown owner: queued requests recorded for a known owner are
+  /// moved out of the queue with the reason `owner_changed` once sending
+  /// resumes. Sending resumes after `OfflineWebProxy.resumeQueue()`, or when
+  /// a later sign-in is resolved to an owner. The pause is kept in memory
+  /// only and ends when the proxy stops, while the unknown owner is saved: on
+  /// the next start, queued requests of a known owner are moved out without
+  /// waiting for the user.
+  ownerUnresolved,
 }

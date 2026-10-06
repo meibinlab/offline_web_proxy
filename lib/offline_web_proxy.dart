@@ -88,6 +88,7 @@ import 'src/models/proxy_stats.dart';
 import 'src/models/proxy_webview_navigation_recommendation.dart';
 import 'src/models/quarantined_request.dart';
 import 'src/models/queue_exclude_rule.dart';
+import 'src/models/queue_owner_context.dart';
 import 'src/models/queue_pause_reason.dart';
 import 'src/models/queue_resend_result.dart';
 import 'src/models/queued_request.dart';
@@ -125,6 +126,7 @@ export 'src/models/proxy_stats.dart';
 export 'src/models/proxy_webview_navigation_recommendation.dart';
 export 'src/models/quarantined_request.dart';
 export 'src/models/queue_exclude_rule.dart';
+export 'src/models/queue_owner_context.dart';
 export 'src/models/queue_pause_reason.dart';
 export 'src/models/queue_resend_result.dart';
 export 'src/models/queued_request.dart';
@@ -289,6 +291,37 @@ const Duration _maxRetryAfter = Duration(hours: 1);
 /// キューを一時停止させた要求を [OfflineWebProxy.skipPausedRequest] で
 /// 取り除いたときの理由。
 const String _authenticationRequiredDropReason = 'authentication_required';
+
+/// [ProxyConfig.quarantineResponseBodyMaxBytes] に指定できる上限。
+const int _maxQuarantineResponseBodyBytes = 64 * 1024;
+
+/// 隔離に残す応答本文の先頭を作るために、gzip の応答を読み取る上限。
+///
+/// gzip は途中までのバイト列を解凍しても末尾を検証できないため、本文全体を
+/// 読み取ってから解凍する。断られた応答の本文は小さいため、超える場合は残さない。
+const int _maxCompressedPreviewSourceBytes = 256 * 1024;
+
+/// 持ち主が現在の持ち主と違うため、送らずにキューから取り除いたときの理由。
+const String _ownerChangedDropReason = 'owner_changed';
+
+/// キューデータで、受け付けたときの持ち主（HMAC）を持つ項目名。
+const String _queueOwnerField = 'queueOwner';
+
+/// ポート設定 Box で、現在の持ち主を保存するキー。
+///
+/// ポートのキー（`host:` で始まる値から作る）と重ならない値にする。
+const String _queueOwnerStorageKey = 'queue_owner';
+
+/// 保存領域の暗号化鍵から、持ち主の HMAC に使う鍵を作るときの値。
+const String _queueOwnerHmacLabel = 'offline_web_proxy.queue_owner_key';
+
+/// 保存した持ち主がどの鍵で作ったものかを確かめるための値の元。
+const String _queueOwnerKeyIdLabel = 'offline_web_proxy.queue_owner_key_id';
+
+/// 判定関数が例外を投げたときに、正体の分からない持ち主へ付ける値の接頭辞。
+///
+/// HMAC（16 進数の文字列）と重ならないよう、`:` を含める。
+const String _unresolvedQueueOwnerPrefix = 'unresolved:';
 
 /// 暗号化する前のキューの Box 名（移行元）。
 const String _legacyQueueBoxName = 'proxy_queue';
@@ -659,6 +692,24 @@ class OfflineWebProxy {
   /// この値を比べて判定する。
   int _authResumeGeneration = 0;
 
+  /// 現在の持ち主（[ProxyConfig.queueOwnerResolver] が返した識別子の HMAC）。
+  ///
+  /// 分からない場合は `null`。判定関数が例外を投げた場合は、
+  /// [_unresolvedQueueOwnerPrefix] で始まる値になる。ポート設定 Box に
+  /// 保存し、段階 1 で読み込む。
+  String? _currentQueueOwner;
+
+  /// 転送中のログインの数。
+  ///
+  /// 0 より大きい間は、キューから新しく送らない。ログインの応答の Cookie で、
+  /// 持ち主を決める前に送らないようにするため。
+  int _queueOwnerGateCount = 0;
+
+  /// ログインの転送を始めた回数。
+  ///
+  /// 再送を始めた後にログインが始まったかを、本文を送る直前に判定する。
+  int _queueOwnerGateGeneration = 0;
+
   /// 上流サーバへのリクエスト用HTTPクライアント（dart:io）。
   HttpClient? _httpClient;
 
@@ -1021,6 +1072,7 @@ class OfflineWebProxy {
       _validateRetentionSettings();
       _validateMirroredOrigins();
       _validateAuthRequiredStatusCodes();
+      _validateQueueOwnerResolver();
       _compileConfiguredPatterns();
       _resetRecoveryState();
       _clearQueuePause();
@@ -1835,6 +1887,7 @@ class OfflineWebProxy {
                 'errorMessage': request.errorMessage,
                 'pendingMigration': request.pendingMigration,
                 'idempotencyKey': request.idempotencyKey,
+                // 応答本文の先頭は個人情報を含み得るため、WebView へ返さない
               })
           .toList(growable: false),
     });
@@ -2062,6 +2115,26 @@ class OfflineWebProxy {
           null,
         );
       }
+    }
+  }
+
+  /// 持ち主の判定関数の設定を検証します。
+  ///
+  /// 判定関数はログインの成功で呼ばれるため、ログインのパスが無いと
+  /// 持ち主が決まらず、保護が効かないまま気付けません。
+  ///
+  /// Throws:
+  ///   * [ProxyStartException] 判定関数があるのに
+  ///     [ProxyConfig.authResumePaths] が空の場合。
+  void _validateQueueOwnerResolver() {
+    final config = _config;
+    if (config != null &&
+        config.queueOwnerResolver != null &&
+        config.authResumePaths.isEmpty) {
+      throw ProxyStartException(
+        'queueOwnerResolver requires authResumePaths',
+        null,
+      );
     }
   }
 
@@ -2338,6 +2411,7 @@ class OfflineWebProxy {
       'quarantineMaxCount': config.quarantineMaxCount,
       'quarantineMaxBytes': config.quarantineMaxBytes,
       'droppedRequestMaxCount': config.droppedRequestMaxCount,
+      'quarantineResponseBodyMaxBytes': config.quarantineResponseBodyMaxBytes,
     };
     for (final entry in limits.entries) {
       if (entry.value < 0) {
@@ -2346,6 +2420,15 @@ class OfflineWebProxy {
           null,
         );
       }
+    }
+    if (config.quarantineResponseBodyMaxBytes >
+        _maxQuarantineResponseBodyBytes) {
+      throw ProxyStartException(
+        'quarantineResponseBodyMaxBytes must not exceed '
+        '$_maxQuarantineResponseBodyBytes: '
+        '${config.quarantineResponseBodyMaxBytes}',
+        null,
+      );
     }
 
     final retentions = <String, Duration>{
@@ -3884,6 +3967,11 @@ class OfflineWebProxy {
   /// （5 秒ごと）で送ります。同じ要求がまた同じ応答を返した場合は、再び
   /// 一時停止します。
   ///
+  /// [ProxyConfig.queueOwnerResolver] が例外を投げて一時停止したキュー
+  /// （[QueuePauseReason.ownerUnresolved]）も再開します。その場合、持ち主が
+  /// 分かっている要求は、ログインしたのが別の持ち主とみなされるため、
+  /// 送らずに `owner_changed` としてキューから取り除かれます。
+  ///
   /// 一時停止していない場合も呼び出せます。その場合、呼び出す前から送信中の
   /// 要求が認証が必要との応答を返しても、古いセッションで送った要求として
   /// 一時停止しません。停止中は何もしません。429 による送信の控え
@@ -3905,7 +3993,9 @@ class OfflineWebProxy {
   /// です。ただし隔離する方針で、1 件で [ProxyConfig.quarantineMaxBytes] を
   /// 超える要求は、4xx の場合と同じく本文を持たないドロップ履歴へ
   /// `quarantine_too_large` として記録します。429 による送信の控え
-  /// （[QueuePauseReason.rateLimited]）は対象外で、`false` を返します。
+  /// （[QueuePauseReason.rateLimited]）と、持ち主を判定できなかったことによる
+  /// 一時停止（[QueuePauseReason.ownerUnresolved]）は対象外で、`false` を
+  /// 返します。
   ///
   /// Returns: 取り除いた場合は `true`。一時停止していない場合、停止中の場合、
   ///   要求が既にキューに無い場合は `false` です。最後の場合も一時停止は
@@ -4027,6 +4117,7 @@ class OfflineWebProxy {
           ..remove('reason')
           ..remove('errorMessage')
           ..remove('statusCode')
+          ..remove('responseBodyPreview')
           ..['retryCount'] = 0
           ..['nextRetryAt'] = now.toIso8601String()
           // 再送は改めて受け付けた時点を起点にし、待機中の要求より後に送る。
@@ -5234,7 +5325,8 @@ class OfflineWebProxy {
     _unacknowledgedDroppedCount = null;
   }
 
-  /// 隔離する記録の大きさを、本文とヘッダの名前・値から概算します。
+  /// 隔離する記録の大きさを、本文とヘッダの名前・値、残した応答本文の
+  /// 先頭から概算します。
   ///
   /// [data] 隔離する記録。
   ///
@@ -5251,6 +5343,11 @@ class OfflineWebProxy {
       for (final header in headers.entries) {
         size += header.key.toString().length + header.value.toString().length;
       }
+    }
+
+    final preview = data['responseBodyPreview'];
+    if (preview is String) {
+      size += utf8.encode(preview).length;
     }
     return size;
   }
@@ -5570,6 +5667,7 @@ class OfflineWebProxy {
       _dataStageCompleted = false;
     }
     _storageEncryptionKey = null;
+    _currentQueueOwner = null;
     _hiveDirectoryPath = null;
     _pendingLegacyKeys.clear();
     // 復旧前の件数を返さないよう、未確認件数のキャッシュを捨てる
@@ -5802,10 +5900,14 @@ class OfflineWebProxy {
       );
       await _migrateLegacyCookieBoxIfNeeded(cookieBox);
 
+      final queueOwner =
+          await _loadPersistedQueueOwner(portPreferenceBox, encryptionKey);
+
       _hiveDirectoryPath = directoryPath;
       _storageEncryptionKey = encryptionKey;
       _keyStageGeneration = _storageGeneration;
       _cookieBox = cookieBox;
+      _currentQueueOwner = queueOwner;
       return cookieBox;
     } catch (_) {
       await _closeBoxesQuietly(openedBoxes);
@@ -7627,8 +7729,16 @@ window.__offline_web_proxy_web_storage_bridge = {
             ? null
             : _findQueueExcludeRule(request.method, request.url.path);
 
+    // ログインの応答の Cookie で、持ち主を決める前にキューから送らないよう止める
+    final holdsQueueOwnerGate = _enterQueueOwnerGateIfSignIn(request.url.path);
+
     // 上流サーバに転送
     try {
+      if (holdsQueueOwnerGate) {
+        // Cookie を保存してから持ち主を保存するまでに終了した場合に備え、
+        // ログインを転送中であることを先に残す
+        await _persistQueueOwner();
+      }
       final result = await _forwardToUpstream(
         request,
         requestBodyBytes: requestBodyBytes,
@@ -7639,9 +7749,16 @@ window.__offline_web_proxy_web_storage_bridge = {
       // 上流が応答した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
       _recordUpstreamSuccess();
 
-      // ログインが成功した場合は、認証待ちで止めたキューを再開する。
-      // 応答の Cookie は転送の中で保存済みのため、新しいセッションで送られる
-      _resumeQueueIfSignedIn(request.url.path, result.statusCode);
+      // ログインが成功した場合は、持ち主を決めて、認証待ちで止めたキューを
+      // 再開する。応答の Cookie は転送の中で保存済みのため、新しいセッションで
+      // 送られる
+      await _handleSignInResponse(
+        request,
+        requestBody: requestBodyBytes,
+        statusCode: result.statusCode,
+        responseHeaders: result.headers,
+        responseBody: result.bodyBytes,
+      );
 
       final redirectResponse = _tryBuildHandledRedirectResponse(
         request: request,
@@ -7772,6 +7889,10 @@ window.__offline_web_proxy_web_storage_bridge = {
 
       return shelf.Response.internalServerError(
           body: '上流サーバエラー', headers: {'Connection': 'close'});
+    } finally {
+      if (holdsQueueOwnerGate) {
+        await _leaveQueueOwnerGate();
+      }
     }
   }
 
@@ -9567,6 +9688,12 @@ window.__offline_web_proxy_web_storage_bridge = {
       'nextRetryAt': DateTime.now().toIso8601String(),
     };
 
+    // 別の利用者がログインした後に、そのセッションで送らないよう持ち主を残す
+    final queueOwner = _currentQueueOwner;
+    if (_config?.queueOwnerResolver != null && queueOwner != null) {
+      queueData[_queueOwnerField] = queueOwner;
+    }
+
     final box = _queueBox;
     if (box == null) {
       return null;
@@ -9840,6 +9967,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         !queueBox.isOpen ||
         _queuePauseReason != null ||
         _isQueueHeld() ||
+        _queueOwnerGateCount > 0 ||
         _isDrainingQueue ||
         _queueDrainLock.isLocked) {
       return;
@@ -9850,13 +9978,19 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
 
     _isDrainingQueue = true;
+    // ログインで打ち切った場合は、終わった後に送り直す
+    var interruptedBySignIn = false;
     try {
       await _queueDrainLock.synchronized(() async {
         final keys = _sortQueueKeysByQueuedAt(queueBox);
+        // ログインが始まった後は、持ち主を決め直してから先頭から送り直す。
+        // 送らずに中断した要求を飛ばして後続を送らないようにするため
+        final queueOwnerGateGeneration = _queueOwnerGateGeneration;
         for (var i = 0; i < keys.length; i++) {
           // 停止した場合や上流断を検知した場合は、残りを待たせずに打ち切る。
           // 認証待ちで一時停止した場合は、順序を保つため後続を送らない。
-          // 429 で送信を控えている間は、同じ上流へ後続を送らない
+          // 429 で送信を控えている間は、同じ上流へ後続を送らない。
+          // ログインの転送中は、持ち主が決まるまで送らない
           if (!_isRunning ||
               _isStopping ||
               !queueBox.isOpen ||
@@ -9865,15 +9999,30 @@ window.__offline_web_proxy_web_storage_bridge = {
               _isQueueHeld()) {
             break;
           }
+          if (_queueOwnerGateCount > 0 ||
+              _queueOwnerGateGeneration != queueOwnerGateGeneration) {
+            interruptedBySignIn = true;
+            break;
+          }
 
           await _processQueuedItem(queueBox, keys[i]);
           if (i % 10 == 0) {
             await Future.delayed(Duration.zero); // UIフリーズ防止
           }
         }
+        // 最後の要求の送信中にログインが始まった場合も送り直す
+        if (_queueOwnerGateGeneration != queueOwnerGateGeneration) {
+          interruptedBySignIn = true;
+        }
       });
     } finally {
       _isDrainingQueue = false;
+    }
+
+    // 転送中のログインが残っていれば、その終わりに送り直す
+    if (interruptedBySignIn && _queueOwnerGateCount == 0) {
+      // ignore: discarded_futures
+      _drainQueue();
     }
   }
 
@@ -9938,6 +10087,13 @@ window.__offline_web_proxy_web_storage_bridge = {
     final data = box.get(key) as Map?;
     if (data == null) return;
 
+    // 別の利用者がログインした後は、その利用者のセッションで送らない。
+    // 再試行を待っている要求も、すぐに保留へ移して利用者へ知らせられるようにする
+    if (_isQueueOwnerChanged(data)) {
+      await _removeQueuedItemForOwnerChange(box, key as Object, data);
+      return;
+    }
+
     final itemUrl = data['url'] as String? ?? '';
     final nextRetryAtValue = data['nextRetryAt'] as String?;
     if (nextRetryAtValue != null) {
@@ -9950,7 +10106,15 @@ window.__offline_web_proxy_web_storage_bridge = {
     // 送信中にログインが成功したかを、応答を受け取った後に判定するため控える
     final authResumeGeneration = _authResumeGeneration;
     try {
-      final result = await _sendQueuedRequest(data);
+      final result = await _sendQueuedRequest(
+        data,
+        queueOwnerGateGeneration: _queueOwnerGateGeneration,
+      );
+
+      // 本文を送る前にログインが始まったため、送らずに次の周回へ回した
+      if (result.deferred) {
+        return;
+      }
 
       // 送信の後の保存が終わるまで stop() が Box を閉じないよう、保存中であることを示す
       final saving = Completer<void>();
@@ -9989,31 +10153,15 @@ window.__offline_web_proxy_web_storage_bridge = {
             authResumeGeneration: authResumeGeneration,
           );
         } else if (result.shouldDrop) {
-          final reason = result.dropReason ?? 'dropped';
-          final removal = await _removeRejectedQueuedItem(
+          await _handleRejectedQueuedItem(
             box,
             key as Object,
             data,
             statusCode: result.statusCode,
-            reason: reason,
+            reason: result.dropReason ?? 'dropped',
             errorMessage: result.errorMessage ?? 'HTTP ${result.statusCode}',
+            responseBodyPreview: result.responseBodyPreview,
           );
-          if (!removal.removed) {
-            // 記録できない間も 5 秒ごとに同じ 4xx を叩き続けないよう待たせる
-            _updateRetrySchedule(data);
-            await box.put(key, data);
-          }
-          _recordResendResult(
-            data,
-            statusCode: result.statusCode,
-            success: false,
-            dropReason: reason,
-            willRetry: !removal.removed,
-          );
-          final event = removal.event;
-          if (event != null) {
-            _emitEvent(event.type, itemUrl, event.data);
-          }
         } else {
           _updateRetrySchedule(data, retryAfter: result.retryAfter);
           await box.put(key, data);
@@ -10053,6 +10201,100 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
   }
 
+  /// 上流が拒否した要求をキューから取り除き、結果を記録してイベントを
+  /// 発行します。
+  ///
+  /// 取り除けなかった場合は、同じ要求を 5 秒ごとに送り続けないよう、次の
+  /// 送信を待たせてキューに残します。
+  ///
+  /// [box] キューの保存領域。
+  /// [key] 要求のキュー上のキー。
+  /// [data] 要求のキューデータ。
+  /// [statusCode] 上流が返したステータスコード。送らなかった場合は `0`。
+  /// [reason] 取り除く理由。
+  /// [errorMessage] 記録するエラーメッセージ。
+  /// [responseBodyPreview] 隔離に残す応答本文の先頭。残さない場合は `null`。
+  ///
+  /// Throws:
+  ///   * [TimeoutException] 隔離または履歴のロックを上限時間内に取得できなかった場合。
+  Future<void> _handleRejectedQueuedItem(
+    Box box,
+    Object key,
+    Map data, {
+    required int statusCode,
+    required String reason,
+    required String errorMessage,
+    String? responseBodyPreview,
+  }) async {
+    final removal = await _removeRejectedQueuedItem(
+      box,
+      key,
+      data,
+      statusCode: statusCode,
+      reason: reason,
+      errorMessage: errorMessage,
+      responseBodyPreview: responseBodyPreview,
+    );
+    if (!removal.removed) {
+      // 記録できない間も 5 秒ごとに同じ要求を扱い続けないよう待たせる
+      _updateRetrySchedule(data);
+      await box.put(key, data);
+    }
+    _recordResendResult(
+      data,
+      statusCode: statusCode,
+      success: false,
+      dropReason: reason,
+      willRetry: !removal.removed,
+    );
+    final event = removal.event;
+    if (event != null) {
+      _emitEvent(event.type, data['url'] as String? ?? '', event.data);
+    }
+  }
+
+  /// 持ち主が現在の持ち主と違う要求を、送らずにキューから取り除きます。
+  ///
+  /// 上流が拒否した要求と同じく [ProxyConfig.dropPolicy] に従い、理由は
+  /// `owner_changed`、ステータスコードは `0` です。
+  ///
+  /// [box] キューの保存領域。
+  /// [key] 要求のキュー上のキー。
+  /// [data] 要求のキューデータ。
+  Future<void> _removeQueuedItemForOwnerChange(
+    Box box,
+    Object key,
+    Map data,
+  ) async {
+    // 保存が終わるまで stop() が Box を閉じないよう、保存中であることを示す
+    final saving = Completer<void>();
+    _queuedItemSaving = saving.future;
+    try {
+      if (!box.isOpen || _isClosingStorage) {
+        return;
+      }
+      await _handleRejectedQueuedItem(
+        box,
+        key,
+        data,
+        statusCode: 0,
+        reason: _ownerChangedDropReason,
+        errorMessage: 'Queue owner changed',
+      );
+    } catch (_) {
+      // 記録できなかった場合は、送らずにキューへ残し、次の周回で改めて扱う
+      if (box.isOpen && !_isClosingStorage) {
+        _updateRetrySchedule(data);
+        await box.put(key, data);
+      }
+    } finally {
+      saving.complete();
+      if (identical(_queuedItemSaving, saving.future)) {
+        _queuedItemSaving = null;
+      }
+    }
+  }
+
   /// 上流が拒否した要求を、[ProxyConfig.dropPolicy] に従ってキューから
   /// 取り除きます。
   ///
@@ -10067,6 +10309,8 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// [statusCode] 上流が返したステータスコード。
   /// [reason] 取り除く理由。
   /// [errorMessage] 記録するエラーメッセージ。
+  /// [responseBodyPreview] 隔離に残す応答本文の先頭。ドロップ履歴には
+  ///   残しません。
   ///
   /// Returns: 取り除いたかどうかと、取り除いた場合に発行するイベント。
   ///
@@ -10083,6 +10327,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     required int statusCode,
     required String reason,
     required String errorMessage,
+    String? responseBodyPreview,
   }) async {
     if ((_config?.dropPolicy ?? DropPolicy.quarantine) ==
         DropPolicy.quarantine) {
@@ -10092,6 +10337,7 @@ window.__offline_web_proxy_web_storage_bridge = {
         statusCode: statusCode,
         reason: reason,
         errorMessage: errorMessage,
+        responseBodyPreview: responseBodyPreview,
         queueBox: box,
         queueKey: key,
       );
@@ -10215,17 +10461,15 @@ window.__offline_web_proxy_web_storage_bridge = {
     _drainQueue();
   }
 
-  /// ログインの要求が成功した場合に、一時停止したキューを再開します。
-  ///
-  /// [ProxyConfig.authResumePaths] に一致するパスで、上流が 2xx か 3xx を
-  /// 返した場合に再開します。応答の Cookie は保存した後に呼び出します。
-  /// 別 origin の中継（[ProxyConfig.mirroredOrigins]）のパスは照合しません。
+  /// パスが、別 origin の中継ではない [ProxyConfig.authResumePaths] の
+  /// ログインかどうかを返します。
   ///
   /// [path] 要求のパス。
-  /// [statusCode] 上流が返したステータスコード。
-  void _resumeQueueIfSignedIn(String path, int statusCode) {
-    if (_authResumePatterns.isEmpty || statusCode < 200 || statusCode >= 400) {
-      return;
+  ///
+  /// Returns: ログインのパスの場合は `true`。
+  bool _isSignInPath(String path) {
+    if (_authResumePatterns.isEmpty) {
+      return false;
     }
 
     // 照合対象はパスのみのため、クエリとフラグメントを落とす
@@ -10233,11 +10477,342 @@ window.__offline_web_proxy_web_storage_bridge = {
     // 別 origin のログインでは、設定済み origin のセッションは変わらない
     if (_isMirroredOriginPath(
         pathOnly.startsWith('/') ? pathOnly : '/$pathOnly')) {
+      return false;
+    }
+    return _authResumePatterns.any((pattern) => pattern.matches(pathOnly));
+  }
+
+  /// ログインの要求が成功した場合に、持ち主を決めて、一時停止したキューを
+  /// 再開します。
+  ///
+  /// [ProxyConfig.authResumePaths] に一致するパスで、上流が 2xx か 3xx を
+  /// 返した場合が対象です。応答の Cookie は保存した後に呼び出します。
+  /// 別 origin の中継（[ProxyConfig.mirroredOrigins]）のパスは照合しません。
+  ///
+  /// [ProxyConfig.queueOwnerResolver] がある場合は、先に持ち主を決めて
+  /// 保存します。判定関数が例外を投げた場合と、持ち主を決める途中で失敗した
+  /// 場合は、正体の分からない持ち主としてキューを
+  /// [QueuePauseReason.ownerUnresolved] で一時停止し、再開しません。
+  /// 判定関数が `null` を返した場合、その一時停止は解きません。例外は
+  /// 送出しません。
+  ///
+  /// [request] ログインの要求。
+  /// [requestBody] 読み取り済みの要求本文。read 系の要求では `null`。
+  /// [statusCode] 上流が返したステータスコード。
+  /// [responseHeaders] 上流の応答ヘッダ。
+  /// [responseBody] 解凍した上流の応答本文。
+  Future<void> _handleSignInResponse(
+    shelf.Request request, {
+    required List<int>? requestBody,
+    required int statusCode,
+    required Map<String, String> responseHeaders,
+    required List<int> responseBody,
+  }) async {
+    if (statusCode < 200 ||
+        statusCode >= 400 ||
+        !_isSignInPath(request.url.path)) {
       return;
     }
-    if (_authResumePatterns.any((pattern) => pattern.matches(pathOnly))) {
-      _resumeQueueAfterAuthentication();
+
+    final resolver = _config?.queueOwnerResolver;
+    if (resolver != null) {
+      final eventUrl = request.url.toString();
+      try {
+        final resolved = _resolveQueueOwner(
+          resolver,
+          QueueOwnerContext(
+            method: request.method,
+            path: '/${request.url.path}',
+            queryParameters: _tryReadQueryParameters(request.url),
+            requestHeaders: request.headers,
+            requestBody: _unmodifiableBytes(requestBody ?? const <int>[]),
+            statusCode: statusCode,
+            responseHeaders: Map.unmodifiable(responseHeaders),
+            responseBody: _unmodifiableBytes(responseBody),
+          ),
+          eventUrl: eventUrl,
+        );
+        if (resolved.unresolved) {
+          await _pauseQueueForUnresolvedOwner();
+          return;
+        }
+
+        final owner = resolved.owner;
+        if (owner == null) {
+          // 判定できない場合の一時停止は、持ち主が決まるまで解かない
+          if (_queuePauseReason == QueuePauseReason.ownerUnresolved) {
+            return;
+          }
+        } else {
+          _currentQueueOwner = owner;
+          if (!await _persistQueueOwner()) {
+            // 保存できないと、起動し直した後に前の持ち主として送ってしまう
+            await _pauseQueueForUnresolvedOwner();
+            return;
+          }
+        }
+      } catch (e) {
+        // どこで失敗しても、新しいセッションで前の持ち主の要求を送らない
+        _emitEvent(ProxyEventType.errorOccurred, eventUrl, {
+          'phase': 'queueOwnerResolve',
+          'error': e.runtimeType.toString(),
+        });
+        await _pauseQueueForUnresolvedOwner();
+        return;
+      }
     }
+
+    _resumeQueueAfterAuthentication();
+  }
+
+  /// 要求のクエリパラメータを読み取ります。
+  ///
+  /// [uri] 要求の URL。
+  ///
+  /// Returns: クエリパラメータ。`%` の表記が壊れていて読めない場合は空。
+  Map<String, String> _tryReadQueryParameters(Uri uri) {
+    try {
+      return uri.queryParameters;
+    } on FormatException {
+      return const {};
+    } on ArgumentError {
+      return const {};
+    }
+  }
+
+  /// 判定関数が書き換えても、WebView へ返す本文が変わらないよう包みます。
+  ///
+  /// [bytes] 包むバイト列。
+  ///
+  /// Returns: 書き換えられないバイト列。
+  List<int> _unmodifiableBytes(List<int> bytes) => bytes is Uint8List
+      ? bytes.asUnmodifiableView()
+      : List<int>.unmodifiable(bytes);
+
+  /// 正体の分からない持ち主がログインしたものとして、キューを止めます。
+  ///
+  /// 前の持ち主の要求を新しいセッションで送らないよう、現在の持ち主を
+  /// 毎回異なる値にして保存し、[QueuePauseReason.ownerUnresolved] で
+  /// 一時停止します。保存に失敗しても一時停止は続けます。
+  Future<void> _pauseQueueForUnresolvedOwner() async {
+    _currentQueueOwner =
+        '$_unresolvedQueueOwnerPrefix${_generateUnresolvedOwnerToken()}';
+    _authResumeGeneration++;
+    _clearQueuePause();
+    _queuePauseReason = QueuePauseReason.ownerUnresolved;
+    await _persistQueueOwner();
+  }
+
+  /// [ProxyConfig.queueOwnerResolver] を呼び出し、持ち主の HMAC を返します。
+  ///
+  /// 例外を投げた場合と、鍵が無く HMAC を作れない場合は、判定できなかった
+  /// ものとして扱い、[ProxyEventType.errorOccurred]
+  /// （`phase: queueOwnerResolve`）で知らせます。例外の文字列には本文の
+  /// 抜粋が入り得るため、イベントには例外の型の名前だけを載せます。
+  ///
+  /// [resolver] 判定関数。
+  /// [context] ログインの要求と応答。
+  /// [eventUrl] イベントに載せる要求の URL。
+  ///
+  /// Returns: 持ち主の HMAC（判定関数が `null` か空文字列を返した場合は
+  ///   `null`）と、判定できなかったかどうか。
+  ({String? owner, bool unresolved}) _resolveQueueOwner(
+    QueueOwnerResolver resolver,
+    QueueOwnerContext context, {
+    required String eventUrl,
+  }) {
+    final String? identifier;
+    try {
+      identifier = resolver(context);
+    } catch (e) {
+      _emitEvent(ProxyEventType.errorOccurred, eventUrl, {
+        'phase': 'queueOwnerResolve',
+        'error': e.runtimeType.toString(),
+      });
+      return (owner: null, unresolved: true);
+    }
+
+    if (identifier == null || identifier.isEmpty) {
+      return (owner: null, unresolved: false);
+    }
+
+    final key = _storageEncryptionKey;
+    if (key == null) {
+      _emitEvent(ProxyEventType.errorOccurred, eventUrl, {
+        'phase': 'queueOwnerResolve',
+        'error': 'storage encryption key is not available',
+      });
+      return (owner: null, unresolved: true);
+    }
+    // 暗号化に使う鍵をそのまま使わず、用途ごとに分けた鍵で HMAC を作る
+    final ownerKey =
+        Hmac(sha256, key).convert(utf8.encode(_queueOwnerHmacLabel)).bytes;
+    final digest =
+        Hmac(sha256, ownerKey).convert(utf8.encode(identifier)).toString();
+    return (owner: digest, unresolved: false);
+  }
+
+  /// 正体の分からない持ち主に付ける、毎回異なる値を作ります。
+  ///
+  /// Returns: 16 バイトの乱数を 16 進数で表した文字列。
+  String _generateUnresolvedOwnerToken() {
+    final random = Random.secure();
+    return List<String>.generate(
+      16,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+  }
+
+  /// 保存した持ち主がどの鍵で作ったものかを示す値を返します。
+  ///
+  /// [key] 保存領域の暗号化鍵。
+  ///
+  /// Returns: 鍵から作った HMAC の先頭 16 文字。
+  String _queueOwnerKeyId(List<int> key) => Hmac(sha256, key)
+      .convert(utf8.encode(_queueOwnerKeyIdLabel))
+      .toString()
+      .substring(0, 16);
+
+  /// 現在の持ち主と、ログインを転送中かどうかをポート設定 Box に保存します。
+  ///
+  /// ログインを転送中であることも残し、Cookie を保存してから持ち主を
+  /// 保存するまでの間にアプリが終了した場合に、起動し直した後で前の持ち主
+  /// として送らないようにします（[_loadPersistedQueueOwner]）。
+  ///
+  /// 保存領域が使えない場合と失敗した場合は [ProxyEventType.errorOccurred]
+  /// （`phase: queueOwnerPersist`）で知らせます。ただし停止した後に保存領域が
+  /// 使えない場合は知らせません。メモリ上の値は変えません。
+  ///
+  /// Returns: 保存した場合は `true`。保存領域が使えない場合と、失敗した
+  ///   場合は `false`。
+  Future<bool> _persistQueueOwner() async {
+    final box = _portPreferenceBox;
+    final key = _storageEncryptionKey;
+    if (box == null || !box.isOpen || key == null) {
+      // 停止で閉じた後は、転送中のログインが終わっても知らせない。転送中で
+      // あることは保存したまま残り、次の起動で安全な側に扱われる
+      if (_isRunning) {
+        _emitEvent(ProxyEventType.errorOccurred, '', {
+          'phase': 'queueOwnerPersist',
+          'error': 'storage is not available',
+        });
+      }
+      return false;
+    }
+
+    final owner = _currentQueueOwner;
+    try {
+      await box.put(_queueOwnerStorageKey, {
+        if (owner != null) 'owner': owner,
+        'keyId': _queueOwnerKeyId(key),
+        'signInPending': _queueOwnerGateCount > 0,
+      });
+      return true;
+    } catch (e) {
+      _emitEvent(ProxyEventType.errorOccurred, '', {
+        'phase': 'queueOwnerPersist',
+        'error': e.runtimeType.toString(),
+      });
+      return false;
+    }
+  }
+
+  /// 保存した現在の持ち主を読み込みます。
+  ///
+  /// 別の鍵で作った値は、別の持ち主と取り違えないよう捨てます。ログインを
+  /// 転送している途中で終了していた場合は、Cookie だけが新しい利用者に
+  /// なっている可能性があるため、正体の分からない持ち主として扱います。
+  /// 捨てる処理や保存に失敗しても、起動は止めません。
+  ///
+  /// [box] ポート設定 Box。
+  /// [key] 保存領域の暗号化鍵。
+  ///
+  /// Returns: 現在の持ち主。保存されていない場合と捨てた場合は `null`。
+  Future<String?> _loadPersistedQueueOwner(Box box, List<int> key) async {
+    final stored = box.get(_queueOwnerStorageKey);
+    if (stored is Map && stored['keyId'] == _queueOwnerKeyId(key)) {
+      if (stored['signInPending'] == true) {
+        final owner =
+            '$_unresolvedQueueOwnerPrefix${_generateUnresolvedOwnerToken()}';
+        try {
+          await box.put(_queueOwnerStorageKey, {
+            'owner': owner,
+            'keyId': _queueOwnerKeyId(key),
+            'signInPending': false,
+          });
+        } catch (_) {
+          // 次の起動でも同じく正体の分からない持ち主として扱われる
+        }
+        return owner;
+      }
+      final owner = stored['owner'];
+      return owner is String ? owner : null;
+    }
+    if (stored != null) {
+      try {
+        await box.delete(_queueOwnerStorageKey);
+      } catch (_) {
+        // 鍵が合わない値は読み込むたびに捨てるため、残っても害は無い
+      }
+    }
+    return null;
+  }
+
+  /// ログインの要求であれば、キューから新しく送るのを止めます。
+  ///
+  /// [ProxyConfig.queueOwnerResolver] が無い場合は止めません。
+  ///
+  /// [path] 要求のパス。
+  ///
+  /// Returns: 止めた場合は `true`。その場合は、ログインを転送中であることを
+  ///   [_persistQueueOwner] で保存してから転送し、最後に
+  ///   [_leaveQueueOwnerGate] を呼び出す必要があります。
+  bool _enterQueueOwnerGateIfSignIn(String path) {
+    if (_config?.queueOwnerResolver == null || !_isSignInPath(path)) {
+      return false;
+    }
+    _queueOwnerGateCount++;
+    _queueOwnerGateGeneration++;
+    return true;
+  }
+
+  /// [_enterQueueOwnerGateIfSignIn] で止めた送信を戻し、転送中のログインが
+  /// 無くなれば、そのことを保存してから送信を始めます。
+  Future<void> _leaveQueueOwnerGate() async {
+    _queueOwnerGateCount--;
+    if (_queueOwnerGateCount == 0) {
+      await _persistQueueOwner();
+      // ignore: discarded_futures
+      _drainQueue();
+    }
+  }
+
+  /// [generation] の時点より後にログインの転送が始まったか、転送中かを
+  /// 返します。
+  ///
+  /// [generation] 送信を始めたときの [_queueOwnerGateGeneration]。
+  ///
+  /// Returns: 始まった場合と転送中の場合は `true`。
+  bool _isQueueOwnerGateRaisedSince(int generation) =>
+      _queueOwnerGateCount > 0 || _queueOwnerGateGeneration != generation;
+
+  /// 要求の持ち主が現在の持ち主と違うかどうかを返します。
+  ///
+  /// [ProxyConfig.queueOwnerResolver] が無い場合と、どちらかが分からない
+  /// 場合は、違わないものとします。
+  ///
+  /// [data] 要求のキューデータ。
+  ///
+  /// Returns: 違う場合は `true`。
+  bool _isQueueOwnerChanged(Map data) {
+    if (_config?.queueOwnerResolver == null) {
+      return false;
+    }
+    final itemOwner = data[_queueOwnerField];
+    final currentOwner = _currentQueueOwner;
+    return itemOwner is String &&
+        currentOwner != null &&
+        itemOwner != currentOwner;
   }
 
   /// キューされたリクエストを上流サーバに送信します。
@@ -10254,10 +10829,20 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// 4xx は取り除く対象ですが、408 と 429 は再試行の対象にし、
   /// `Retry-After` を返します。
   ///
+  /// 本文を送る直前に、送信を始めた後でログインの転送が始まっていないかを
+  /// 確かめます。始まっていた場合は送らずに中断し、`deferred` を返します。
+  /// ログインの応答の Cookie で、持ち主を決める前に送らないためです。
+  ///
+  /// 取り除く応答では、[ProxyConfig.quarantineResponseBodyMaxBytes] が 0 より
+  /// 大きければ、本文の先頭を読み取って返します。
+  ///
   /// [data] キューデータ。
+  /// [queueOwnerGateGeneration] 送信を始めたときの
+  ///   [_queueOwnerGateGeneration]。
   ///
   /// Returns: 成否、取り除くかどうか、上流が返したステータスコード、
-  ///   取り除く理由、エラーメッセージ、`Retry-After` が示す送信時刻。
+  ///   取り除く理由、エラーメッセージ、`Retry-After` が示す送信時刻、
+  ///   送らずに中断したかどうか、応答本文の先頭（残さない場合は `null`）。
   Future<
       ({
         bool success,
@@ -10266,7 +10851,12 @@ window.__offline_web_proxy_web_storage_bridge = {
         String? dropReason,
         String? errorMessage,
         DateTime? retryAfter,
-      })> _sendQueuedRequest(Map data) async {
+        bool deferred,
+        String? responseBodyPreview,
+      })> _sendQueuedRequest(
+    Map data, {
+    required int queueOwnerGateGeneration,
+  }) async {
     if (_config?.origin.isEmpty ?? true) {
       return (
         success: false,
@@ -10275,6 +10865,8 @@ window.__offline_web_proxy_web_storage_bridge = {
         dropReason: null,
         errorMessage: 'No upstream origin configured',
         retryAfter: null,
+        deferred: false,
+        responseBodyPreview: null,
       );
     }
 
@@ -10293,6 +10885,8 @@ window.__offline_web_proxy_web_storage_bridge = {
         dropReason: null,
         errorMessage: null,
         retryAfter: null,
+        deferred: false,
+        responseBodyPreview: null,
       );
     }
 
@@ -10315,6 +10909,8 @@ window.__offline_web_proxy_web_storage_bridge = {
             dropReason: null,
             errorMessage: 'No upstream origin configured',
             retryAfter: null,
+            deferred: false,
+            responseBodyPreview: null,
           );
         }
 
@@ -10345,6 +10941,25 @@ window.__offline_web_proxy_web_storage_bridge = {
       // 最初の転送と見分けられるよう、キューからの送信であることを伝える
       _applyReplayHeader(request);
 
+      await _storageTestHooks?.beforeQueuedRequestSent?.call();
+
+      // ヘッダを組み立てる間にログインが始まった場合は、新しいセッションの
+      // Cookie を付けた可能性があるため、何も送らずに中断する
+      if (_config?.queueOwnerResolver != null &&
+          _isQueueOwnerGateRaisedSince(queueOwnerGateGeneration)) {
+        request.abort();
+        return (
+          success: false,
+          shouldDrop: false,
+          statusCode: 0,
+          dropReason: null,
+          errorMessage: null,
+          retryAfter: null,
+          deferred: true,
+          responseBodyPreview: null,
+        );
+      }
+
       if (body.isNotEmpty && method != 'GET') {
         request.add(body);
       }
@@ -10354,11 +10969,21 @@ window.__offline_web_proxy_web_storage_bridge = {
       // 上流がステータス行を返した時点で到達可能と判定する（4xx / 5xx でもサーバは生きている）
       _recordUpstreamSuccess();
 
-      // 本文を読み捨てないと接続が解放されず、後続の再送が空き待ちで止まる
-      await _drainResponse(response, deadline);
+      final statusCode = response.statusCode;
+      final willDrop = statusCode >= 400 &&
+          statusCode < 500 &&
+          !_retryableClientErrorStatusCodes.contains(statusCode) &&
+          !_isAuthRequiredStatusCode(statusCode);
+
+      // 本文を読み捨てないと接続が解放されず、後続の再送が空き待ちで止まる。
+      // 取り除く応答は、理由を確かめられるよう本文の先頭を残す
+      final responseBodyPreview =
+          willDrop ? await _readResponseBodyPreview(response, deadline) : null;
+      if (responseBodyPreview == null) {
+        await _drainResponse(response, deadline);
+      }
 
       // 2xx と 303 を成功とみなす（認証が必要として指定した状態コードを除く）
-      final statusCode = response.statusCode;
       if ((statusCode >= 200 && statusCode < 300 ||
               statusCode == HttpStatus.seeOther) &&
           !_isAuthRequiredStatusCode(statusCode)) {
@@ -10373,6 +10998,8 @@ window.__offline_web_proxy_web_storage_bridge = {
           dropReason: null,
           errorMessage: null,
           retryAfter: null,
+          deferred: false,
+          responseBodyPreview: null,
         );
       }
 
@@ -10387,6 +11014,8 @@ window.__offline_web_proxy_web_storage_bridge = {
           dropReason: '4xx_error',
           errorMessage: 'HTTP $statusCode',
           retryAfter: null,
+          deferred: false,
+          responseBodyPreview: responseBodyPreview?.text,
         );
       }
 
@@ -10399,6 +11028,8 @@ window.__offline_web_proxy_web_storage_bridge = {
         retryAfter: _retryableClientErrorStatusCodes.contains(statusCode)
             ? _parseRetryAfter(response.headers.value('retry-after'))
             : null,
+        deferred: false,
+        responseBodyPreview: null,
       );
     } catch (e) {
       // 画面操作が無い状況でも上流断を検知できるよう、再送の失敗も判定に含める。
@@ -10414,6 +11045,8 @@ window.__offline_web_proxy_web_storage_bridge = {
         dropReason: null,
         errorMessage: e.toString(),
         retryAfter: null,
+        deferred: false,
+        responseBodyPreview: null,
       );
     } finally {
       // 共有クライアントをここで閉じない
@@ -10440,6 +11073,133 @@ window.__offline_web_proxy_web_storage_bridge = {
     final builder = BytesBuilder(copy: false);
     await _consumeResponseBody(response, deadline, onData: builder.add);
     return builder.takeBytes();
+  }
+
+  /// 断られた応答の本文の先頭を読み取ります。
+  ///
+  /// [ProxyConfig.quarantineResponseBodyMaxBytes] が 0 より大きく、
+  /// `Content-Type` が `text/*`、`application/json` または `+json` で終わる
+  /// 種類で、文字コードが UTF-8（指定なしを含む）の場合だけ読み取ります。
+  /// gzip で圧縮された本文は、[_maxCompressedPreviewSourceBytes] までなら
+  /// 解凍してから先頭を取ります。その他の圧縮方式は読み取りません。
+  /// 先頭は UTF-8 の文字の途中で切りません。
+  ///
+  /// 読み取る場合は本文を最後まで受信し、接続を解放します。読み取らない
+  /// 場合は何も受信しないため、呼び出し側で [_drainResponse] を呼びます。
+  ///
+  /// [response] 上流の応答。
+  /// [deadline] リクエスト全体の締め切り。
+  ///
+  /// Returns: 本文の先頭を持つ値。読み取らない場合は `null`。受信や解凍に
+  ///   失敗した場合は、先頭が `null` の値（本文は受信を終えているため、
+  ///   改めて読み捨てる必要はありません）。
+  Future<({String? text})?> _readResponseBodyPreview(
+    HttpClientResponse response,
+    DateTime deadline,
+  ) async {
+    final maxBytes = _config?.quarantineResponseBodyMaxBytes ?? 0;
+    if (maxBytes <= 0) {
+      return null;
+    }
+
+    final headers = <String, String>{};
+    response.headers.forEach((name, values) {
+      headers[name] = values.join(', ');
+    });
+    if (!_isPreviewableContentType(
+        _getHeaderValueIgnoreCase(headers, 'content-type'))) {
+      return null;
+    }
+    final encoding = _getHeaderValueIgnoreCase(headers, 'content-encoding')
+        ?.trim()
+        .toLowerCase();
+    final isGzip = _isGzipOnlyContentEncoding(headers);
+    if (!isGzip &&
+        encoding != null &&
+        encoding.isNotEmpty &&
+        encoding != 'identity') {
+      return null;
+    }
+
+    // gzip は全体を読み取ってから解凍し、そうでなければ先頭だけを残す
+    final limit = isGzip ? _maxCompressedPreviewSourceBytes : maxBytes + 4;
+    final builder = BytesBuilder(copy: false);
+    var exceeded = false;
+    try {
+      await _consumeResponseBody(response, deadline, onData: (chunk) {
+        final room = limit - builder.length;
+        if (room <= 0) {
+          exceeded = true;
+          return;
+        }
+        if (chunk.length > room) {
+          exceeded = true;
+          builder.add(chunk.sublist(0, room));
+        } else {
+          builder.add(chunk);
+        }
+      });
+    } catch (_) {
+      return (text: null);
+    }
+
+    var bytes = builder.takeBytes();
+    if (isGzip) {
+      final decoded = exceeded ? null : _tryDecodeGzip(bytes);
+      if (decoded == null) {
+        return (text: null);
+      }
+      bytes = decoded;
+    }
+    return (text: _truncateUtf8(bytes, maxBytes));
+  }
+
+  /// 本文の先頭を残す対象の `Content-Type` かどうかを返します。
+  ///
+  /// [contentType] `Content-Type` ヘッダの値。
+  ///
+  /// Returns: `text/*`、`application/json`、`+json` で終わる種類で、
+  ///   文字コードが UTF-8 か US-ASCII（指定なしを含む）の場合は `true`。
+  bool _isPreviewableContentType(String? contentType) {
+    if (contentType == null) {
+      return false;
+    }
+    final ContentType parsed;
+    try {
+      parsed = ContentType.parse(contentType);
+    } catch (_) {
+      return false;
+    }
+    final primary = parsed.primaryType.toLowerCase();
+    final sub = parsed.subType.toLowerCase();
+    final isTextual = primary == 'text' ||
+        (primary == 'application' && (sub == 'json' || sub.endsWith('+json')));
+    if (!isTextual) {
+      return false;
+    }
+    final charset = parsed.charset?.toLowerCase();
+    return charset == null ||
+        charset == 'utf-8' ||
+        charset == 'utf8' ||
+        charset == 'us-ascii';
+  }
+
+  /// バイト列を、UTF-8 の文字の途中で切らずに上限までの文字列にします。
+  ///
+  /// [bytes] UTF-8 のバイト列。
+  /// [maxBytes] 上限のバイト数。
+  ///
+  /// Returns: 上限以内の文字列。壊れたバイトは U+FFFD になります。
+  String _truncateUtf8(List<int> bytes, int maxBytes) {
+    var end = bytes.length;
+    if (end > maxBytes) {
+      end = maxBytes;
+      // 続きのバイト（10xxxxxx）の前で切らないよう、文字の先頭まで戻す
+      while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
+        end--;
+      }
+    }
+    return utf8.decode(bytes.sublist(0, end), allowMalformed: true);
   }
 
   /// 上流からの応答本文を読み捨てて接続を解放します。
@@ -11709,6 +12469,9 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// [statusCode] 上流から返されたステータスコード。
   /// [reason] 退避理由。
   /// [errorMessage] 詳細なエラーメッセージ。
+  /// [responseBodyPreview] 残す応答本文の先頭。残さない場合は `null`。
+  ///   合計バイト数の上限の判定に含めます。先頭を含めると 1 件で上限を
+  ///   超える場合は、先頭を外して判定し直します。
   /// [queueBox] 取り除く記録があるキューの保存領域。
   /// [queueKey] 取り除く記録のキュー ID。
   ///
@@ -11722,6 +12485,7 @@ window.__offline_web_proxy_web_storage_bridge = {
     required int statusCode,
     required String reason,
     required String errorMessage,
+    String? responseBodyPreview,
     required Box queueBox,
     required Object queueKey,
   }) {
@@ -11737,8 +12501,17 @@ window.__offline_web_proxy_web_storage_bridge = {
       quarantinedData['statusCode'] = statusCode;
       quarantinedData['reason'] = reason;
       quarantinedData['errorMessage'] = errorMessage;
+      if (responseBodyPreview != null) {
+        quarantinedData['responseBodyPreview'] = responseBodyPreview;
+      }
 
       final maxBytes = _config?.quarantineMaxBytes ?? 0;
+      if (maxBytes > 0 &&
+          responseBodyPreview != null &&
+          _estimateQuarantinedSize(quarantinedData) > maxBytes) {
+        // 調べるための応答本文のせいで、送り直せる要求を失わないよう外す
+        quarantinedData.remove('responseBodyPreview');
+      }
       if (maxBytes > 0 &&
           _estimateQuarantinedSize(quarantinedData) > maxBytes) {
         final recorded = await _recordDroppedRequest(
@@ -11796,6 +12569,7 @@ window.__offline_web_proxy_web_storage_bridge = {
       statusCode: data['statusCode'] as int? ?? 0,
       errorMessage: data['errorMessage'] as String? ?? '',
       idempotencyKey: data['idempotencyKey'] as String?,
+      responseBodyPreview: data['responseBodyPreview'] as String?,
     );
   }
 

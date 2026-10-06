@@ -1,3 +1,36 @@
+## Unreleased
+
+### 破壊的変更の注意
+
+- `QueuePauseReason` に `ownerUnresolved` を追加しました。`default` の無い `switch` で網羅している場合は、分岐の追加が必要です
+
+### 機能追加
+
+- **別の利用者の送信待ちを、ログインし直した利用者のセッションで送らないようにできるようにした**（opt-in）: 端末を共用していると、利用者 A の送信待ちが残ったまま利用者 B がログインし直した場合に、A の更新が B のセッションで送られていました。`ProxyConfig.queueOwnerResolver`（`QueueOwnerResolver`、`String? Function(QueueOwnerContext)` の同期関数）を指定すると、送信待ちに持ち主を記録し、持ち主が違う要求を送らずに取り除きます。既定は `null` で、0.24.0 と同じ動きです
+  - `authResumePaths` に一致する要求に上流が 2xx か 3xx を返したときに呼びます。`QueueOwnerContext` でログインの要求と応答（解凍済みの本文）を渡し、`requestJson`、`responseJson`、`requestFormFields`、`requestHeader()` などで読めます。空でない文字列を返すと現在の持ち主になり、`null` か空文字列なら持ち主を変えません
+  - キューへ入れるときに持ち主を記録し、再送の直前（再試行待ちの要求も含む）に現在の持ち主と比べます。両方分かっていて違う場合は、送らずに `dropPolicy` に従って隔離またはドロップ履歴へ移します（理由 `owner_changed`、状態コード `0`、`errorMessage` は `Queue owner changed`）。`retryQuarantinedRequest()` で戻しても持ち主を引き継ぎます。どちらかが分からない要求は従来どおり送ります
+  - ログインの転送中はキューから新しく送りません。転送を始める前から送り始めていた再送は、本文を送る直前に中断し、次の周回で送り直します（失敗に数えません）
+  - 判定関数が例外を投げた場合と、持ち主を決められない・保存できない場合は、`ProxyEventType.errorOccurred`（`phase: queueOwnerResolve` / `queueOwnerPersist`。`error` は例外の型名だけ）を発行し、ログインした利用者を正体の分からない持ち主とみなして、キューを `QueuePauseReason.ownerUnresolved` で一時停止します。`resumeQueue()` か、持ち主が決まる次のログインで再開します。`skipPausedRequest()` の対象外です
+  - 識別子はそのまま保存せず、保存領域の暗号化鍵から導出した鍵の HMAC-SHA256 だけを持ちます。イベント・状態通知・管理 API には出しません。現在の持ち主とログインを転送中かどうかは `proxy_port_preferences` に保存し、起動し直しても引き継ぎます。鍵が変わった値は捨てます
+  - 指定したのに `authResumePaths` が空の場合は、`start()` が `ProxyStartException` を投げます
+  - この設定を使う前にログインしたセッションで溜まった送信待ちは、持ち主が無いため次のログインまで保護されません。持ち主はインスタンスごとに持ちます
+- **断られた応答の本文の先頭を隔離に残せるようにした**（opt-in）: 4xx で隔離した要求の `errorMessage` は `HTTP 400` のような状態コードだけで、上流が拒否した理由が分かりませんでした。`ProxyConfig.quarantineResponseBodyMaxBytes`（既定 `0`、0〜65536）を 0 より大きくすると、本文の先頭を `QuarantinedRequest.responseBodyPreview` に残します
+  - 対象は `Content-Type` が `text/*`、`application/json`、`+json` の種類で、文字コードが UTF-8・US-ASCII・指定なしの本文です。gzip は 256 KB までなら解凍してから先頭を取り、それ以外の `Content-Encoding` は残しません。UTF-8 の文字の途中では切りません
+  - 隔離と一緒に暗号化して保存し、`quarantineMaxBytes` の合計に含めます。先頭を含めると 1 件で `quarantineMaxBytes` を超える場合は、先頭を外して隔離します
+  - 読めるのは `getQuarantinedRequests()` だけで、管理 API の隔離の一覧、イベント、状態通知、ドロップ履歴には出しません。`retryQuarantinedRequest()` で送り直すときに消します
+  - 個人情報（利用者が入力した値など）が入り得るため、必要なときだけ有効にし、要求を送った本人にだけ見せてください
+  - 範囲外の値は `start()` が `ProxyStartException` を投げます
+
+### ドキュメント
+
+- 仕様書【5】に「送信待ちの持ち主」と「隔離に残す応答本文」を加え、【1】の端末に保存するデータ、【5】の状態通知と保持上限、【17】のインスタンスと isolate、【20】の API リファレンスを合わせて直しました
+- README に、端末を共用する場合の設定例と `quarantineResponseBodyMaxBytes` の説明を加えました
+
+### テスト
+
+- `test/queue_owner_test.dart` に、別の持ち主の要求の隔離、同じ持ち主での送信、判定関数が無い場合と `null` を返した場合の扱い、例外での一時停止と再開、隔離から戻した要求の持ち主、`DropPolicy.drop`、起動し直した後の持ち主の引き継ぎと別の鍵の値の破棄、ログインの転送中の送信の停止と中断、ログインの途中で停止・終了した場合の扱い、GET のログインとリダイレクトの応答、識別子を保存・通知しないこと、`authResumePaths` が空の設定の拒否、`QueueOwnerContext` の読み取りのテストを追加しました
+- `test/quarantine_response_preview_test.dart` に、既定で残さないこと、JSON の本文を残して起動し直した後も読めること、対象の種類と文字コード、文字の境界での切り方、gzip の解凍と 256 KB の上限、他の圧縮方式、管理 API に出さないこと、`quarantineMaxBytes` との関係、受信の締め切り、再び隔離した場合の置き換え、範囲外の値の拒否のテストを追加しました
+
 ## 0.24.0
 
 ### 動作の変更

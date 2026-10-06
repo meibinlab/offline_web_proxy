@@ -117,7 +117,9 @@ class ProxyStats {
   /// was answered with one of `ProxyConfig.authRequiredStatusCodes`. The
   /// requests stay in the queue until the user signs in again and the queue
   /// resumes. [QueuePauseReason.rateLimited] means that a queued request was
-  /// answered with `429` and sending resumes at [queuePausedUntil]. The pause
+  /// answered with `429` and sending resumes at [queuePausedUntil].
+  /// [QueuePauseReason.ownerUnresolved] means that
+  /// `ProxyConfig.queueOwnerResolver` could not tell who signed in. The pause
   /// is not persisted and ends when the proxy stops.
   final QueuePauseReason? queuePausedReason;
 
