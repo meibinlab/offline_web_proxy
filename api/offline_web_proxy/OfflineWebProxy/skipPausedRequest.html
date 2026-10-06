@@ -79,7 +79,9 @@ CSRF トークンを含む要求など）で、キューが止まり続けない
 です。ただし隔離する方針で、1 件で <a href="../../offline_web_proxy/ProxyConfig/quarantineMaxBytes.html">ProxyConfig.quarantineMaxBytes</a> を
 超える要求は、4xx の場合と同じく本文を持たないドロップ履歴へ
 <code>quarantine_too_large</code> として記録します。429 による送信の控え
-（<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.rateLimited</a>）は対象外で、<code>false</code> を返します。</p>
+（<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.rateLimited</a>）と、持ち主を判定できなかったことによる
+一時停止（<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.ownerUnresolved</a>）は対象外で、<code>false</code> を
+返します。</p>
 <p>Returns: 取り除いた場合は <code>true</code>。一時停止していない場合、停止中の場合、
   要求が既にキューに無い場合は <code>false</code> です。最後の場合も一時停止は
   解除して送信を再開します。</p>

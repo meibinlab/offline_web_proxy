@@ -74,7 +74,9 @@
 was answered with one of <code>ProxyConfig.authRequiredStatusCodes</code>. The
 requests stay in the queue until the user signs in again and the queue
 resumes. <a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.rateLimited</a> means that a queued request was
-answered with <code>429</code> and sending resumes at <a href="../../offline_web_proxy/ProxyStats/queuePausedUntil.html">queuePausedUntil</a>. The pause
+answered with <code>429</code> and sending resumes at <a href="../../offline_web_proxy/ProxyStats/queuePausedUntil.html">queuePausedUntil</a>.
+<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.ownerUnresolved</a> means that
+<code>ProxyConfig.queueOwnerResolver</code> could not tell who signed in. The pause
 is not persisted and ends when the proxy stops.</p>
 </section>
 

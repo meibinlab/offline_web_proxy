@@ -74,7 +74,8 @@
 <code>"quarantine_limit"</code>（件数・合計バイト数）と <code>"quarantine_expired"</code>（期間）、
 1 件で隔離の合計バイト数の上限を超えた場合は <code>"quarantine_too_large"</code>、
 キューを一時停止させた要求を <code>skipPausedRequest()</code> で取り除いた場合は
-<code>"authentication_required"</code> です。</p>
+<code>"authentication_required"</code>、ログインし直した利用者が要求の持ち主と
+違うため送らなかった場合は <code>"owner_changed"</code>（状態コードは <code>0</code>）です。</p>
 </section>
 
       

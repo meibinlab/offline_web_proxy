@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the resumeQueue method from the OfflineWebProxy class, for the Dart programming language.">
-  <title>resumeQueue method - OfflineWebProxy class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the toString method from the QueueOwnerContext class, for the Dart programming language.">
+  <title>toString method - QueueOwnerContext class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
-    <li class="self-crumb">resumeQueue method</li>
+    <li><a href="../../offline_web_proxy/QueueOwnerContext-class.html">QueueOwnerContext</a></li>
+    <li class="self-crumb">toString method</li>
   </ol>
-  <div class="self-name">resumeQueue</div>
+  <div class="self-name">toString</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,49 +54,49 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;OfflineWebProxy-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;QueueOwnerContext-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-method">resumeQueue</span> method 
+<h1><span class="kind-method">toString</span> method 
 </h1></div>
 
     <section class="multi-line-signature">
       
+  <div>
+    <ol class="annotation-list">
+        <li>@<a href="https://api.flutter.dev/flutter/dart-core/override-constant.html">override</a></li>
+    </ol>
+  </div>
 
-<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
-<span class="name ">resumeQueue</span>(<wbr>)
+<span class="returntype"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span>
+<span class="name ">toString</span>(<wbr>)
 
-      
+      <div class="features"><span class="feature">override</span></div>
 
     </section>
     
 <section class="desc markdown">
-  <p>認証待ちで一時停止したキューの送信を再開します。</p>
-<p><a href="../../offline_web_proxy/ProxyConfig/authRequiredStatusCodes.html">ProxyConfig.authRequiredStatusCodes</a> の応答で一時停止したキューを、
-利用者がログインし直した後に再開します。一時停止の原因になった要求から
-順に送ります。別の処理がキューを扱っている間は、その後の定期処理
-（5 秒ごと）で送ります。同じ要求がまた同じ応答を返した場合は、再び
-一時停止します。</p>
-<p><a href="../../offline_web_proxy/ProxyConfig/queueOwnerResolver.html">ProxyConfig.queueOwnerResolver</a> が例外を投げて一時停止したキュー
-（<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.ownerUnresolved</a>）も再開します。その場合、持ち主が
-分かっている要求は、ログインしたのが別の持ち主とみなされるため、
-送らずに <code>owner_changed</code> としてキューから取り除かれます。</p>
-<p>一時停止していない場合も呼び出せます。その場合、呼び出す前から送信中の
-要求が認証が必要との応答を返しても、古いセッションで送った要求として
-一時停止しません。停止中は何もしません。429 による送信の控え
-（<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.rateLimited</a>）は解除しません。控えは
-<a href="../../offline_web_proxy/ProxyStats/queuePausedUntil.html">ProxyStats.queuePausedUntil</a> に自動で解けます。</p>
+  <p>A string representation of this object.</p>
+<p>Some classes have a default textual representation,
+often paired with a static <code>parse</code> function (like <a href="https://api.flutter.dev/flutter/dart-core/int/parse.html">int.parse</a>).
+These classes will provide the textual representation as
+their string representation.</p>
+<p>Other classes have no meaningful textual representation
+that a program will care about.
+Such classes will typically override <code>toString</code> to provide
+useful information when inspecting the object,
+mainly for debugging or logging.</p>
 </section>
 
 
     
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; resumeQueue() async {
-  if (!_isRunning) {
-    return;
-  }
-  _resumeQueueAfterAuthentication();
+  <pre class="language-dart"><code class="language-dart">@override
+String toString() {
+  &#47;&#47; Bodies carry credentials, so they are left out.
+  return &#39;QueueOwnerContext{method: $method, path: $path, &#39;
+      &#39;status: $statusCode}&#39;;
 }</code></pre>
 </section>
 
@@ -114,12 +114,12 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/OfflineWebProxy-class.html">OfflineWebProxy</a></li>
-    <li class="self-crumb">resumeQueue method</li>
+    <li><a href="../../offline_web_proxy/QueueOwnerContext-class.html">QueueOwnerContext</a></li>
+    <li class="self-crumb">toString method</li>
 </ol>
 
 
-    <h5>OfflineWebProxy class</h5>
+    <h5>QueueOwnerContext class</h5>
     <div id="dartdoc-sidebar-left-content"></div>
   </div><!--/.sidebar-offcanvas-->
 

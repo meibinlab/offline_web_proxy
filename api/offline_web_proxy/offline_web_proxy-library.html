@@ -274,6 +274,14 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   An update request that must not be stored in the offline queue.
 </dd>
 
+          <dt id="QueueOwnerContext">
+  <span class="name "><a href="../offline_web_proxy/QueueOwnerContext-class.html">QueueOwnerContext</a></span> 
+
+</dt>
+<dd>
+  Sign-in request and response passed to a <a href="../offline_web_proxy/QueueOwnerResolver.html">QueueOwnerResolver</a>.
+</dd>
+
           <dt id="QueueResendResult">
   <span class="name "><a href="../offline_web_proxy/QueueResendResult-class.html">QueueResendResult</a></span> 
 
@@ -478,6 +486,20 @@ WebViewからのリクエストを横取りし、ネットワーク接続状態�
   </dt>
   <dd>
     復旧結果を受け取るコールバック関数です。
+    
+
+  </dd>
+
+          
+  <dt id="QueueOwnerResolver" class="callable">
+    <span class="name"><a href="../offline_web_proxy/QueueOwnerResolver.html">QueueOwnerResolver</a></span><span class="signature">
+      <span class="returntype parameter">= <a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>? Function<span class="signature">(<span class="parameter" id="param-context"><span class="type-annotation"><a href="../offline_web_proxy/QueueOwnerContext-class.html">QueueOwnerContext</a></span> <span class="parameter-name">context</span></span>)</span></span>
+    </span>
+    
+
+  </dt>
+  <dd>
+    Function that tells who signed in, from a sign-in request and its response.
     
 
   </dd>

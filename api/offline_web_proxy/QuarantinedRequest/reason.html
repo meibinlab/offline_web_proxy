@@ -71,7 +71,10 @@
 <section class="desc markdown">
   <p>隔離理由</p>
 <p>上流が 4xx で拒否した場合は <code>"4xx_error"</code>、キューを一時停止させた要求を
-<code>skipPausedRequest()</code> で取り除いた場合は <code>"authentication_required"</code> です。</p>
+<code>skipPausedRequest()</code> で取り除いた場合は <code>"authentication_required"</code>、
+<code>ProxyConfig.queueOwnerResolver</code> を指定していて、ログインし直した
+利用者が要求の持ち主と違うため送らなかった場合は <code>"owner_changed"</code>
+です。</p>
 </section>
 
       

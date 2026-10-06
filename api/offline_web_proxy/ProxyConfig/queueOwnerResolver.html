@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="API docs for the queueOwnerResolver property from the ProxyConfig class, for the Dart programming language.">
+  <title>queueOwnerResolver property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../../static-assets/styles.css?v1">
+  <link rel="icon" href="../../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">queueOwnerResolver property</li>
+  </ol>
+  <div class="self-name">queueOwnerResolver</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
+    data-below-sidebar="">
+    <div>
+<h1><span class="kind-property">queueOwnerResolver</span> property 
+</h1></div>
+
+      <section class="multi-line-signature">
+        
+        <a href="../../offline_web_proxy/QueueOwnerResolver.html">QueueOwnerResolver</a>?
+        <span class="name ">queueOwnerResolver</span>
+        <div class="features"><span class="feature">final</span></div>
+
+      </section>
+      
+<section class="desc markdown">
+  <p>Function that tells who signed in, so that queued updates are never sent
+under another user's session.</p>
+<p>When users share a device, a queued update may still be waiting when a
+different user signs in, and resending it with the new session would
+apply it to that user's data. With this function set, the proxy records
+the current owner with each request it queues, and compares it with the
+current owner right before each resend. A request whose owner differs
+is not sent: it leaves the queue as described in <a href="../../offline_web_proxy/ProxyConfig/dropPolicy.html">dropPolicy</a>, with the
+reason <code>owner_changed</code> and status code <code>0</code>, so that the app can tell the
+user and resend it after the right user signs in again
+(<code>retryQuarantinedRequest()</code> keeps the owner). A request without a
+recorded owner, such as one queued before this setting was used or
+before anyone signed in, is sent as before.</p>
+<p>The function is called when a request matching <a href="../../offline_web_proxy/ProxyConfig/authResumePaths.html">authResumePaths</a> is
+answered with a 2xx or 3xx by the upstream. A non-empty return value
+becomes the current owner. <code>null</code> or an empty string leaves the current
+owner unchanged, so return it when the response shows a failed sign-in
+(an upstream that answers a wrong password with <code>200</code> and an error in
+the body, for example). Normalise the identifier yourself, such as
+trimming it or folding its case, when the upstream does.</p>
+<p>While such a sign-in request is being forwarded, the proxy sends nothing
+from the queue, and a resend that started earlier is cancelled before
+its body is sent, so that no request goes out with the new session
+before the owner is known. When the function throws, or the owner
+cannot be determined or saved, the proxy raises
+<code>ProxyEventType.errorOccurred</code> with <code>phase</code> <code>queueOwnerResolve</code> or
+<code>queueOwnerPersist</code> (<code>error</code> carries only the type of the exception,
+because its message may quote the body), treats the signed-in user as a
+new, unknown owner and pauses the queue with
+<code>QueuePauseReason.ownerUnresolved</code>. A later sign-in for which the
+function returns <code>null</code> does not end that pause. When the app ends while
+a sign-in is being forwarded, the next start also treats the signed-in
+user as a new, unknown owner, because the new session cookie may already
+be stored. If the proxy cannot save that a sign-in is in progress, it
+still forwards the sign-in and raises <code>ProxyEventType.errorOccurred</code>
+with <code>phase</code> <code>queueOwnerPersist</code>; an app that ends during that sign-in
+then starts with the previous owner.</p>
+<p>The owner is never stored as given: the proxy keeps an HMAC-SHA256 of
+it, keyed with a key derived from the storage encryption key, and never
+puts it in events or the status endpoint. The current owner survives a
+restart.</p>
+<p><strong>Note</strong>: Requests queued with a session that was signed in before this
+setting was introduced have no owner, so they are protected only after
+the next sign-in. Keep the upstream's own checks as well.</p>
+<p><strong>Example</strong>:</p>
+<pre class="language-dart"><code class="language-dart">queueOwnerResolver: (context) =&gt; switch (context.requestJson) {
+  {'account': final String account} =&gt; account,
+  _ =&gt; null,
+},
+</code></pre>
+<p><strong>Default</strong>: <code>null</code> (owners are not recorded or compared)</p>
+</section>
+
+      
+<section class="summary source-code" id="source">
+  <h2><span>Implementation</span></h2>
+  <pre class="language-dart"><code class="language-dart">final QueueOwnerResolver? queueOwnerResolver;</code></pre>
+</section>
+
+
+</div> <!-- /.main-content -->
+
+<div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+  <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">queueOwnerResolver property</li>
+</ol>
+
+
+  <h5>ProxyConfig class</h5>
+  <div id="dartdoc-sidebar-left-content"></div>
+</div><!--/.sidebar-offcanvas-->
+
+<div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+</div><!--/.sidebar-offcanvas-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.24.0
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../../static-assets/highlight.pack.js?v1"></script>
+<script src="../../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+

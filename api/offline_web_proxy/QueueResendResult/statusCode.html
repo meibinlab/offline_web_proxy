@@ -70,7 +70,9 @@
       
 <section class="desc markdown">
   <p>Status code returned by the upstream.</p>
-<p><code>0</code> when the upstream could not be reached at all.</p>
+<p><code>0</code> when the upstream could not be reached at all, or when the request
+was not sent because it belongs to another user (<code>dropReason</code>
+<code>owner_changed</code>).</p>
 </section>
 
       

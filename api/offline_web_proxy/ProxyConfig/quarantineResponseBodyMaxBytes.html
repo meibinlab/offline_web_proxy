@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
-  <meta name="description" content="API docs for the statusCode property from the QuarantinedRequest class, for the Dart programming language.">
-  <title>statusCode property - QuarantinedRequest class - offline_web_proxy library - Dart API</title>
+  <meta name="description" content="API docs for the quarantineResponseBodyMaxBytes property from the ProxyConfig class, for the Dart programming language.">
+  <title>quarantineResponseBodyMaxBytes property - ProxyConfig class - offline_web_proxy library - Dart API</title>
 
 
   
@@ -30,10 +30,10 @@
   <ol class="breadcrumbs gt-separated dark hidden-xs">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
-    <li><a href="../../offline_web_proxy/QuarantinedRequest-class.html">QuarantinedRequest</a></li>
-    <li class="self-crumb">statusCode property</li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">quarantineResponseBodyMaxBytes property</li>
   </ol>
-  <div class="self-name">statusCode</div>
+  <div class="self-name">quarantineResponseBodyMaxBytes</div>
   <form class="search navbar-right" role="search">
     <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
   </form>
@@ -54,29 +54,52 @@
 <div
     id="dartdoc-main-content"
     class="main-content"
-    data-above-sidebar="offline_web_proxy&#47;QuarantinedRequest-class-sidebar.html"
+    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
     data-below-sidebar="">
     <div>
-<h1><span class="kind-property">statusCode</span> property 
+<h1><span class="kind-property">quarantineResponseBodyMaxBytes</span> property 
 </h1></div>
 
       <section class="multi-line-signature">
         
         <a href="https://api.flutter.dev/flutter/dart-core/int-class.html">int</a>
-        <span class="name ">statusCode</span>
+        <span class="name ">quarantineResponseBodyMaxBytes</span>
         <div class="features"><span class="feature">final</span></div>
 
       </section>
       
 <section class="desc markdown">
-  <p>上流から返されたHTTPステータスコード</p>
-<p>送らずに取り除いた場合（<code>"owner_changed"</code>）は <code>0</code> です。</p>
+  <p>How many bytes of the upstream's answer are kept with a request
+quarantined after a 4xx.</p>
+<p>Without it, <code>QuarantinedRequest.errorMessage</code> only says <code>HTTP 400</code>, and
+the app can only guess why the upstream refused the request. When this
+is above <code>0</code>, the proxy keeps the start of the response body as
+<code>QuarantinedRequest.responseBodyPreview</code>, encrypted with the rest of the
+quarantined request, and counts it toward <a href="../../offline_web_proxy/ProxyConfig/quarantineMaxBytes.html">quarantineMaxBytes</a>, so older
+quarantined requests are moved out sooner. When the text would make a
+single request exceed <a href="../../offline_web_proxy/ProxyConfig/quarantineMaxBytes.html">quarantineMaxBytes</a>, the request is quarantined
+without it rather than losing its body.</p>
+<p>Only bodies whose <code>Content-Type</code> is <code>text/*</code>, <code>application/json</code> or a
+<code>+json</code> type, in UTF-8 or US-ASCII (or without a charset), are kept. A
+gzip body is decompressed first when it is at most 256 KB; other
+encodings are not kept. The text is cut at a character boundary, so it may be a few bytes
+shorter than the limit. Requests moved out for other reasons, and the
+dropped-request history (<a href="../../offline_web_proxy/DropPolicy.html">DropPolicy.drop</a>), keep no body. The text is
+read only through <code>OfflineWebProxy.getQuarantinedRequests()</code>; the admin
+API, events and the status endpoint never carry it.</p>
+<p><strong>Warning</strong>: Error bodies can contain personal data, such as the values
+the user entered. Enable this only when the app needs it, and show the
+text only to the user who sent the request.</p>
+<p>Must be between <code>0</code> and <code>65536</code>; <code>start()</code> rejects other values with a
+<code>ProxyStartException</code>.</p>
+<p><strong>Example</strong>: <code>1024</code>
+<strong>Default</strong>: <code>0</code> (no body is kept)</p>
 </section>
 
       
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">final int statusCode;</code></pre>
+  <pre class="language-dart"><code class="language-dart">final int quarantineResponseBodyMaxBytes;</code></pre>
 </section>
 
 
@@ -93,12 +116,12 @@
 <ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
     <li><a href="../../index.html">offline_web_proxy</a></li>
     <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
-    <li><a href="../../offline_web_proxy/QuarantinedRequest-class.html">QuarantinedRequest</a></li>
-    <li class="self-crumb">statusCode property</li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">quarantineResponseBodyMaxBytes property</li>
 </ol>
 
 
-  <h5>QuarantinedRequest class</h5>
+  <h5>ProxyConfig class</h5>
   <div id="dartdoc-sidebar-left-content"></div>
 </div><!--/.sidebar-offcanvas-->
 
