@@ -20,6 +20,7 @@ It runs on 127.0.0.1, forwards requests to one configured upstream origin while 
 - AES-256 encrypted persistence of cookies, the queue, the quarantine store and the dropped history, with cookie restore support
 - Verification of stored data against the encryption key, and a recovery API for a lost key
 - Retention limits for the quarantine store and the dropped history (count, age and total size)
+- Option for shared devices to never send one user's queued requests under the session of another user who signs in (`queueOwnerResolver`)
 - WebView navigation helper APIs for same-origin, external, and new-window flows
 - Option to limit access to the proxy to the WebView with a per-start secret (`requireAccessToken`)
 - Connection recovery that verifies responsiveness on resume and rebinds automatically
@@ -197,6 +198,7 @@ const config = ProxyConfig(
   quarantineMaxCount: 1000,
   quarantineRetention: Duration(days: 30),
   quarantineMaxBytes: 20 * 1024 * 1024,
+  quarantineResponseBodyMaxBytes: 0,
   droppedRequestMaxCount: 1000,
   droppedRequestRetention: Duration(days: 30),
   enableIdempotencyKey: true,
@@ -274,6 +276,11 @@ Notes:
 - `queuedResponse` and `offlineMissResponse` define the responses the proxy generates itself. Both default to JSON so that `response.json()` succeeds in the web app.
 - `dropPolicy` decides what happens to an update request the upstream rejected with 4xx (other than the codes listed in `authRequiredStatusCodes`). 408 and 429 are temporary and are retried like a 5xx instead; a `Retry-After` is honoured (up to one hour), and nothing else is sent from the queue during a 429. A 303 is taken as delivered. The default `quarantine` keeps it, body included, so `getQuarantinedRequests()` can surface it for a resend-or-discard decision (a request that alone exceeds `quarantineMaxBytes` is not quarantined; it is recorded in the dropped history as `quarantine_too_large`, without its body). `drop` discards it and keeps only a history entry, as before.
 - `quarantineMaxCount` (1000 by default), `quarantineRetention` (30 days), `quarantineMaxBytes` (20 MB), `droppedRequestMaxCount` (1000) and `droppedRequestRetention` (30 days) limit what the quarantine store and the dropped history keep. `0` (`Duration.zero`) removes a limit, and a negative value makes `start()` throw `ProxyStartException`. See [Retention limits for quarantine and dropped history](#retention-limits-for-quarantine-and-dropped-history).
+- `quarantineResponseBodyMaxBytes` above 0 keeps the start of the refusing response body as `QuarantinedRequest.responseBodyPreview` when a resend is quarantined after a 4xx, so that the app can check why the upstream refused it. The default is `0` (nothing kept), and a value outside 0 to 65536 makes `start()` throw `ProxyStartException`.
+  - Only bodies whose `Content-Type` is `text/*`, `application/json` or a `+json` type, in UTF-8 or US-ASCII (or without a charset), are kept. A gzip body is decompressed first when it is at most 256 KB; other `Content-Encoding` values keep nothing. The text is never cut inside a UTF-8 character, so it may be a few bytes shorter than the limit.
+  - It is encrypted with the quarantined request and counted toward `quarantineMaxBytes`, so older quarantined requests are moved out sooner. When the text would make a single request exceed `quarantineMaxBytes`, the request is quarantined without it.
+  - It is read only through `getQuarantinedRequests()`; the admin API list, events, the status endpoint and the dropped history never carry it. It is removed when `retryQuarantinedRequest()` sends the request again.
+  - **It can contain personal data, such as the values the user entered.** Enable it only when needed, and show it only to the user who sent the request.
 - `enableIdempotencyKey` attaches an idempotency key to update requests. The first forward and every resend carry the same key, so a request whose response was lost is not applied twice. **Deduplication itself must be implemented on the upstream server.**
 - `forceCachePaths` lists the paths stored even when the response says `Cache-Control: no-store`. On a server that sends `no-store` everywhere, the default policy leaves nothing to serve offline. It is empty by default, and there is deliberately no switch that relaxes `no-store` handling proxy-wide.
   - Even on a match, a response carrying `Set-Cookie`, a response carrying `Vary` (unless it names `Accept-Encoding` alone), or a request carrying `Authorization`, is not stored. A skipped response raises `ProxyEventType.cacheSkipped` with the reason, so a path that never becomes available offline can be diagnosed.
@@ -300,6 +307,7 @@ Notes:
   - A request that signing in does not fix is moved out with `skipPausedRequest()`, to the quarantine store or the dropped history according to `dropPolicy` (reason `authentication_required`), and the rest are sent.
   - Codes from 300 to 499 are accepted, so a redirect to the sign-in page (such as `302`) can be listed. Unless listed, a `303` is taken as delivered, so list `303` when the upstream answers an expired session with it. **A code that is also returned for other reasons, such as `403` for a missing permission, pauses the queue on a request that signing in cannot fix.** So does a request that carries a CSRF token of the old session.
   - The pause is not persisted. It ends when the proxy stops, and the next start sends from the head of the queue again.
+- `queueOwnerResolver` tells who signed in, so that queued requests of another user are never sent. It is `null` by default (the behavior of 0.24.0) and requires `authResumePaths`. See [Shared devices](#shared-devices).
 - `enableAcceptedAtHeader` and `acceptedAtHeaderName` tell the upstream when the proxy first accepted a request. The same UTC ISO 8601 value is sent on the first forward and on every resend, so the upstream needs one rule — use this header when the payload carries no business timestamp — to stop offline sales from being recorded at reconnection time. Enabled by default.
   - The value survives a quarantine retry. `queuedAt` cannot be reused because a retry updates it.
   - **The value comes from the device clock.** A device whose clock is wrong while offline reports a wrong time.
@@ -320,6 +328,32 @@ Notes:
   - The box keys (the SHA-256 of the normalized URL) stay readable.
 - `cacheTtl` and `cacheStale` **replace** the default maps rather than merging with them. Always keep a `default` entry so that unlisted content types still resolve.
 - `text/html` defaults to a 1 hour TTL and a 1 day stale period, so a page drops out of the fallback set roughly 25 hours after it was last fetched online. **Long offline operation requires tuning both `cacheTtl` and `cacheStale`.** `cacheStale` has no JavaScript entry, so scripts fall back to `default` (3 days).
+
+### Shared devices
+
+In a business app used by several people on one device, user A may leave queued requests behind and user B may then sign in. A resend uses the cookies at the time it is sent, so A's updates would be sent with B's session. With `queueOwnerResolver`, the proxy tells the user from the sign-in request and response, and removes queued requests of another owner without sending them.
+
+```dart
+final config = ProxyConfig(
+  origin: 'https://api.example.com',
+  authRequiredStatusCodes: {401},
+  authResumePaths: ['/api/login.json'],
+  // Tell the user from the sign-in body {"account": "..."}
+  queueOwnerResolver: (context) => switch (context.requestJson) {
+    {'account': final String account} => account,
+    _ => null, // Unknown (a failed sign-in, for example): keep the owner
+  },
+);
+```
+
+- The function is called synchronously when a request matching `authResumePaths` is answered with a 2xx or 3xx by the upstream. It receives the request and the response (with the decoded body) as a `QueueOwnerContext`, readable through `requestJson`, `responseJson`, `requestFormFields`, `requestHeader()`, `responseHeader()` and so on.
+- A non-empty string becomes the current owner. `null` or an empty string leaves the current owner unchanged; return it when the server answers a failed sign-in with `200`.
+- The owner at the time a request is queued is recorded with it and compared with the current owner right before each resend. When they differ, the request is not sent and leaves the queue according to `dropPolicy`, with the reason `owner_changed` and status code `0`. `requestQuarantined` / `requestDropped` and `recentResendResults` report it. It can be sent again with `retryQuarantinedRequest()` after its owner signs in again.
+- A request whose owner, or the current owner, is unknown (queued before this setting was used, or while nobody was signed in) is sent as before.
+- Nothing is sent from the queue while a sign-in is being forwarded.
+- When the function throws, or the owner cannot be determined or saved, `errorOccurred` (`phase: queueOwnerResolve` / `queueOwnerPersist`) is raised, the signed-in user is treated as an unknown owner, and the queue pauses with `ownerUnresolved`. `resumeQueue()`, or a later sign-in resolved to an owner, resumes it. After a restart, requests of a known owner are moved out as `owner_changed` without waiting for the user.
+- The identifier is never stored as given: only its HMAC-SHA256 is kept, and it never appears in events, the status endpoint or the admin API. The current owner survives a restart.
+- **Requests queued with a session signed in before this setting was introduced are not protected until the next sign-in.** Keep the upstream's own checks as well.
 
 ### Handling offline responses in the web app
 
@@ -533,7 +567,7 @@ for (final result in proxy.recentResendResults) {
 }
 ```
 
-The outcomes are held in memory for monitoring only and are lost when the app process ends.
+`statusCode` is `0` when the upstream could not be reached, and when the request was not sent because it belongs to another owner (`dropReason` `owner_changed`). The outcomes are held in memory for monitoring only and are lost when the app process ends.
 
 ## Reading the proxy state from the web app
 
@@ -570,7 +604,7 @@ The response looks like this.
 }
 ```
 
-- `queuePausedReason` tells why sending from the queue is stopped: `null` when it is not, `"authenticationRequired"` while it waits for a sign-in (`authRequiredStatusCodes`), `"rateLimited"` while it is held after the upstream answered 429. The page can use `"authenticationRequired"` to ask the user to sign in.
+- `queuePausedReason` tells why sending from the queue is stopped: `null` when it is not, `"authenticationRequired"` while it waits for a sign-in (`authRequiredStatusCodes`), `"rateLimited"` while it is held after the upstream answered 429, `"ownerUnresolved"` while `queueOwnerResolver` could not tell who signed in. The page can use `"authenticationRequired"` to ask the user to sign in.
 - `queuePausedUntil` is when sending resumes (UTC ISO 8601) for `"rateLimited"`, `null` otherwise.
 - `GET` only, never forwarded upstream, excluded from statistics, and omitted from the request log.
 - Only callers on the proxy's own origin are served. A request carrying another `Origin` is answered with `403`, and `Access-Control-Allow-Origin: *` is never attached.
@@ -615,7 +649,7 @@ A sale quarantined by a 4xx is resent once the cause — a closed stocktake, for
 | `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | Put one back on the queue |
 | `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | Discard one |
 
-- The list is ordered by `quarantinedAt`, oldest first, and every item carries `pendingMigration`.
+- The list is ordered by `quarantinedAt`, oldest first, and every item carries `pendingMigration`. The start of the response body kept by `quarantineResponseBodyMaxBytes` is not included.
 - Responses to resending and discarding:
   - Success: `200` with `{"retried": true}` or `{"discarded": true}`
   - No matching item: `404`
@@ -785,15 +819,15 @@ The proxy stores data in Hive boxes and in secure storage. In an encrypted box o
 | Location | Content | Encryption | Retention |
 | --- | --- | --- | --- |
 | `proxy_cookies_secure` | Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on (the SHA-256 when over 255 bytes in UTF-8) | Values only (AES-256) | An expired cookie is removed when the cookies to send are looked up. `clearCookies()` removes them |
-| `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
-| `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default |
+| `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on; the HMAC of the owner when `queueOwnerResolver` is set). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
+| `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason. With `quarantineResponseBodyMaxBytes` set, also the start of the refusing response body | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default |
 | `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
 | `proxy_cache_index_secure`, `proxy_cache_body_secure` | Response cache (the default). The metadata box (`proxy_cache_index_secure`) holds the status code, stored time, expiry, Content-Type and body size; the body box (`proxy_cache_body_secure`) holds the headers and body. Keys are the SHA-256 of the normalized URL | Values only (AES-256) | Entries past their stale period and entries beyond `cacheMaxSize` are removed. Deleted, never restored in plain form, when `encryptResponseCache` is switched off |
 | `proxy_cache_index`, `proxy_cache_body` | Response cache when `encryptResponseCache` is `false`. Same content and keys as the encrypted pair | None | Same as the encrypted pair. Moved into the encrypted pair and deleted once `encryptResponseCache` is enabled |
 | `proxy_cache`, `proxy_cache_secure` | Response cache of 0.21.0 and earlier, holding the metadata and body in one value. `proxy_cache_secure` is the one written by 0.21.0 with `encryptResponseCache` enabled | `proxy_cache`: none; `proxy_cache_secure`: values only (AES-256) | Moved into the new pair and deleted at startup. With `encryptResponseCache` off, `proxy_cache_secure` is deleted without being moved |
 | `proxy_web_storage` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on | None | Until the next snapshot overwrites it |
 | `proxy_idempotency` | Idempotency keys that reached the upstream (the SHA-256 when over 255 bytes in UTF-8), with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
-| `proxy_port_preferences` | The port last bound for each host | None | Until the next bind overwrites it |
+| `proxy_port_preferences` | The port last bound for each host. With `queueOwnerResolver` set, also the HMAC of the current owner, a fingerprint of the key, and whether a sign-in is being forwarded | None | Ports: until the next bind overwrites them. Owner: until it is saved again; a value whose key fingerprint does not match is deleted at startup |
 | `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store, the dropped history (and the response cache when encrypted) | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or an unusable key (missing, unreadable or invalid) is replaced by a new one. A new key is written when no queue, quarantine or dropped-history box has content (see [When the encryption key is lost](#when-the-encryption-key-is-lost)) |
 | `proxy_queue`, `proxy_quarantined_requests`, `proxy_dropped_requests`, `proxy_cookies` | Content stored in the clear by 0.14.0 or earlier (cookies: before 0.4.0) | None | Deleted after migration to the encrypted boxes. The old queue, quarantine and dropped-history boxes are emptied before deletion |
 
@@ -803,7 +837,7 @@ The proxy stores data in Hive boxes and in secure storage. In an encrypted box o
 | --- | --- | --- |
 | `quarantineMaxCount` | 1000 | Moves the oldest requests beyond the limit to the dropped history (`dropReason: quarantine_limit`) |
 | `quarantineRetention` | 30 days | Moves requests older than this, counted from `quarantinedAt`, to the dropped history (`quarantine_expired`) |
-| `quarantineMaxBytes` | 20 MB | Estimated total of bodies and headers. Moves the oldest requests beyond it to the dropped history (`quarantine_limit`) |
+| `quarantineMaxBytes` | 20 MB | Estimated total of bodies, headers and the kept start of response bodies. Moves the oldest requests beyond it to the dropped history (`quarantine_limit`) |
 | `droppedRequestMaxCount` | 1000 | Removes the oldest acknowledged entries beyond the limit. Unacknowledged entries are never removed by count |
 | `droppedRequestRetention` | 30 days | Removes entries older than this, counted from `droppedAt`, acknowledged or not |
 
@@ -980,7 +1014,7 @@ Reference it from `android/app/src/main/AndroidManifest.xml`:
 - `ProxyConfig` is the supported configuration path. External YAML configuration loading is not implemented.
 - Static resources under `assets/static/` are served for `GET` and `HEAD` only. An update request on the same path is forwarded upstream instead. Range requests are not supported.
 - If `AssetManifest.json` or its runtime equivalent cannot be loaded, the proxy continues with no indexed static resources and falls back to normal upstream resolution.
-- Using several `OfflineWebProxy` instances at the same time in one app is not supported. Storage initialization and recovery are serialized across instances within one isolate, but the exclusion for queue draining, retention limits and migration belongs to each instance. When the proxy is used from several isolates at once, even storage initialization and recovery are not serialized.
+- Using several `OfflineWebProxy` instances at the same time in one app is not supported. Storage initialization and recovery are serialized across instances within one isolate, but the exclusion for queue draining, retention limits and migration, and the owner of queued requests (`queueOwnerResolver`), belong to each instance. Cookies are shared across instances, so a sign-in through one instance changes the session of the others as well. **The queue of another instance may therefore send requests of the previous owner with the new session (`queueOwnerResolver` does not protect them).** When the proxy is used from several isolates at once, even storage initialization and recovery are not serialized.
 
 ## Example and Reference
 

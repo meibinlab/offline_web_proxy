@@ -29,10 +29,15 @@ class QuarantinedRequest {
   /// 隔離理由
   ///
   /// 上流が 4xx で拒否した場合は `"4xx_error"`、キューを一時停止させた要求を
-  /// `skipPausedRequest()` で取り除いた場合は `"authentication_required"` です。
+  /// `skipPausedRequest()` で取り除いた場合は `"authentication_required"`、
+  /// `ProxyConfig.queueOwnerResolver` を指定していて、ログインし直した
+  /// 利用者が要求の持ち主と違うため送らなかった場合は `"owner_changed"`
+  /// です。
   final String reason;
 
   /// 上流から返されたHTTPステータスコード
+  ///
+  /// 送らずに取り除いた場合（`"owner_changed"`）は `0` です。
   final int statusCode;
 
   /// 詳細なエラーメッセージ
@@ -51,6 +56,16 @@ class QuarantinedRequest {
   /// `enableIdempotencyKey` が `false` の間に受け付けたリクエストでは `null` です。
   final String? idempotencyKey;
 
+  /// 上流が拒否した応答の本文の先頭
+  ///
+  /// `ProxyConfig.quarantineResponseBodyMaxBytes` が 0 より大きい場合に、
+  /// 4xx で隔離した要求だけに入ります。それ以外の場合、本文が対象外の
+  /// 種類や圧縮方式だった場合、受信の締め切りや解凍の失敗で読めなかった
+  /// 場合、先頭を含めると 1 件で `ProxyConfig.quarantineMaxBytes` を超える
+  /// ため外した場合は `null` です。個人情報を含み得るため、管理 API の
+  /// 隔離の一覧には含めません。扱いに注意してください。
+  final String? responseBodyPreview;
+
   const QuarantinedRequest({
     required this.id,
     required this.url,
@@ -63,6 +78,7 @@ class QuarantinedRequest {
     required this.errorMessage,
     this.pendingMigration = false,
     this.idempotencyKey,
+    this.responseBodyPreview,
   });
 
   @override

@@ -1,6 +1,7 @@
 import 'drop_policy.dart';
 import 'proxy_response_config.dart';
 import 'queue_exclude_rule.dart';
+import 'queue_owner_context.dart';
 
 /// Configuration settings for the [OfflineWebProxy] server.
 ///
@@ -589,6 +590,68 @@ class ProxyConfig {
   /// **Default**: `[]` (only `resumeQueue()` resumes the queue)
   final List<String> authResumePaths;
 
+  /// Function that tells who signed in, so that queued updates are never sent
+  /// under another user's session.
+  ///
+  /// When users share a device, a queued update may still be waiting when a
+  /// different user signs in, and resending it with the new session would
+  /// apply it to that user's data. With this function set, the proxy records
+  /// the current owner with each request it queues, and compares it with the
+  /// current owner right before each resend. A request whose owner differs
+  /// is not sent: it leaves the queue as described in [dropPolicy], with the
+  /// reason `owner_changed` and status code `0`, so that the app can tell the
+  /// user and resend it after the right user signs in again
+  /// (`retryQuarantinedRequest()` keeps the owner). A request without a
+  /// recorded owner, such as one queued before this setting was used or
+  /// before anyone signed in, is sent as before.
+  ///
+  /// The function is called when a request matching [authResumePaths] is
+  /// answered with a 2xx or 3xx by the upstream. A non-empty return value
+  /// becomes the current owner. `null` or an empty string leaves the current
+  /// owner unchanged, so return it when the response shows a failed sign-in
+  /// (an upstream that answers a wrong password with `200` and an error in
+  /// the body, for example). Normalise the identifier yourself, such as
+  /// trimming it or folding its case, when the upstream does.
+  ///
+  /// While such a sign-in request is being forwarded, the proxy sends nothing
+  /// from the queue, and a resend that started earlier is cancelled before
+  /// its body is sent, so that no request goes out with the new session
+  /// before the owner is known. When the function throws, or the owner
+  /// cannot be determined or saved, the proxy raises
+  /// `ProxyEventType.errorOccurred` with `phase` `queueOwnerResolve` or
+  /// `queueOwnerPersist` (`error` carries only the type of the exception,
+  /// because its message may quote the body), treats the signed-in user as a
+  /// new, unknown owner and pauses the queue with
+  /// `QueuePauseReason.ownerUnresolved`. A later sign-in for which the
+  /// function returns `null` does not end that pause. When the app ends while
+  /// a sign-in is being forwarded, the next start also treats the signed-in
+  /// user as a new, unknown owner, because the new session cookie may already
+  /// be stored. If the proxy cannot save that a sign-in is in progress, it
+  /// still forwards the sign-in and raises `ProxyEventType.errorOccurred`
+  /// with `phase` `queueOwnerPersist`; an app that ends during that sign-in
+  /// then starts with the previous owner.
+  ///
+  /// The owner is never stored as given: the proxy keeps an HMAC-SHA256 of
+  /// it, keyed with a key derived from the storage encryption key, and never
+  /// puts it in events or the status endpoint. The current owner survives a
+  /// restart.
+  ///
+  /// **Note**: Requests queued with a session that was signed in before this
+  /// setting was introduced have no owner, so they are protected only after
+  /// the next sign-in. Keep the upstream's own checks as well.
+  ///
+  /// **Example**:
+  ///
+  /// ```dart
+  /// queueOwnerResolver: (context) => switch (context.requestJson) {
+  ///   {'account': final String account} => account,
+  ///   _ => null,
+  /// },
+  /// ```
+  ///
+  /// **Default**: `null` (owners are not recorded or compared)
+  final QueueOwnerResolver? queueOwnerResolver;
+
   /// Whether the proxy tells the upstream when it first accepted an update.
   ///
   /// A request stored while offline reaches the upstream only after the
@@ -778,6 +841,38 @@ class ProxyConfig {
   ///
   /// **Default**: `20 * 1024 * 1024` (20 MB)
   final int quarantineMaxBytes;
+
+  /// How many bytes of the upstream's answer are kept with a request
+  /// quarantined after a 4xx.
+  ///
+  /// Without it, `QuarantinedRequest.errorMessage` only says `HTTP 400`, and
+  /// the app can only guess why the upstream refused the request. When this
+  /// is above `0`, the proxy keeps the start of the response body as
+  /// `QuarantinedRequest.responseBodyPreview`, encrypted with the rest of the
+  /// quarantined request, and counts it toward [quarantineMaxBytes], so older
+  /// quarantined requests are moved out sooner. When the text would make a
+  /// single request exceed [quarantineMaxBytes], the request is quarantined
+  /// without it rather than losing its body.
+  ///
+  /// Only bodies whose `Content-Type` is `text/*`, `application/json` or a
+  /// `+json` type, in UTF-8 or US-ASCII (or without a charset), are kept. A
+  /// gzip body is decompressed first when it is at most 256 KB; other
+  /// encodings are not kept. The text is cut at a character boundary, so it may be a few bytes
+  /// shorter than the limit. Requests moved out for other reasons, and the
+  /// dropped-request history ([DropPolicy.drop]), keep no body. The text is
+  /// read only through `OfflineWebProxy.getQuarantinedRequests()`; the admin
+  /// API, events and the status endpoint never carry it.
+  ///
+  /// **Warning**: Error bodies can contain personal data, such as the values
+  /// the user entered. Enable this only when the app needs it, and show the
+  /// text only to the user who sent the request.
+  ///
+  /// Must be between `0` and `65536`; `start()` rejects other values with a
+  /// `ProxyStartException`.
+  ///
+  /// **Example**: `1024`
+  /// **Default**: `0` (no body is kept)
+  final int quarantineResponseBodyMaxBytes;
 
   /// Maximum number of entries kept in the dropped-request history.
   ///
@@ -999,6 +1094,7 @@ class ProxyConfig {
     this.queueExcludePaths = const [],
     this.authRequiredStatusCodes = const {},
     this.authResumePaths = const [],
+    this.queueOwnerResolver,
     this.enableAcceptedAtHeader = true,
     this.acceptedAtHeaderName = 'X-Offline-Accepted-At',
     this.enableReplayHeader = true,
@@ -1009,6 +1105,7 @@ class ProxyConfig {
     this.quarantineMaxCount = 1000,
     this.quarantineRetention = const Duration(days: 30),
     this.quarantineMaxBytes = 20 * 1024 * 1024,
+    this.quarantineResponseBodyMaxBytes = 0,
     this.droppedRequestMaxCount = 1000,
     this.droppedRequestRetention = const Duration(days: 30),
     this.queuedResponse = const ProxyResponseConfig(

@@ -20,6 +20,7 @@ offline_web_proxy は Flutter WebView 向けのローカル HTTP プロキシで
 - AES-256 による Cookie、キュー、隔離、ドロップ履歴の暗号化保存と、Cookie の復元 API
 - 暗号化鍵と保存データの照合と、鍵を失った場合の復旧 API
 - 隔離とドロップ履歴の保持上限（件数、期間、合計バイト数）
+- 端末を共用する場合に、別の利用者の送信待ちをログインし直した利用者のセッションで送らない設定（`queueOwnerResolver`）
 - same-origin、外部委譲、新規 window 判定のための WebView 補助 API
 - 起動ごとの秘密値で proxy への到達を WebView に限る設定（`requireAccessToken`）
 - サスペンド復帰時の稼働確認と自動再バインドによる接続復旧
@@ -197,6 +198,7 @@ const config = ProxyConfig(
   quarantineMaxCount: 1000,
   quarantineRetention: Duration(days: 30),
   quarantineMaxBytes: 20 * 1024 * 1024,
+  quarantineResponseBodyMaxBytes: 0,
   droppedRequestMaxCount: 1000,
   droppedRequestRetention: Duration(days: 30),
   enableIdempotencyKey: true,
@@ -274,6 +276,11 @@ const config = ProxyConfig(
 - `queuedResponse` と `offlineMissResponse` は、proxy が自分で生成する応答の内容です。既定はどちらも JSON で、Web アプリ側の `response.json()` が成功します。
 - `dropPolicy` は、上流が 4xx で拒否した更新系リクエストの扱いです（`authRequiredStatusCodes` に指定した状態コードを除く）。408 と 429 は一時的な状態のため取り除かず、5xx と同じく再試行します。`Retry-After` があれば（1 時間を上限に）その時刻まで待ち、429 の間はキュー全体の送信を控えます。303 は届いたものとみなします。既定の `quarantine` では本文を保持したまま隔離し、`getQuarantinedRequests()` で確認して再送または破棄を判断できます（1 件で `quarantineMaxBytes` を超える要求は隔離せず、本文を捨ててドロップ履歴へ `quarantine_too_large` で記録します）。`drop` を指定すると従来どおり破棄し、履歴のみ残します。
 - `quarantineMaxCount`（既定 1000 件）、`quarantineRetention`（既定 30 日）、`quarantineMaxBytes`（既定 20 MB）、`droppedRequestMaxCount`（既定 1000 件）、`droppedRequestRetention`（既定 30 日）は、隔離とドロップ履歴の保持上限です。`0`（`Duration.zero`）を指定するとその上限は無くなり、負の値を指定すると `start()` が `ProxyStartException` を投げます。「隔離とドロップ履歴の保持上限」を参照してください。
+- `quarantineResponseBodyMaxBytes` を 0 より大きくすると、キューからの再送が 4xx で隔離されたときに、断られた応答の本文の先頭を `QuarantinedRequest.responseBodyPreview` に残します。上流が拒否した理由を確かめるために使います。既定は `0`（残さない）で、0〜65536 の範囲外は `start()` が `ProxyStartException` を投げます。
+  - 対象は `Content-Type` が `text/*`、`application/json`、`+json` の種類で、文字コードが UTF-8・US-ASCII・指定なしの本文です。gzip は 256 KB までなら解凍してから先頭を取り、それ以外の `Content-Encoding` は残しません。UTF-8 の文字の途中では切らないため、上限より数バイト短くなることがあります。
+  - 隔離と一緒に暗号化して保存し、`quarantineMaxBytes` の合計に含めます（古い隔離が早く追い出されやすくなります）。先頭を含めると 1 件で `quarantineMaxBytes` を超える場合は、先頭を外して隔離します。
+  - 読めるのは `getQuarantinedRequests()` だけで、管理 API の一覧、イベント、状態通知、ドロップ履歴には出しません。`retryQuarantinedRequest()` で送り直すときに消します。
+  - **個人情報（利用者が入力した値など）が入り得ます。** 必要なときだけ有効にし、要求を送った本人にだけ見せてください。
 - `enableIdempotencyKey` は更新系リクエストへのべき等性キー付与です。最初の転送と再送で同じキーを送るため、応答を受け取れなかったリクエストが再送で二重に適用されることを上流側で防げます。**重複の排除自体は上流サーバでの実装が必要です。**
 - `forceCachePaths` は `Cache-Control: no-store` を無視して保存するパスです。全応答に `no-store` を付与するサーバでは、既定のままだとオフラインで返せる応答が残りません。既定は空で、指定が無い限り従来どおり保存しません。全体を一括で無効化する設定は用意していません。
   - 一致しても、応答に `Set-Cookie` がある場合、応答に `Vary` がある場合（`Accept-Encoding` だけを指す場合を除く）、またはリクエストに `Authorization` がある場合は保存しません。除外したときは `ProxyEventType.cacheSkipped` を理由付きで発行するため、オフラインで使えない原因を追跡できます。
@@ -300,6 +307,7 @@ const config = ProxyConfig(
   - ログインし直しても通らない要求は、`skipPausedRequest()` で `dropPolicy` に従って隔離またはドロップ履歴へ移し（理由は `authentication_required`）、残りを送ります。
   - 指定できるのは 300〜499 です。ログイン画面へのリダイレクト（`302` など）も指定できます。指定しない場合、`303` は届いたものとみなすため、セッション切れを `303` で返す上流では `303` を指定してください。**権限不足でも返る `403` のような状態コードを指定すると、ログインで解決しない要求でキューが止まります。** 古いセッションの CSRF トークンを含む要求も同じです。
   - 一時停止の状態は保存しません。proxy を停止すると解除し、次の起動では先頭から送り直します。
+- `queueOwnerResolver` は、ログインした利用者を判定して、別の利用者の送信待ちを送らないための設定です。既定は `null`（0.24.0 と同じ動き）で、指定する場合は `authResumePaths` が必要です。「端末を共用する場合」を参照してください。
 - `enableAcceptedAtHeader` と `acceptedAtHeaderName` は、proxy が最初にリクエストを受け付けた時刻を上流へ伝える設定です。初回転送と以降の再送で同じ値（UTC の ISO 8601）を送るため、上流は「業務日時が未指定ならこのヘッダを使う」と 1 箇所で実装できます。オフラインで積んだ会計が復帰時刻で記録される問題を避けられます。既定で有効です。
   - 隔離からの再送でも値は変わりません。`queuedAt` は再送のたびに更新されるため流用できません。
   - **値は端末の時計に依存します。** オフライン中に時計がずれた端末は、ずれた時刻を報告します。
@@ -320,6 +328,32 @@ const config = ProxyConfig(
   - Box のキー（正規化した URL の SHA-256）は平文のままです。
 - `cacheTtl` と `cacheStale` は、指定すると既定のマップとマージされず**丸ごと置き換わります**。未掲載の Content-Type が `default` へ落ちるよう、`default` は必ず含めてください。
 - `text/html` の既定は TTL 1 時間、stale 1 日です。最後にオンラインで取得してから約 25 時間でフォールバック対象から外れるため、**長期のオフライン運用では `cacheTtl` と `cacheStale` の設定が必要です**。`cacheStale` には JavaScript のキーが無く、スクリプトは `default`（3 日）になります。
+
+### 端末を共用する場合
+
+複数の利用者が同じ端末を使う業務アプリでは、利用者 A の送信待ちが残ったまま、利用者 B がログインし直すことがあります。再送は送る時点の Cookie を使うため、そのままでは A の更新が B のセッションで送られます。`queueOwnerResolver` を指定すると、ログインの要求と応答から利用者を判定し、持ち主が違う送信待ちを送らずに取り除きます。
+
+```dart
+final config = ProxyConfig(
+  origin: 'https://api.example.com',
+  authRequiredStatusCodes: {401},
+  authResumePaths: ['/api/login.json'],
+  // ログインの要求の本文 {"account": "..."} から利用者を判定する
+  queueOwnerResolver: (context) => switch (context.requestJson) {
+    {'account': final String account} => account,
+    _ => null, // 判定できない場合（ログインの失敗など）は持ち主を変えない
+  },
+);
+```
+
+- 判定関数は、`authResumePaths` に一致する要求に上流が 2xx か 3xx を返したときに、同期で呼ばれます。`QueueOwnerContext` で要求と応答（解凍済みの本文）を受け取り、`requestJson`、`responseJson`、`requestFormFields`、`requestHeader()`、`responseHeader()` などで読めます。
+- 空でない文字列を返すと、現在の持ち主になります。`null` か空文字列を返すと、現在の持ち主を変えません。ログインの失敗を `200` で返すサーバでは `null` を返してください。
+- キューへ入れるときにその時点の持ち主を記録し、再送の直前に現在の持ち主と比べます。違う場合は送らずに `dropPolicy` に従って隔離またはドロップ履歴へ移し、理由は `owner_changed`、状態コードは `0` です。`requestQuarantined` / `requestDropped` と `recentResendResults` で気付けます。持ち主がログインし直した後に `retryQuarantinedRequest()` で送り直せます。
+- どちらかの持ち主が分からない要求（この設定を使う前や、誰もログインしていない間に入れた要求）は、従来どおり送ります。
+- ログインを転送している間は、キューから送りません。
+- 判定関数が例外を投げた場合と、持ち主を決められない・保存できない場合は、`errorOccurred`（`phase: queueOwnerResolve` / `queueOwnerPersist`）を出し、ログインした利用者を正体の分からない持ち主とみなして、キューを `ownerUnresolved` で止めます。`resumeQueue()` か、持ち主が決まる次のログインで再開します。止めた後に起動し直すと、利用者の操作を待たずに、持ち主が分かっている要求が `owner_changed` で移ります。
+- 識別子はそのまま保存せず、HMAC-SHA256 だけを持ちます。イベント、状態通知、管理 API には出しません。現在の持ち主は起動し直しても引き継ぎます。
+- **この設定を使う前にログインしたセッションで溜まった送信待ちは、次のログインまで保護されません。** 上流側の本人確認も残してください。
 
 ### Web アプリ側でのオフライン応答の扱い
 
@@ -533,7 +567,7 @@ for (final result in proxy.recentResendResults) {
 }
 ```
 
-結果は監視用にメモリ上へ保持するだけで、永続化しません。アプリのプロセスが終了すると失われます。
+`statusCode` が `0` になるのは、上流へ到達できなかった場合と、持ち主が違うため送らなかった場合（`dropReason` が `owner_changed`）です。結果は監視用にメモリ上へ保持するだけで、永続化しません。アプリのプロセスが終了すると失われます。
 
 ## Web アプリから proxy の状態を見る
 
@@ -570,7 +604,7 @@ if (!status.isOnline) {
 }
 ```
 
-- `queuePausedReason` は、キューの送信を止めている理由です。止めていなければ `null`、認証待ち（`authRequiredStatusCodes`）なら `"authenticationRequired"`、上流が 429 を返して控えているなら `"rateLimited"` です。`"authenticationRequired"` は、画面にログインを促す表示を出す判断に使えます。
+- `queuePausedReason` は、キューの送信を止めている理由です。止めていなければ `null`、認証待ち（`authRequiredStatusCodes`）なら `"authenticationRequired"`、上流が 429 を返して控えているなら `"rateLimited"`、`queueOwnerResolver` が利用者を判定できずに止めているなら `"ownerUnresolved"` です。`"authenticationRequired"` は、画面にログインを促す表示を出す判断に使えます。
 - `queuePausedUntil` は、`"rateLimited"` の場合に送信を再開する時刻（UTC の ISO 8601）です。それ以外は `null` です。
 - `GET` のみで、上流へは転送されず、統計にも計上されず、要求ログにも出力されません。
 - proxy 自身の origin からの要求だけを受け付けます。別 origin の `Origin` を伴う要求には `403` を返し、`Access-Control-Allow-Origin: *` も付与しません。
@@ -615,7 +649,7 @@ for (const item of (await response.json()).requests) {
 | `POST` | `/__offline_web_proxy/admin/quarantine/<id>/retry` | キューへ戻して再送 |
 | `DELETE` | `/__offline_web_proxy/admin/quarantine/<id>` | 破棄 |
 
-- 一覧は隔離した日時（`quarantinedAt`）の古い順に並び、各項目は `pendingMigration` を持ちます。
+- 一覧は隔離した日時（`quarantinedAt`）の古い順に並び、各項目は `pendingMigration` を持ちます。`quarantineResponseBodyMaxBytes` で残した応答本文の先頭は含みません。
 - 再送と破棄の応答は次のとおりです。
   - 成功: `200`（`{"retried": true}` または `{"discarded": true}`）
   - 該当が無い: `404`
@@ -785,15 +819,15 @@ proxy は Hive の Box と secure storage にデータを保存します。暗�
 | 保存先 | 内容 | 暗号化 | 保持期間 |
 | --- | --- | --- | --- |
 | `proxy_cookies_secure` | Cookie（名前、値、ドメイン、パス、有効期限、属性）。キーはドメイン、パス、名前など（UTF-8 で 255 バイトを超える場合は SHA-256） | 値のみ（AES-256） | 有効期限を過ぎたものは、送信する Cookie を探すときに削除。`clearCookies()` で削除 |
-| `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
-| `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限 |
+| `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど。`queueOwnerResolver` を指定した場合は持ち主の HMAC）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
+| `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの。`quarantineResponseBodyMaxBytes` を指定した場合は、断られた応答の本文の先頭も加える | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限 |
 | `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
 | `proxy_cache_index_secure`、`proxy_cache_body_secure` | 応答キャッシュ（既定）。メタデータの Box（`proxy_cache_index_secure`）にステータスコード・保存日時・有効期限・Content-Type・本文の大きさを、本文の Box（`proxy_cache_body_secure`）にヘッダと本文を保存する。キーは正規化した URL の SHA-256 | 値のみ（AES-256） | stale 期間を過ぎたものと、`cacheMaxSize` を超えた分を削除。`encryptResponseCache` を無効にすると、平文へ戻さずに削除 |
 | `proxy_cache_index`、`proxy_cache_body` | `encryptResponseCache` を `false` にした場合の応答キャッシュ。内容とキーは暗号化した組と同じ | なし | 暗号化した組と同じ。`encryptResponseCache` を有効にすると、暗号化した組へ移して削除 |
 | `proxy_cache`、`proxy_cache_secure` | 0.21.0 以前の応答キャッシュ。1 件の値にメタデータと本文をまとめた形式。`proxy_cache_secure` は 0.21.0 で `encryptResponseCache` を有効にした場合 | `proxy_cache` はなし、`proxy_cache_secure` は値のみ（AES-256） | 起動時に新しい組へ移して削除。`encryptResponseCache` を無効にした場合、`proxy_cache_secure` は移さずに削除 |
 | `proxy_web_storage` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット | なし | 次のスナップショットで上書きされるまで |
 | `proxy_idempotency` | 上流へ届いたべき等性キー（UTF-8 で 255 バイトを超える場合は SHA-256）と、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
-| `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号 | なし | 次のバインドで上書きされるまで |
+| `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号。`queueOwnerResolver` を指定した場合は、現在の持ち主の HMAC、鍵の指紋、ログインを転送中かどうか | なし | ポート番号は次のバインドで上書きされるまで。持ち主は次に保存し直すまでで、鍵の指紋が合わない値は起動時に削除 |
 | secure storage の `offline_web_proxy.cookie_box_encryption_key` | 暗号化 Box の鍵。Cookie、キュー、隔離、ドロップ履歴（と、有効にした場合の応答キャッシュ）で共有 | secure storage に保存 | `recoverEncryptedStorage()` が削除するか、使えない鍵（なし・読み取り不能・形式不正）を新しい鍵で上書きするまで。新しい鍵を書き込むのは、キュー・隔離・ドロップ履歴の Box に中身が無い場合（「暗号化鍵を失った場合」） |
 | `proxy_queue`、`proxy_quarantined_requests`、`proxy_dropped_requests`、`proxy_cookies` | 0.14.0 以前（Cookie は 0.4.0 より前）が平文で保存した内容 | なし | 暗号化 Box へ移行した後に削除。キュー・隔離・ドロップ履歴の旧 Box は、削除の前に空にする |
 
@@ -803,7 +837,7 @@ proxy は Hive の Box と secure storage にデータを保存します。暗�
 | --- | --- | --- |
 | `quarantineMaxCount` | 1000 件 | 超えた分を古いものからドロップ履歴へ移す（`dropReason: quarantine_limit`） |
 | `quarantineRetention` | 30 日 | `quarantinedAt` から数えて過ぎたものをドロップ履歴へ移す（`quarantine_expired`） |
-| `quarantineMaxBytes` | 20 MB | 本文とヘッダの概算の合計。超えた分を古いものからドロップ履歴へ移す（`quarantine_limit`） |
+| `quarantineMaxBytes` | 20 MB | 本文とヘッダ、残した応答本文の先頭の概算の合計。超えた分を古いものからドロップ履歴へ移す（`quarantine_limit`） |
 | `droppedRequestMaxCount` | 1000 件 | 超えた分を、確認済みの古いものから削除する。未確認は件数では消さない |
 | `droppedRequestRetention` | 30 日 | `droppedAt` から数えて過ぎたものを、確認済みかどうかを問わず削除する |
 
@@ -980,7 +1014,7 @@ Android の自動バックアップ（Auto Backup）の対象には、Hive の�
 - サポートされる設定経路は `ProxyConfig` です。外部 YAML の自動読込は未実装です。
 - `assets/static/` から配信できるのは `GET` と `HEAD` だけです。同名パスへの更新系は静的扱いにせず上流へ転送します。Range 要求には対応していません。
 - `AssetManifest.json` または実行環境上の同等 manifest を読み込めない場合は、静的リソースを一覧化せず、通常の upstream 解決へフォールバックします。
-- 同じアプリで複数の `OfflineWebProxy` インスタンスを同時に使う構成は想定していません。保存領域の初期化と復旧は、同じ isolate の中ではインスタンスをまたいで直列化しますが、キュー消化・保持上限・移行の排他はインスタンスごとです。複数の isolate から同時に使う場合は、保存領域の初期化と復旧も直列化の対象になりません。
+- 同じアプリで複数の `OfflineWebProxy` インスタンスを同時に使う構成は想定していません。保存領域の初期化と復旧は、同じ isolate の中ではインスタンスをまたいで直列化しますが、キュー消化・保持上限・移行の排他と、送信待ちの持ち主（`queueOwnerResolver`）はインスタンスごとです。Cookie はインスタンス間で共有するため、あるインスタンスでのログインは別のインスタンスのセッションも変えます。**そのため、別のインスタンスのキューは、前の持ち主の要求を新しいセッションで送ることがあります（`queueOwnerResolver` で保護されません）。** 複数の isolate から同時に使う場合は、保存領域の初期化と復旧も直列化の対象になりません。
 
 ## サンプルと参照先
 

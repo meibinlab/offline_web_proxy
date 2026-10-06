@@ -100,6 +100,11 @@ class ProxyStorageTestHooks {
   /// 完了を遅らせると、応答キャッシュを開いている途中の状態を再現できます。
   final Future<void> Function()? beforeCacheOpened;
 
+  /// キューから送る要求のヘッダを付け終え、本文を送る直前に呼ぶ処理です。
+  ///
+  /// 完了を遅らせると、送信の途中でログインが始まった状態を再現できます。
+  final Future<void> Function()? beforeQueuedRequestSent;
+
   /// テスト用の設定を生成します。
   ///
   /// [keyStorage] は鍵の読み書きに使う窓口です。
@@ -112,6 +117,8 @@ class ProxyStorageTestHooks {
   /// [beforeCacheEntryMoved] は応答キャッシュの記録を 1 件移す直前に
   /// 呼ぶ処理です。
   /// [beforeCacheOpened] は応答キャッシュを開き始める直前に呼ぶ処理です。
+  /// [beforeQueuedRequestSent] はキューから送る要求の本文を送る直前に
+  /// 呼ぶ処理です。
   const ProxyStorageTestHooks({
     this.keyStorage,
     this.deferredMigrationDelay,
@@ -122,5 +129,6 @@ class ProxyStorageTestHooks {
     this.beforeLegacyBoxCleared,
     this.beforeCacheEntryMoved,
     this.beforeCacheOpened,
+    this.beforeQueuedRequestSent,
   });
 }

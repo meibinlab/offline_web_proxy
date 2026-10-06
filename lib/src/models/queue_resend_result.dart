@@ -17,7 +17,9 @@ class QueueResendResult {
 
   /// Status code returned by the upstream.
   ///
-  /// `0` when the upstream could not be reached at all.
+  /// `0` when the upstream could not be reached at all, or when the request
+  /// was not sent because it belongs to another user (`dropReason`
+  /// `owner_changed`).
   final int statusCode;
 
   /// Whether the upstream accepted the request.
@@ -47,7 +49,8 @@ class QueueResendResult {
   ///
   /// [url] is the URL the request was sent to.
   /// [method] is the HTTP method.
-  /// [statusCode] is the upstream status code, or `0` when unreachable.
+  /// [statusCode] is the upstream status code, or `0` when unreachable or
+  /// not sent.
   /// [success] is whether the upstream accepted the request.
   /// [idempotencyKey] is the key sent with the request, when any.
   /// [dropReason] is why it left the queue without succeeding.

@@ -15,7 +15,8 @@ class DroppedRequest {
   /// `"quarantine_limit"`（件数・合計バイト数）と `"quarantine_expired"`（期間）、
   /// 1 件で隔離の合計バイト数の上限を超えた場合は `"quarantine_too_large"`、
   /// キューを一時停止させた要求を `skipPausedRequest()` で取り除いた場合は
-  /// `"authentication_required"` です。
+  /// `"authentication_required"`、ログインし直した利用者が要求の持ち主と
+  /// 違うため送らなかった場合は `"owner_changed"`（状態コードは `0`）です。
   final String dropReason;
 
   /// エラー時のHTTPステータスコード
