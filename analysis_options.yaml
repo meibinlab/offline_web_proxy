@@ -8,3 +8,5 @@ analyzer:
     # These are style-only and currently produce a lot of noise in tests.
     prefer_const_constructors: ignore
     prefer_const_declarations: ignore
+  exclude:
+    - build/**
