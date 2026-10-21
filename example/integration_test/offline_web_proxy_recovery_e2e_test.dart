@@ -8,6 +8,8 @@ import 'package:integration_test/integration_test.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import 'support/access_token.dart';
+
 /// 上流サーバが返すページ本文の目印。
 const String _upstreamMarker = 'hello-from-upstream';
 
@@ -55,6 +57,8 @@ class _WebViewHarness {
   Future<void> loadAndWait(Uri uri) async {
     final pageFinished = Completer<void>();
     _pageFinished = pageFinished;
+    // 再起動で秘密値が変わるため、読み込みのたびに Cookie を置き直す
+    await putAccessTokenCookieFor(uri);
     await controller.loadRequest(uri);
     await pageFinished.future.timeout(const Duration(seconds: 30));
   }
@@ -68,6 +72,7 @@ class _WebViewHarness {
     final mainFrameError = Completer<WebResourceError>();
     _mainFrameError = mainFrameError;
     _pageFinished = Completer<void>();
+    await putAccessTokenCookieFor(uri);
     await controller.loadRequest(uri);
     return mainFrameError.future.timeout(const Duration(seconds: 30));
   }
@@ -196,7 +201,7 @@ void main() {
       'recovers a dead proxy socket from a WebView error and shows the page again',
       (tester) async {
         final upstream = await startUpstream();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final proxyPort = await proxy.start(
@@ -248,7 +253,7 @@ void main() {
       'rewrites a stale port URL and loads it on the current port',
       (tester) async {
         final upstream = await startUpstream();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           // 直前の起動で使っていたポートを作る
@@ -300,7 +305,7 @@ void main() {
       'recovers on app resume through ProxyLifecycleGuard',
       (tester) async {
         final upstream = await startUpstream();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
         ProxyLifecycleGuard? guard;
 
         try {

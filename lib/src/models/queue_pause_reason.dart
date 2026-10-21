@@ -27,14 +27,21 @@ enum QueuePauseReason {
   /// owner could not be determined or saved, so the proxy cannot tell who
   /// signed in.
   ///
+  /// The queue is also paused this way when the session changes without a
+  /// known user: `OfflineWebProxy.restoreCookies()` without `queueOwnerId`,
+  /// `OfflineWebProxy.clearCookies()` for every cookie or a domain sent to
+  /// the configured origin, and a start that finds the saved owner record
+  /// altered or missing.
+  ///
   /// Sending the queue under the new session could deliver another user's
   /// updates, so the queue waits. The proxy then treats the signed-in user as
   /// a new, unknown owner: queued requests recorded for a known owner are
   /// moved out of the queue with the reason `owner_changed` once sending
   /// resumes. Sending resumes after `OfflineWebProxy.resumeQueue()`, or when
   /// a later sign-in is resolved to an owner. The pause is kept in memory
-  /// only and ends when the proxy stops, while the unknown owner is saved: on
-  /// the next start, queued requests of a known owner are moved out without
-  /// waiting for the user.
+  /// only and ends when the proxy stops, while the unknown owner is saved: a
+  /// start that finds the owner still unknown and requests of another owner
+  /// in the queue pauses it this way again, so those requests are never moved
+  /// out without waiting for the user.
   ownerUnresolved,
 }

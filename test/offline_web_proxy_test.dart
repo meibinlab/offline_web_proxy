@@ -9,6 +9,8 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:offline_web_proxy/src/models/cookie_record.dart';
 
+import 'support/access_token_http.dart';
+
 const String _encryptedCookieBoxName = 'proxy_cookies_secure';
 const String _legacyCookieBoxName = 'proxy_cookies';
 const String _cookieEncryptionKeyStorageKey =
@@ -52,14 +54,6 @@ void _installMockAssetManifestHandler(Map<String, List<String>>? manifest) {
     }
     return null;
   });
-}
-
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
 }
 
 /// 平文で保存する応答キャッシュの、メタデータの Box 名。
@@ -114,7 +108,7 @@ void main() {
           Directory.systemTemp.createTempSync('offline_web_proxy_test').path;
       FlutterSecureStorage.setMockInitialValues(<String, String>{});
       await _resetHiveTestBoxes();
-      proxy = OfflineWebProxy();
+      proxy = trackAccessToken(OfflineWebProxy());
     });
 
     tearDown(() async {
@@ -193,7 +187,7 @@ void main() {
         expect(event.data['isStaticResource'], isFalse);
 
         await subscription.cancel();
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 既定の優先ポートが使用中でも自動割当にフォールバックすること
@@ -218,7 +212,7 @@ void main() {
         } finally {
           await occupiedServer.close();
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 直前に成功したポートを次回起動時に再利用できること
@@ -231,7 +225,7 @@ void main() {
 
         await proxy.stop();
 
-        final nextProxy = OfflineWebProxy();
+        final nextProxy = trackAccessToken(OfflineWebProxy());
         try {
           final nextPort = await nextProxy.start(
             config: ProxyConfig(origin: 'http://127.0.0.1:1'),
@@ -243,7 +237,7 @@ void main() {
             await nextProxy.stop();
           }
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// WebStorage の保存・復元を行うブリッジが利用できること
@@ -261,6 +255,8 @@ void main() {
           proxyPort,
           '/__offline_web_proxy/web_storage/snapshot',
           method: 'POST',
+          // POST は proxy 自身の origin の Origin が必須
+          headers: {'origin': 'http://127.0.0.1:$proxyPort'},
           body: jsonEncode({
             'localStorage': {'k': 'v'},
             'indexedDB': {
@@ -284,7 +280,7 @@ void main() {
         expect(restoreResponse.statusCode, equals(HttpStatus.ok));
         expect(restoreResponse.body, contains('"k":"v"'));
         expect(restoreResponse.body, contains('"demo"'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// HTML レスポンスに WebStorage 継承用スクリプトが注入されること
@@ -313,7 +309,7 @@ void main() {
             response.body, contains('__offline_web_proxy_web_storage_bridge'));
         expect(response.body,
             contains('/__offline_web_proxy/web_storage/snapshot'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 期待しない Origin を持つリクエストは WebStorage bridge へアクセスできないこと
@@ -335,7 +331,7 @@ void main() {
           headers: {'origin': 'https://example.com'},
         );
         expect(response.statusCode, equals(HttpStatus.forbidden));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// HTML の body タグがない場合でも WebStorage bridge スクリプトを注入できること
@@ -362,7 +358,7 @@ void main() {
         expect(response.statusCode, equals(HttpStatus.ok));
         expect(
             response.body, contains('__offline_web_proxy_web_storage_bridge'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 初期状態が正しいこと
@@ -423,7 +419,7 @@ void main() {
         expect(secondResponse.statusCode, equals(HttpStatus.ok));
         expect(secondResponse.body, equals('{"count":2}'));
         expect(requestCount, equals(2));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// request timeout 時だけキャッシュへフォールバックすること
@@ -462,7 +458,7 @@ void main() {
 
         expect(timeoutResponse.statusCode, equals(HttpStatus.ok));
         expect(timeoutResponse.body, equals('{"source":"upstream"}'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// upstream 5xx ではキャッシュに切り替えないこと
@@ -498,7 +494,7 @@ void main() {
 
         expect(errorResponse.statusCode, equals(HttpStatus.serviceUnavailable));
         expect(errorResponse.body, equals('{"source":"upstream-error"}'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// upstream 4xx ではキャッシュに切り替えないこと
@@ -534,7 +530,7 @@ void main() {
 
         expect(errorResponse.statusCode, equals(HttpStatus.notFound));
         expect(errorResponse.body, equals('{"source":"upstream-not-found"}'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// キューの初期状態が空であること
@@ -663,7 +659,7 @@ void main() {
 
         expect(receivedCookies, hasLength(1));
         expect(receivedCookies.single, equals('NATIVE=native-token'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 停止前に serverStopped イベントが購読側へ届くこと
@@ -751,7 +747,7 @@ void main() {
         expect(upstreamRequestCount, equals(2));
 
         await restartedSubscription.cancel();
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 上流の Set-Cookie を保存し次回上流転送へ適用すること
@@ -787,7 +783,7 @@ void main() {
         expect(receivedCookies, hasLength(2));
         expect(receivedCookies.first, isNull);
         expect(receivedCookies.last, equals('SESSION=server-token'));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// Cookie 暗号化鍵をセキュアストレージに保存すること
@@ -839,7 +835,7 @@ void main() {
       FlutterSecureStorage.setMockInitialValues(<String, String>{
         _cookieEncryptionKeyStorageKey: base64Encode(Uint8List(8)),
       });
-      proxy = OfflineWebProxy();
+      proxy = trackAccessToken(OfflineWebProxy());
 
       await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -865,7 +861,7 @@ void main() {
 
       await Hive.close();
       FlutterSecureStorage.setMockInitialValues(<String, String>{});
-      proxy = OfflineWebProxy();
+      proxy = trackAccessToken(OfflineWebProxy());
 
       await proxy.start(
         config: const ProxyConfig(origin: 'https://example.com'),
@@ -914,7 +910,11 @@ void main() {
 
         final upstreamOrigin = 'http://127.0.0.1:${upstreamServer!.port}';
         final proxyPort = await proxy.start(
-          config: ProxyConfig(origin: upstreamOrigin),
+          config: ProxyConfig(
+            origin: upstreamOrigin,
+            // 許可した名前でも、Jar にある名前は Jar の値を優先すること
+            forwardWebViewCookieNames: const {'SESSION', 'CLIENT'},
+          ),
         );
 
         final client = HttpClient();
@@ -933,7 +933,7 @@ void main() {
           receivedCookies.single,
           equals('SESSION=app; SESSION=root; CLIENT=1'),
         );
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// start 前に復元した Cookie を一覧取得できること
@@ -1561,7 +1561,7 @@ void main() {
         await _performProxyGet(proxyPort, '/app/dashboard');
 
         expect(requestedPaths, equals(['/base/app/dashboard']));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 一覧登録された app.css への実リクエストは同梱アセットを返すこと
@@ -1589,7 +1589,7 @@ void main() {
         } finally {
           client.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 一覧登録された入れ子の css/app.css への実リクエストも配信されること
@@ -1614,7 +1614,7 @@ void main() {
         } finally {
           client.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// package prefix 由来の package.css への実リクエストも配信されること
@@ -1639,7 +1639,7 @@ void main() {
         } finally {
           client.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 同じ ETag を提示した再取得は 304 になること
@@ -1670,7 +1670,7 @@ void main() {
         } finally {
           client.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// HEAD は本文を持たない静的リソース応答になること
@@ -1694,7 +1694,7 @@ void main() {
         } finally {
           client.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 同名パスへの更新系は静的扱いにせず上流へ転送すること
@@ -1730,7 +1730,7 @@ void main() {
         } finally {
           client.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 一覧にあってもアセットを読めない場合は上流へ転送すること
@@ -1767,7 +1767,7 @@ void main() {
         } finally {
           client.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 拡張子付き proxy URL でも static が無ければ upstream 転送されること
@@ -1806,7 +1806,7 @@ void main() {
         } finally {
           client.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 301/302/303/307/308 の same-origin redirect は proxy URL へ書き換えること
@@ -1846,7 +1846,7 @@ void main() {
             equals('http://127.0.0.1:$proxyPort/app/map?mode=car'),
           );
           expect(requestedPaths, equals(['/base/redirect-same-origin']));
-        }, createHttpClient: _RealHttpOverrides().createHttpClient);
+        }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
       });
     }
 
@@ -1880,7 +1880,7 @@ void main() {
           equals('http://127.0.0.1:$proxyPort/app/map?mode=car'),
         );
         expect(requestedPaths, equals(['/base/flow/step/detail']));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 外部 redirect は event で launchExternal を通知し、WebView へ 204 を返すこと
@@ -1934,7 +1934,7 @@ void main() {
         );
 
         await subscription.cancel();
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 外部 https redirect は event で launchExternal を通知し、WebView へ 204 を返すこと
@@ -1973,7 +1973,10 @@ void main() {
         );
 
         expect(response.statusCode, equals(HttpStatus.noContent));
-        expect(event.data['locationHeader'], equals(mapsUrl));
+        // locationHeader は既定でクエリを除くが、外部起動に使う externalUrl は
+        // 設定によらず完全な URL のまま（doc/specs.ja.md 【18】イベントの URL）
+        expect(event.data['locationHeader'],
+            equals('https://www.google.com/maps/search/'));
         expect(event.data['externalUrl'], equals(mapsUrl));
         expect(
           event.data['navigationReason'],
@@ -1981,7 +1984,7 @@ void main() {
         );
 
         await subscription.cancel();
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// キャッシュリストの初期状態が空であること
@@ -2457,7 +2460,7 @@ void main() {
     late OfflineWebProxy proxy;
 
     setUp(() {
-      proxy = OfflineWebProxy();
+      proxy = trackAccessToken(OfflineWebProxy());
     });
 
     tearDown(() async {
@@ -2524,7 +2527,7 @@ void main() {
         expect(result.successCount, equals(1));
         expect(result.failureCount, equals(0));
         expect(cacheEntries, hasLength(1));
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
   });
 
@@ -2534,7 +2537,7 @@ void main() {
     late int port;
 
     setUp(() async {
-      proxy = OfflineWebProxy();
+      proxy = trackAccessToken(OfflineWebProxy());
       mockServer = await HttpServer.bind('localhost', 0);
       port = mockServer.port;
       mockServer.listen((HttpRequest req) async {

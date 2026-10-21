@@ -97,6 +97,10 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
       _homeProxyUrl = 'http://127.0.0.1:$_proxyPort/app';
       _currentPageUrl = _homeProxyUrl;
 
+      // 秘密値を持たない要求は 403 になる（requireAccessToken の既定）ため、
+      // WebView が最初のページを読み込む前に秘密値の Cookie を置く
+      await _putAccessTokenCookie();
+
       _eventSubscription = _proxy.events.listen(_handleProxyEvent);
 
       // 復帰時の稼働確認と自動復旧をアプリのライフサイクルに連動させる
@@ -280,6 +284,31 @@ class _ProxyExampleHomePageState extends State<ProxyExampleHomePage> {
       case ProxyRecoveryCause.stalePort:
         await _reloadAfterRecovery(result);
     }
+  }
+
+  /// proxy の秘密値を WebView の Cookie として proxy の origin へ置きます。
+  ///
+  /// 秘密値は `start()` のたびに変わるため、起動の後、WebView が読み込む
+  /// 前に呼びます。`webview_flutter` の [WebViewCookieManager] は HttpOnly を
+  /// 指定できないため、ページのスクリプトから読める Cookie になります。
+  /// HttpOnly で置く場合は、プラットフォームの Cookie 管理（Android の
+  /// `CookieManager` など）を使ってください。
+  ///
+  /// Returns: Cookie を置き終えた時点で完了する Future。
+  Future<void> _putAccessTokenCookie() async {
+    final baseUri = _proxy.baseUri;
+    final token = _proxy.accessToken;
+    if (baseUri == null || token == null) {
+      return;
+    }
+
+    await WebViewCookieManager().setCookie(
+      WebViewCookie(
+        name: OfflineWebProxy.accessTokenCookieName,
+        value: token,
+        domain: baseUri.host,
+      ),
+    );
   }
 
   /// 復旧結果に応じて WebView を再読込します。

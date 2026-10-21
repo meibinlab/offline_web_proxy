@@ -10,6 +10,8 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:offline_web_proxy/src/storage/encryption_key_storage.dart';
 
+import 'support/access_token_http.dart';
+
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = <String, List<String>>{};
 
@@ -32,15 +34,6 @@ const String _legacyEncryptedBoxName = 'proxy_cache_secure';
 
 /// ファイルに平文で残っていないかを探す、応答本文の目印。
 const String _marker = 'EMPLOYEE-NAME-YAMADA-TARO';
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
-}
 
 /// 目印を含む JSON を、保存してよい応答として返す上流サーバのモック。
 class _MockUpstream {
@@ -160,7 +153,7 @@ void main() {
         .path;
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
-    proxy = OfflineWebProxy();
+    proxy = trackAccessToken(OfflineWebProxy());
   });
 
   tearDown(() async {
@@ -176,7 +169,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 
@@ -229,7 +222,7 @@ void main() {
       await proxy.stop();
     }
     await Hive.close();
-    proxy = OfflineWebProxy();
+    proxy = trackAccessToken(OfflineWebProxy());
   }
 
   /// Box のファイルを返す。
@@ -334,6 +327,64 @@ void main() {
       });
     });
 
+    /// 無効なときは、削除した記録の本文が平文のファイルに残らないよう圧縮すること
+    /// （doc/specs.ja.md 【1】保存データ）
+    test('compacts the plain pair after deleting records', () async {
+      await withRealHttpClient(() async {
+        // clearCache() の後に圧縮すること
+        var port = await startProxy(encrypt: false);
+        await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
+        await proxy.clearCache();
+        await restartProxy();
+        // 本文の目印が平文のファイルに残らないこと（削除前に入ることは、
+        // 次の clearCacheForUrl() の手順で確かめる）
+        expect(containsMarker(_plainPair.body), isFalse);
+        expect(containsMarker(_plainPair.index), isFalse);
+
+        // clearCacheForUrl() の後に圧縮すること
+        port = await startProxy(encrypt: false);
+        await _get(Uri.parse('http://127.0.0.1:$port/api/employees'));
+        await restartProxy();
+        expect(containsMarker(_plainPair.body), isTrue);
+        port = await startProxy(encrypt: false);
+        await proxy.clearCacheForUrl('${upstream!.origin}/api/employees');
+        await restartProxy();
+        expect(containsMarker(_plainPair.body), isFalse);
+      });
+    });
+
+    /// 容量の上限による追い出しでは圧縮しないこと（保存のたびに起こり得るため、
+    /// Hive の既定の自動圧縮に任せる）
+    test('does not compact the plain pair after eviction', () async {
+      await withRealHttpClient(() async {
+        // 1 件の本文は 60 バイトほどのため、3 件目で上限を超える
+        final port = await startProxy(encrypt: false, cacheMaxSize: 150);
+        final evicted = <ProxyEvent>[];
+        final subscription = proxy.events
+            .where((event) => event.type == ProxyEventType.cacheEvicted)
+            .listen(evicted.add);
+        for (final path in ['/api/a', '/api/b', '/api/c']) {
+          await _get(Uri.parse('http://127.0.0.1:$port$path'));
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        await subscription.cancel();
+        expect(evicted, isNotEmpty);
+        final cachedUrls =
+            (await proxy.getCacheList()).map((entry) => entry.url).toList();
+        expect(cachedUrls, isNot(contains(endsWith('/api/a'))));
+        await restartProxy();
+
+        // 追い出した記録の本文は、圧縮していないためファイルに残ること
+        expect(
+          _containsBytes(
+            boxFile(_plainPair.body).readAsBytesSync(),
+            utf8.encode('"path":"/api/a"'),
+          ),
+          isTrue,
+        );
+      });
+    });
+
     /// 有効にしたとき、平文の組を移してから平文のファイルを消すこと
     test('moves an existing plain cache into the encrypted pair', () async {
       await withRealHttpClient(() async {
@@ -365,7 +416,7 @@ void main() {
         await restartProxy();
 
         var failed = false;
-        proxy = OfflineWebProxy.withStorageTestHooks(
+        proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
           ProxyStorageTestHooks(
             beforeCacheEntryMoved: (key) async {
               // 最初の 1 件だけ移せなかったことにする
@@ -375,7 +426,7 @@ void main() {
               }
             },
           ),
-        );
+        ));
         final errors = <ProxyEvent>[];
         final subscription = proxy.events
             .where((event) => event.type == ProxyEventType.errorOccurred)
@@ -688,9 +739,9 @@ void main() {
       await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
       await _get(Uri.parse('http://127.0.0.1:$port/api/b'));
       await restartProxy();
-      proxy = OfflineWebProxy.withStorageTestHooks(
+      proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
         ProxyStorageTestHooks(beforeCacheEntryMoved: (_) => gate.future),
-      );
+      ));
     }
 
     /// 移行が終わるのを待たずに start() が返り、開いている間は保存せず、
@@ -854,9 +905,9 @@ void main() {
         await _get(Uri.parse('http://127.0.0.1:$port/api/a'));
         await restartProxy();
         final gate = Completer<void>();
-        proxy = OfflineWebProxy.withStorageTestHooks(
+        proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
           ProxyStorageTestHooks(beforeCacheOpened: () => gate.future),
-        );
+        ));
         final occupied =
             await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         addTearDown(occupied.close);
@@ -890,7 +941,7 @@ void main() {
         final occupied =
             await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         addTearDown(occupied.close);
-        final other = OfflineWebProxy();
+        final other = trackAccessToken(OfflineWebProxy());
 
         await expectLater(
           other.start(

@@ -113,16 +113,12 @@ void main() {
       await WebViewCookieManager().clearCookies();
     });
 
-    /// 秘密値を有効にして proxy を起動する。
+    /// 既定の設定（秘密値が必須、CORS ヘッダなし）で proxy を起動する。
     ///
     /// Returns: proxy のポート番号。
     Future<int> startProxy() {
       return proxy.start(
-        config: ProxyConfig(
-          origin: upstream.origin,
-          requireAccessToken: true,
-          addCorsHeaders: false,
-        ),
+        config: ProxyConfig(origin: upstream.origin),
       );
     }
 
@@ -299,7 +295,7 @@ return {
         expect(result['dataStatus'], equals(HttpStatus.ok));
         expect(result['dataBody'], equals('{"ok":true}'));
         expect(result['statusStatus'], equals(HttpStatus.ok));
-        // addCorsHeaders: false で CORS ヘッダを付けないこと
+        // 既定（addCorsHeaders: false）では CORS ヘッダを付けないこと
         expect(result['dataAllowOrigin'], isNull);
         // Cookie を送らない fetch は拒否すること
         expect(result['omittedStatus'], equals(HttpStatus.forbidden));

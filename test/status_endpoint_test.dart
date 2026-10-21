@@ -7,19 +7,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 
+import 'support/access_token_http.dart';
+
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
 };
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
-}
 
 /// パスごとに応答を差し替えられる上流サーバのモック。
 class _MockUpstream {
@@ -165,7 +158,7 @@ void main() {
         .path;
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
-    proxy = OfflineWebProxy();
+    proxy = trackAccessToken(OfflineWebProxy());
   });
 
   tearDown(() async {
@@ -180,7 +173,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 
@@ -260,16 +253,42 @@ void main() {
       });
     });
 
-    /// 全 origin へ開かないこと
+    /// CORS を全 origin（'*'）へ開いても、別 origin へ開かないこと
     test('does not advertise a permissive cors header', () async {
       await withRealHttpClient(() async {
         upstream = await _startMockUpstream();
         final port = await proxy.start(
-          config: ProxyConfig(origin: upstream!.origin),
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            addCorsHeaders: true,
+            corsAllowedOrigins: const ['*'],
+          ),
         );
 
         final response = await _performRequest(
           Uri.parse('http://127.0.0.1:$port/__offline_web_proxy/status'),
+          headers: const {'Origin': 'https://evil.example'},
+        );
+
+        expect(response.allowOrigin, isNull);
+      });
+    });
+
+    /// 許可した origin を挙げても、その origin へ開かないこと
+    test('does not advertise a cors header to a listed origin', () async {
+      await withRealHttpClient(() async {
+        upstream = await _startMockUpstream();
+        final port = await proxy.start(
+          config: ProxyConfig(
+            origin: upstream!.origin,
+            addCorsHeaders: true,
+            corsAllowedOrigins: const ['https://app.example.com'],
+          ),
+        );
+
+        final response = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/__offline_web_proxy/status'),
+          headers: const {'Origin': 'https://app.example.com'},
         );
 
         expect(response.allowOrigin, isNull);

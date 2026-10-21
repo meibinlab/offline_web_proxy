@@ -8,6 +8,8 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:offline_web_proxy/src/storage/encryption_key_storage.dart';
 
+import 'support/access_token_http.dart';
+
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
@@ -116,11 +118,6 @@ class _FakeKeyStorage implements EncryptionKeyStorage {
   @override
   Future<bool?> isProtectedDataAvailable() async => null;
 }
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-///
-/// [HttpOverrides] の既定の実装は dart:io の HttpClient を作るため、何も上書きしない。
-class _RealHttpOverrides extends HttpOverrides {}
 
 /// 受信したリクエストのヘッダと、応答したステータスコードを記録する上流サーバのモック。
 class _RecordingUpstream {
@@ -250,10 +247,11 @@ void main() {
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
     keyStorage = _FakeKeyStorage();
-    proxy = OfflineWebProxy.withStorageTestHooks(ProxyStorageTestHooks(
+    proxy = trackAccessToken(
+        OfflineWebProxy.withStorageTestHooks(ProxyStorageTestHooks(
       keyStorage: keyStorage,
       keyRereadInterval: Duration.zero,
-    ));
+    )));
   });
 
   tearDown(() async {
@@ -449,7 +447,11 @@ void main() {
         () async {
           upstream = await _startRecordingUpstream();
           final port = await proxy.start(
-            config: ProxyConfig(origin: upstream!.origin),
+            config: ProxyConfig(
+              origin: upstream!.origin,
+              // WebView の Cookie を保存して再送することを確かめるため許可する
+              forwardWebViewCookieNames: const {'SID'},
+            ),
           );
 
           // 5xx を返してキューへ保存させる
@@ -511,7 +513,7 @@ void main() {
             isEmpty,
           );
         },
-        createHttpClient: _RealHttpOverrides().createHttpClient,
+        createHttpClient: AccessTokenHttpOverrides().createHttpClient,
       );
     }, timeout: const Timeout(Duration(minutes: 1)));
   });

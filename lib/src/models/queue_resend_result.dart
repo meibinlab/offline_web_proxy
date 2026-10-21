@@ -19,7 +19,8 @@ class QueueResendResult {
   ///
   /// `0` when the upstream could not be reached at all, or when the request
   /// was not sent because it belongs to another user (`dropReason`
-  /// `owner_changed`).
+  /// `owner_changed`) or because its saved destination is no longer the
+  /// configured origin (`dropReason` `origin_changed`).
   final int statusCode;
 
   /// Whether the upstream accepted the request.
@@ -69,12 +70,18 @@ class QueueResendResult {
 
   /// Converts the result into a JSON-compatible map.
   ///
-  /// Used by the proxy to publish the result over HTTP and events.
+  /// Used by the proxy to publish the result over HTTP and events. The status
+  /// endpoint always passes `includeQuery: false`, and events follow
+  /// `ProxyConfig.includeQueryInEvents`.
+  ///
+  /// [includeQuery] whether `url` keeps its query string and fragment. When
+  /// `false`, everything from the first `?` or `#` is removed. Defaults to
+  /// `true`.
   ///
   /// Returns: a map holding every field of this result.
-  Map<String, dynamic> toMap() {
+  Map<String, dynamic> toMap({bool includeQuery = true}) {
     return {
-      'url': url,
+      'url': includeQuery ? url : _withoutQueryAndFragment(url),
       'method': method,
       'statusCode': statusCode,
       'success': success,
@@ -83,6 +90,18 @@ class QueueResendResult {
       'willRetry': willRetry,
       'attemptedAt': attemptedAt.toIso8601String(),
     };
+  }
+
+  /// Removes the query string and fragment from [value].
+  ///
+  /// Works on unparsable values too by cutting at the first `?` or `#`.
+  ///
+  /// [value] the URL to trim.
+  ///
+  /// Returns: [value] without its query string and fragment.
+  static String _withoutQueryAndFragment(String value) {
+    final cut = value.indexOf(RegExp(r'[?#]'));
+    return cut == -1 ? value : value.substring(0, cut);
   }
 
   @override

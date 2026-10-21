@@ -11,6 +11,8 @@ import 'package:offline_web_proxy/src/storage/encryption_key_storage.dart';
 import 'package:offline_web_proxy/src/storage/hive_frame_inspector.dart';
 import 'package:offline_web_proxy/src/storage/hive_key.dart';
 
+import 'support/access_token_http.dart';
+
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = <String, List<String>>{};
 
@@ -68,15 +70,6 @@ class _FakeKeyStorage implements EncryptionKeyStorage {
 
   @override
   Future<bool?> isProtectedDataAvailable() async => null;
-}
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
 }
 
 /// 常に 200 を返す上流サーバのモック。
@@ -193,9 +186,10 @@ void main() {
   _MockUpstream? upstream;
 
   /// テスト用の鍵の保存先を使う proxy を作る。
-  OfflineWebProxy createProxy() => OfflineWebProxy.withStorageTestHooks(
+  OfflineWebProxy createProxy() =>
+      trackAccessToken(OfflineWebProxy.withStorageTestHooks(
         ProxyStorageTestHooks(keyStorage: keyStorage),
-      );
+      ));
 
   setUp(() async {
     hiveTestDirectory = Directory.systemTemp
@@ -222,7 +216,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 
@@ -339,6 +333,26 @@ void main() {
       expect(toHiveKey('あ' * 86), hashed);
       expect(toHiveKey('k' * 256), isNot(hashed));
       expect(toHiveKey('k' * 256), startsWith(hashedHiveKeyPrefix));
+    });
+
+    /// `sha256:<64 桁の 16 進>` の短いキーは、長いキーを置き換えた値と同じ記録を
+    /// 指さないよう、長さによらずハッシュにすること（doc/specs.ja.md 【6】）
+    test('hashes short keys that start with the hash prefix', () {
+      final longKey = 'k' * 256;
+      final hashedLongKey = toHiveKey(longKey);
+      // 長いキーを置き換えた値そのものを、外から与えられたキーとして使う
+      final forgedKey = hashedLongKey;
+      expect(utf8.encode(forgedKey).length, lessThanOrEqualTo(255));
+
+      final hashedForgedKey = toHiveKey(forgedKey);
+      expect(hashedForgedKey, isNot(hashedLongKey));
+      expect(hashedForgedKey, startsWith(hashedHiveKeyPrefix));
+      expect(utf8.encode(hashedForgedKey).length, lessThanOrEqualTo(255));
+      // 同じキーからは常に同じ値になること
+      expect(toHiveKey(forgedKey), hashedForgedKey);
+      // 接頭辞で始まらない短いキーは従来どおり変えないこと
+      expect(toHiveKey('sha256'), 'sha256');
+      expect(toHiveKey('x$forgedKey'), 'x$forgedKey');
     });
   });
 

@@ -31,13 +31,16 @@ class QuarantinedRequest {
   /// 上流が 4xx で拒否した場合は `"4xx_error"`、キューを一時停止させた要求を
   /// `skipPausedRequest()` で取り除いた場合は `"authentication_required"`、
   /// `ProxyConfig.queueOwnerResolver` を指定していて、ログインし直した
-  /// 利用者が要求の持ち主と違うため送らなかった場合は `"owner_changed"`
-  /// です。
+  /// 利用者が要求の持ち主と違うため送らなかった場合は `"owner_changed"`、
+  /// 保存した送信先の origin（scheme・host・ポート）が現在の
+  /// `ProxyConfig.origin` と違うため送らなかった場合は `"origin_changed"`
+  /// です（`ProxyConfig.mirroredOrigins` に含まれていても同じ）。
   final String reason;
 
   /// 上流から返されたHTTPステータスコード
   ///
-  /// 送らずに取り除いた場合（`"owner_changed"`）は `0` です。
+  /// 送らずに取り除いた場合（`"owner_changed"`、`"origin_changed"`）は
+  /// `0` です。
   final int statusCode;
 
   /// 詳細なエラーメッセージ

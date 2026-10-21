@@ -48,6 +48,16 @@ class ProxyConfig {
   /// For security reasons, defaults to `'127.0.0.1'` (localhost only).
   /// This prevents external devices from accessing your proxy server.
   ///
+  /// Only loopback is accepted: `'localhost'` (case-insensitive), an IPv4
+  /// address in `127.0.0.0/8` such as `'127.0.0.2'`, or the IPv6 `'::1'`.
+  /// Any other value (`'0.0.0.0'`, `'::'`, a device address, another host
+  /// name, or `'localhost.'` with a trailing dot) makes `start()` throw
+  /// `ProxyStartException`. There is no way to lift this restriction.
+  ///
+  /// Requests must name the proxy in their `Host` header: one of this
+  /// value, `127.0.0.1`, `localhost` or `[::1]`, with the port in use.
+  /// Other requests are refused with `403`, the health check included.
+  ///
   /// **Default**: `'127.0.0.1'`
   final String host;
 
@@ -174,6 +184,60 @@ class ProxyConfig {
   /// **Default**: `[]` (no path is force-cached)
   final List<String> forceCachePaths;
 
+  /// Whether responses that belong to one user are kept in the response
+  /// cache.
+  ///
+  /// A response always counts as belonging to one user when it carries
+  /// `Set-Cookie` or `Set-Cookie2`, or `Cache-Control: private` (including
+  /// `private="..."`). Otherwise it counts as belonging to one user when
+  /// either of these holds:
+  ///
+  /// * the proxy sent `Authorization` upstream (it is never sent to a
+  ///   mirrored origin)
+  /// * the proxy sent a `Cookie` header upstream (cookies from the cookie
+  ///   jar and the WebView cookies allowed by [forwardWebViewCookieNames];
+  ///   the proxy's own access token cookie is never sent and does not count)
+  ///
+  /// unless its `Cache-Control` says `public`, by which the upstream allows
+  /// sharing it, and its `Vary` names none of `Cookie`, `Authorization` and
+  /// `*`. Following RFC 9111 section 3.5, only `public` counts: `s-maxage`
+  /// and `must-revalidate` allow sharing on the premise of revalidation,
+  /// which the proxy does not do when it serves from the cache offline.
+  ///
+  /// **Note**: When the session is a cookie, the cookie jar is sent with
+  /// almost every request once a cookie exists, so nearly every response,
+  /// static resources included, counts as belonging to one user unless the
+  /// upstream marks it `public`. With `false`, the cache then stays
+  /// practically empty after sign-in. With an owner, such static resources
+  /// are also fetched again after the user changes, before they can be
+  /// served offline to the new user.
+  ///
+  /// When `false`, such a response is not stored, and
+  /// `ProxyEventType.cacheSkipped` is raised with `reason` `userScoped`.
+  ///
+  /// When `true` and [queueOwnerResolver] is set, such a response is stored
+  /// with the current owner (the HMAC the queue uses, never the identifier
+  /// as given) and is served from the cache only while the same owner is
+  /// current. Another owner, or a changed owner, gets a miss and
+  /// `ProxyEventType.cacheMiss` with `reason` `ownerMismatch`. An owner left
+  /// unresolved (`QueuePauseReason.ownerUnresolved`) is treated as an owner
+  /// of its own: what it stored is served only until the owner changes. A
+  /// response is not stored (`cacheSkipped`, `reason` `ownerChanged`) when a
+  /// sign-in started or the owner changed while it was being fetched. Before
+  /// anyone has signed in there is no owner yet: such a response is stored
+  /// with a mark for "no owner" and served only until an owner is set or the
+  /// owner becomes unresolved.
+  ///
+  /// Without [queueOwnerResolver], such a response is stored and served to
+  /// whoever asks, as in 0.25.0. Either way, `Set-Cookie` and `Set-Cookie2`
+  /// are removed from the stored headers; the response returned upstream
+  /// keeps them. Entries stored by 0.25.0 are not rewritten: their
+  /// `Set-Cookie` stays on the device until they expire or `clearCache()`
+  /// removes them, but it is never returned from the cache.
+  ///
+  /// **Default**: `true`
+  final bool cacheUserScopedResponses;
+
   /// Additional origins whose resources are fetched and cached through the
   /// proxy.
   ///
@@ -207,7 +271,9 @@ class ProxyConfig {
   /// * The client's `Cookie`, `Authorization`, `Origin` and `Referer` headers
   ///   are not relayed to a listed origin, so credentials held for the upstream
   ///   origin never reach a third party. Cookies a listed origin sets are kept
-  ///   in the jar under its own domain
+  ///   in the jar under its own domain, and its `Set-Cookie` headers are not
+  ///   returned to the WebView, which would otherwise store them under the
+  ///   proxy origin and send them back with requests to [origin]
   ///
   /// **Content-Security-Policy**: a rewritten URL becomes same-origin with the
   /// proxy, so a page that restricts `script-src` or `style-src` has to allow
@@ -322,8 +388,8 @@ class ProxyConfig {
   /// protects against a script already running on the page.
   ///
   /// A request without an `Origin` header is allowed, so another app or
-  /// process on the same device can reach the endpoints over loopback. Enable
-  /// [requireAccessToken] together with this to refuse such requests.
+  /// process on the same device can reach the endpoints over loopback. Keep
+  /// [requireAccessToken] enabled (the default) to refuse such requests.
   ///
   /// **Default**: `false` (production safe)
   final bool enableAdminApi;
@@ -336,9 +402,9 @@ class ProxyConfig {
   /// sessions held in its Cookie Jar, and can reach the status and admin
   /// endpoints.
   ///
-  /// When enabled, the proxy answers `403` to any request that has neither a
-  /// cookie named [OfflineWebProxy.accessTokenCookieName] nor a header named
-  /// [OfflineWebProxy.accessTokenHeaderName] whose value equals
+  /// Enabled by default. The proxy answers `403` to any request that has
+  /// neither a cookie named [OfflineWebProxy.accessTokenCookieName] nor a
+  /// header named [OfflineWebProxy.accessTokenHeaderName] whose value equals
   /// [OfflineWebProxy.accessToken]. The check covers forwarded requests,
   /// bundled static assets, the mirrored-origin path, the WebStorage bridge
   /// and the status and admin endpoints. Only `GET` / `HEAD` on
@@ -369,27 +435,123 @@ class ProxyConfig {
   /// a `Set-Cookie` of the same name from responses so that the upstream
   /// cannot overwrite the token in the WebView.
   ///
-  /// **Default**: `false`
+  /// `webview_flutter` sets cookies with `WebViewCookieManager.setCookie`,
+  /// which cannot mark a cookie HttpOnly, so a script on the page can read the
+  /// token. Use a cookie manager that supports HttpOnly when that matters.
+  ///
+  /// Set this to `false` only when no other app or page on the device can
+  /// reach the loopback port, for example in tests.
+  ///
+  /// **Default**: `true` (changed from `false` in 0.26.0)
   final bool requireAccessToken;
 
-  /// Add `Access-Control-Allow-*` headers to responses other than the internal
-  /// endpoints.
+  /// Add `Access-Control-Allow-*` headers for the origins in
+  /// [corsAllowedOrigins] to responses other than the internal endpoints.
   ///
-  /// When `true`, the proxy adds `Access-Control-Allow-Origin: *` to every
-  /// response except the internal endpoints, which lets a page on another
-  /// origin read the response. Pages in the WebView are served from the proxy
-  /// origin and do not need these headers, so set this to `false` unless a
-  /// page on another origin must read the proxy. Headers returned by the
-  /// upstream itself are passed through either way.
+  /// Pages in the WebView are served from the proxy origin and do not need
+  /// these headers, so leave this `false` unless a page on another origin must
+  /// read the proxy. When `true`, [corsAllowedOrigins] must not be empty;
+  /// `start()` rejects an empty list with a `ProxyStartException`.
   ///
-  /// **Default**: `true`
+  /// When enabled, a response to a request whose `Origin` header matches an
+  /// entry of [corsAllowedOrigins] gets `Access-Control-Allow-Origin` set to
+  /// that `Origin` value, plus `Access-Control-Allow-Methods` and
+  /// `Access-Control-Allow-Headers`. A request from any other origin, or
+  /// without `Origin`, gets none of them. Because the answer depends on
+  /// `Origin`, every such response also carries `Vary: Origin`. Only when
+  /// [corsAllowedOrigins] is `['*']` does the proxy answer
+  /// `Access-Control-Allow-Origin: *`, to every request, without `Vary`.
+  /// `Access-Control-Allow-Credentials` is never added. Headers returned by
+  /// the upstream itself are passed through either way.
+  ///
+  /// While [requireAccessToken] is enabled (the default), a page on another
+  /// origin normally cannot send the access token (except when, in the same
+  /// WebView, it can send the token cookie with `credentials: 'include'`): it
+  /// is refused with `403`, and so is a CORS preflight, which carries no
+  /// cookies. Those refusals carry no CORS
+  /// headers, `Access-Control-Allow-Headers` does not list
+  /// [OfflineWebProxy.accessTokenHeaderName], and
+  /// `Access-Control-Allow-Credentials` is never sent. CORS headers therefore
+  /// only take effect with `requireAccessToken: false`; see
+  /// [requireAccessToken] for the risk of disabling it.
+  ///
+  /// **Default**: `false` (changed from `true` in 0.26.0)
   final bool addCorsHeaders;
+
+  /// Origins allowed to read the proxy's responses when [addCorsHeaders] is
+  /// `true`.
+  ///
+  /// Each entry is an `http` or `https` origin such as
+  /// `'https://app.example.com'` or `'http://localhost:8080'`, without a path,
+  /// query, fragment or user info. Scheme and host are compared
+  /// case-insensitively, and a default port (`80` for `http`, `443` for
+  /// `https`) matches whether or not it is written. `'*'` alone allows every
+  /// origin with `Access-Control-Allow-Origin: *`; it cannot be combined with
+  /// other entries. `start()` rejects any other value with a
+  /// `ProxyStartException`.
+  ///
+  /// Ignored while [addCorsHeaders] is `false`. While [requireAccessToken]
+  /// is enabled (the default), a page on another origin is refused with
+  /// `403` before these headers apply, so the list only takes effect with
+  /// `requireAccessToken: false` (see [addCorsHeaders]).
+  ///
+  /// **Example**: `['https://app.example.com']`
+  /// **Default**: `[]`
+  final List<String> corsAllowedOrigins;
+
+  /// Names of cookies sent by the WebView that the proxy passes on to the
+  /// upstream [origin].
+  ///
+  /// The proxy keeps the upstream session in its own cookie jar and sends the
+  /// jar's cookies with every request to [origin]. Cookies the WebView holds
+  /// for the proxy origin are a different matter: a script on any page served
+  /// through the proxy can set them with `document.cookie`, so passing them on
+  /// unchecked would let a page plant or shadow cookies the upstream trusts.
+  /// Only a cookie whose name is listed here is passed on, and only when the
+  /// jar holds no cookie of the same name for the request URL (the jar's
+  /// value wins). Every other WebView cookie is dropped.
+  ///
+  /// The same list applies when a request is stored in the offline queue
+  /// (the stored `Cookie` header keeps only the listed names, and is left out
+  /// when none remain) and when a queued request is replayed, including
+  /// requests queued by 0.25.0 or earlier with every cookie.
+  ///
+  /// * Each entry must be a cookie name made of RFC 6265 token characters
+  ///   (no spaces, `=`, `;`, `,`, quotes and other separators). Names are
+  ///   compared case-sensitively
+  /// * [OfflineWebProxy.accessTokenCookieName] cannot be listed; the access
+  ///   token is never passed on
+  /// * `{'*'}` alone passes on every WebView cookie (other than the access
+  ///   token), which is the behaviour of 0.25.0 and earlier. `'*'` cannot be
+  ///   combined with other entries
+  ///
+  /// `start()` rejects any other value with a `ProxyStartException`.
+  ///
+  /// Requests relayed to [mirroredOrigins] never carry WebView cookies, and
+  /// their responses never return `Set-Cookie` to the WebView, regardless of
+  /// this setting; cookies set by a listed origin are kept in the jar only.
+  ///
+  /// To keep sending a cookie that a page sets in JavaScript, list its name,
+  /// for example `{'locale'}`.
+  ///
+  /// **Example**: `{'locale', 'consent'}`
+  /// **Default**: `{}` (no WebView cookie is passed on; changed in 0.26.0)
+  final Set<String> forwardWebViewCookieNames;
 
   /// Enable a lightweight WebStorage inheritance bridge for WebView pages.
   ///
   /// When enabled, the proxy can inject a small script into HTML responses and
   /// expose snapshot endpoints so the app can transfer localStorage and
   /// IndexedDB data across origin changes.
+  ///
+  /// From 0.26.0 the snapshot is stored in the encrypted box
+  /// `proxy_web_storage_secure`; the plain box of 0.25.0 and earlier is moved
+  /// into it and deleted at startup. The bridge accepts only pages of the
+  /// proxy's own origin (`POST` requires `Origin`; a cross-site
+  /// `Sec-Fetch-Site` is refused) and answers with `Cache-Control: no-store`.
+  /// When disabled, the plain box is deleted without opening any box, and the
+  /// bridge path answers `404` without being forwarded upstream. Use
+  /// `OfflineWebProxy.clearWebStorageSnapshot()` to delete the snapshot.
   ///
   /// **Default**: `false`
   final bool enableWebStorageInheritance;
@@ -404,6 +566,29 @@ class ProxyConfig {
   ///
   /// **Default**: `'info'`
   final String logLevel;
+
+  /// Whether URLs in `ProxyEvent`s keep their query string and fragment.
+  ///
+  /// Query strings often carry search terms, one-time codes or session
+  /// identifiers, and events are commonly forwarded to log collectors. While
+  /// this is `false`, the proxy removes the query (`?…`) and fragment (`#…`)
+  /// from `ProxyEvent.url` and from every URL item in the event data
+  /// (`proxyRequestUrl`, `resolvedUpstreamUrl`, `resolvedProxyUrl`,
+  /// `sourceUpstreamUrl`, `locationHeader`, `normalizedTargetUrl` and the
+  /// `url` of `queueResendAttempted`).
+  ///
+  /// The `externalUrl` of `redirectHandled` is always the full URL, query
+  /// included, regardless of this setting: for an external launch the proxy
+  /// answers the WebView with `204` only, so this value is the only way for
+  /// the app to learn what to launch. Do not write it to logs.
+  ///
+  /// Set to `true` to receive the full URLs as in 0.25.0 and earlier. The
+  /// Dart API `OfflineWebProxy.recentResendResults` always keeps the full URL
+  /// regardless of this setting, while the status endpoint never includes the
+  /// query.
+  ///
+  /// **Default**: `false`
+  final bool includeQueryInEvents;
 
   /// Default list of paths that `warmupCache()` pre-caches.
   ///
@@ -626,15 +811,37 @@ class ProxyConfig {
   /// function returns `null` does not end that pause. When the app ends while
   /// a sign-in is being forwarded, the next start also treats the signed-in
   /// user as a new, unknown owner, because the new session cookie may already
-  /// be stored. If the proxy cannot save that a sign-in is in progress, it
+  /// be stored. Whenever a start finds the current owner unknown while
+  /// requests of another owner are queued, it pauses the queue with
+  /// `QueuePauseReason.ownerUnresolved` again instead of moving them out. If the proxy cannot save that a sign-in is in progress, it
   /// still forwards the sign-in and raises `ProxyEventType.errorOccurred`
   /// with `phase` `queueOwnerPersist`; an app that ends during that sign-in
   /// then starts with the previous owner.
   ///
+  /// Each request keeps the owner that was current when the proxy received
+  /// it, even when another user signs in while the upstream is still
+  /// answering. Concurrent sign-ins are settled one at a time in the order
+  /// their responses arrive, so the stored session cookie and the current
+  /// owner always belong to the same user.
+  ///
+  /// Replacing the session outside a sign-in also changes who the queue
+  /// belongs to. `OfflineWebProxy.restoreCookies()` takes the user of the
+  /// restored session as `queueOwnerId`: with it, that user becomes the
+  /// current owner; without it, the queue is paused with
+  /// `QueuePauseReason.ownerUnresolved`. `OfflineWebProxy.clearCookies()`
+  /// also pauses the queue that way when it removes every cookie or a domain
+  /// sent to the configured origin. Requests of the previous owner are kept
+  /// in either case.
+  ///
   /// The owner is never stored as given: the proxy keeps an HMAC-SHA256 of
   /// it, keyed with a key derived from the storage encryption key, and never
   /// puts it in events or the status endpoint. The current owner survives a
-  /// restart.
+  /// restart. Its record carries an HMAC tag; when the tag does not match, or
+  /// the record is missing while queued requests have an owner, the next
+  /// start raises `ProxyEventType.errorOccurred` with `phase`
+  /// `queueOwnerLoad` and pauses the queue with
+  /// `QueuePauseReason.ownerUnresolved`. A record saved by 0.25.0, which has
+  /// no tag, is accepted once and saved again with a tag.
   ///
   /// **Note**: Requests queued with a session that was signed in before this
   /// setting was introduced have no owner, so they are protected only after
@@ -893,6 +1100,67 @@ class ProxyConfig {
   /// **Default**: `Duration(days: 30)`
   final Duration droppedRequestRetention;
 
+  /// Largest request body the proxy accepts, in bytes.
+  ///
+  /// The proxy reads a whole update request into memory to forward it and to
+  /// keep it for resending, so the size is bounded. `Content-Length` is
+  /// checked first; a request without one (chunked) is counted while it is
+  /// read. A body over the bound is never kept. When the part beyond the
+  /// bound is at most 16 MiB, the proxy reads and discards it before
+  /// answering, so the client can read the answer; when it is larger, the
+  /// proxy answers without reading further and closes the connection, and
+  /// the client may not receive the answer. Either way the answer is
+  /// `413 Payload Too Large` with
+  /// `Cache-Control: no-store`, `X-Offline-Queued: 0`, `Connection: close` and
+  /// the body `{"queued":false,"error":"request_body_too_large"}`. The request
+  /// is neither forwarded nor queued, online or offline. The WebStorage
+  /// bridge uses the smaller of this value and 5 MiB.
+  ///
+  /// Must be between `1024` and `268435456` (256 MiB); `start()` rejects other
+  /// values with a `ProxyStartException`.
+  ///
+  /// **Default**: `10 * 1024 * 1024` (10 MiB)
+  final int maxRequestBodyBytes;
+
+  /// Maximum number of requests kept in the offline queue.
+  ///
+  /// When the queue already holds this many requests, a new update request
+  /// is not stored: the proxy answers `503` with
+  /// `{"queued":false,"error":"queue_full"}` and `X-Offline-Queued: 0`, and
+  /// emits `ProxyEventType.errorOccurred` with `phase: queueLimit` and
+  /// `limit: count`. The body tells this apart from a queue that cannot be
+  /// written, which is answered with `{"queued":false}`. A request answered
+  /// with an upstream 5xx keeps that answer, without `X-Offline-Queued`.
+  /// Requests already in the queue are never removed by this
+  /// limit, including when the queue is over it at startup (for example after
+  /// lowering the value); new requests are refused until enough are sent.
+  /// Requests moved back from the quarantine store with
+  /// `retryQuarantinedRequest()` are not refused by this limit.
+  ///
+  /// Must be between `1` and `100000`; `start()` rejects other values with a
+  /// `ProxyStartException`.
+  ///
+  /// **Default**: `1000`
+  final int queueMaxCount;
+
+  /// Upper bound of the total size of the offline queue, in bytes.
+  ///
+  /// The size of a request is the UTF-8 length of its URL, header names and
+  /// header values, plus the length of its body. A new request that would
+  /// make the total exceed this bound, including a single request larger than
+  /// the bound, is not stored and is answered as with [queueMaxCount], with
+  /// `limit: bytes` in the event. Hive keeps every value of an open box in
+  /// memory, so this also roughly bounds the memory used by the queue, as a
+  /// guide only: bookkeeping fields and the overhead of the stored format
+  /// are not counted, and requests moved back from the quarantine store are
+  /// not refused by this limit.
+  ///
+  /// Must be between `1048576` (1 MiB) and `1073741824` (1 GiB); `start()`
+  /// rejects other values with a `ProxyStartException`.
+  ///
+  /// **Default**: `50 * 1024 * 1024` (50 MiB)
+  final int queueMaxBytes;
+
   /// Response returned when an update request is stored in the offline queue.
   ///
   /// A queued request has not reached the upstream yet, so the front end must
@@ -1061,6 +1329,7 @@ class ProxyConfig {
       'default': 259200,
     },
     this.forceCachePaths = const [],
+    this.cacheUserScopedResponses = true,
     this.mirroredOrigins = const [],
     this.upstreamFailureThreshold = 3,
     this.upstreamProbePath = '/',
@@ -1071,10 +1340,13 @@ class ProxyConfig {
     this.requestTimeout = const Duration(seconds: 20),
     this.retryBackoffSeconds = const [1, 2, 5, 10, 20, 30],
     this.enableAdminApi = false,
-    this.requireAccessToken = false,
-    this.addCorsHeaders = true,
+    this.requireAccessToken = true,
+    this.addCorsHeaders = false,
+    this.corsAllowedOrigins = const [],
+    this.forwardWebViewCookieNames = const {},
     this.enableWebStorageInheritance = false,
     this.logLevel = 'info',
+    this.includeQueryInEvents = false,
     this.startupPaths = const [],
     this.healthCheckPath = '/__offline_web_proxy/health',
     this.statusPath = '/__offline_web_proxy/status',
@@ -1108,6 +1380,9 @@ class ProxyConfig {
     this.quarantineResponseBodyMaxBytes = 0,
     this.droppedRequestMaxCount = 1000,
     this.droppedRequestRetention = const Duration(days: 30),
+    this.maxRequestBodyBytes = 10 * 1024 * 1024,
+    this.queueMaxCount = 1000,
+    this.queueMaxBytes = 50 * 1024 * 1024,
     this.queuedResponse = const ProxyResponseConfig(
       statusCode: 202,
       contentType: 'application/json; charset=utf-8',

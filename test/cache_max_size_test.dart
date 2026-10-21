@@ -7,20 +7,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 
+import 'support/access_token_http.dart';
+
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = <String, List<String>>{};
 
 /// 1 件あたりの本文の大きさ（バイト）。
 const int _bodySize = 100;
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
-}
 
 /// パスごとに決まった大きさの本文を返す上流サーバのモック。
 ///
@@ -126,7 +119,7 @@ void main() {
         Directory.systemTemp.createTempSync('offline_web_proxy_cache_max').path;
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
-    proxy = OfflineWebProxy();
+    proxy = trackAccessToken(OfflineWebProxy());
   });
 
   tearDown(() async {
@@ -141,7 +134,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 

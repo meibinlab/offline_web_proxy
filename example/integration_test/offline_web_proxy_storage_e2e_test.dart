@@ -328,7 +328,11 @@ void main() {
           // 上流へ到達できないため、キューに入れて 202 を返す
           final response = await http.post(
             Uri.parse('http://127.0.0.1:$port/offline-submit'),
-            headers: {'content-type': 'text/plain; charset=utf-8'},
+            headers: {
+              'content-type': 'text/plain; charset=utf-8',
+              // WebView 以外からの要求のため、秘密値をヘッダで渡す
+              OfflineWebProxy.accessTokenHeaderName: proxy.accessToken!,
+            },
             body: marker,
           );
           expect(response.statusCode, HttpStatus.accepted);

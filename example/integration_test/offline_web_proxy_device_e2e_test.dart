@@ -95,10 +95,19 @@ void main() {
             port: 0,
           ),
         );
+        // 応答キャッシュは起動の後で開くため、保存できる状態になるまで待つ
+        await proxy.cacheReady;
 
         final proxyBase = 'http://127.0.0.1:$proxyPort';
+        // WebView 以外からの要求のため、秘密値をヘッダで渡す
+        final tokenHeaders = {
+          OfflineWebProxy.accessTokenHeaderName: proxy.accessToken!,
+        };
 
-        final bin1 = await http.get(Uri.parse('$proxyBase/bin'));
+        final bin1 = await http.get(
+          Uri.parse('$proxyBase/bin'),
+          headers: tokenHeaders,
+        );
         expect(bin1.statusCode, 200);
         expect(bin1.bodyBytes.length, 256);
         expect(bin1.bodyBytes.first, 0);
@@ -107,7 +116,10 @@ void main() {
         // 上流停止後はプロキシキャッシュから返せること
         await closeUpstream();
 
-        final bin2 = await http.get(Uri.parse('$proxyBase/bin'));
+        final bin2 = await http.get(
+          Uri.parse('$proxyBase/bin'),
+          headers: tokenHeaders,
+        );
         expect(bin2.statusCode, 200);
         expect(bin2.bodyBytes, bin1.bodyBytes);
 
@@ -115,6 +127,7 @@ void main() {
         // 到達できない場合は、キューに入れて 202 を返す（0.10.0 から）
         final post = await http.post(
           Uri.parse('$proxyBase/echo'),
+          headers: tokenHeaders,
           body: Uint8List.fromList(List<int>.filled(1024, 7)),
         );
         expect(post.statusCode, anyOf(200, 202, 500, 502, 503, 504));

@@ -7,20 +7,14 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
+import 'package:offline_web_proxy/src/storage/encryption_key_storage.dart';
+
+import 'support/access_token_http.dart';
 
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
 };
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
-}
 
 /// 上流がキューからの送信へ返す応答。
 class _ReplayAnswer {
@@ -198,7 +192,7 @@ void main() {
         .path;
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
-    proxy = OfflineWebProxy();
+    proxy = trackAccessToken(OfflineWebProxy());
     upstream = _MockUpstream(
       await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
     );
@@ -218,7 +212,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 
@@ -369,8 +363,11 @@ void main() {
 
     /// 次の送信時刻までの時間を返す。
     Future<Duration> waitOfRetriedRequest() async {
-      await _waitUntil(() async => (await proxy.getQueuedRequests())
-          .any((request) => request.retryCount > 0));
+      // 次の送信時刻の保存と再送結果の記録の両方を待つ
+      await _waitUntil(() async =>
+          proxy.recentResendResults.isNotEmpty &&
+          (await proxy.getQueuedRequests())
+              .any((request) => request.retryCount > 0));
       final retried = (await proxy.getQueuedRequests())
           .firstWhere((request) => request.retryCount > 0);
       return retried.nextRetryAt.difference(DateTime.now());
@@ -393,6 +390,42 @@ void main() {
         expect(wait, lessThanOrEqualTo(const Duration(hours: 1)));
         final result = proxy.recentResendResults.single;
         expect(result.statusCode, equals(HttpStatus.tooManyRequests));
+      });
+    }, timeout: const Timeout(Duration(seconds: 90)));
+
+    /// 次の送信時刻の保存に失敗しても、再試行回数を二重に増やさないこと
+    test('does not count a retry twice when saving the schedule fails',
+        () async {
+      await withRealHttpClient(() async {
+        var failures = 0;
+        await subscription?.cancel();
+        proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
+          ProxyStorageTestHooks(
+            beforeRetryScheduleSaved: () async {
+              if (failures == 0) {
+                failures++;
+                throw const FileSystemException('injected failure');
+              }
+            },
+          ),
+        ));
+        subscription = proxy.events.listen(events.add);
+        await startWithQueued(
+          ['first'],
+          retryBackoffSeconds: const [120],
+          answerFor: (_) => const _ReplayAnswer(HttpStatus.internalServerError),
+        );
+
+        await _waitUntil(() async =>
+            proxy.recentResendResults.isNotEmpty &&
+            (await proxy.getQueuedRequests())
+                .any((request) => request.retryCount > 0));
+
+        expect(failures, equals(1));
+        final queued = (await proxy.getQueuedRequests()).single;
+        // 失敗した保存の分を数えず、1 回の失敗として保存し直すこと
+        expect(queued.retryCount, equals(1));
+        expect(upstream.replays, hasLength(1));
       });
     }, timeout: const Timeout(Duration(seconds: 90)));
 

@@ -25,22 +25,26 @@ This proxy server relays HTTP requests sent from WebView, forwarding them to the
 
 ### Data Stored on the Device
 
-The proxy stores data in Hive boxes and in secure storage. In an encrypted box only the values are encrypted, and the box keys stay in the clear (IDs derived from the stored time for the queue, the quarantine store and the dropped history; the domain, path, name and so on for cookies). Hive writes the key length in a single byte, so a key over 255 bytes in UTF-8 (a cookie with a long path or name, or a long idempotency key chosen by the page) is stored as `sha256:` followed by its SHA-256 in hex. **The queue and the quarantine store keep the request headers and body as they were sent.** The content, encryption and retention of each location are as follows.
+The proxy stores data in Hive boxes and in secure storage. In an encrypted box only the values are encrypted, and the box keys stay in the clear (IDs derived from the stored time for the queue, the quarantine store and the dropped history; the domain, path, name and so on for cookies). Hive writes the key length in a single byte, so a key over 255 bytes in UTF-8 (such as a cookie with a long path or name) is stored as `sha256:` followed by its SHA-256 in hex. From 0.26.0 idempotency keys are replaced by an HMAC whatever their length (see "Retention Period" in [6]). A key that starts with `sha256:` is replaced the same way whatever its length, so that a short `sha256:<64 hex digits>` key never points at the record of another, longer key. **The queue and the quarantine store keep the request headers and body as they were sent.** The content, encryption and retention of each location are as follows.
 
 | Location | Content | Encryption | Retention |
 | --- | --- | --- | --- |
 | `proxy_cookies_secure` | Cookies (name, value, domain, path, expiry, attributes). Keys consist of the domain, path, name and so on (the SHA-256 when over 255 bytes in UTF-8) | Values only (AES-256) | An expired cookie is removed when the cookies to send are looked up. `clearCookies()` removes them |
-| `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on; the HMAC of the owner when `queueOwnerResolver` is set). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. No limit |
+| `proxy_queue_secure` | Unsent update requests (URL with query, method, headers, body, acceptance time, idempotency key and so on; the HMAC of the owner when `queueOwnerResolver` is set). Keys are IDs derived from the time the request was stored | Values only (AES-256) | Until the request is sent, or moved to the quarantine store or the dropped history. By default up to 1000 requests and 50 MiB; requests beyond that are not stored ("Retention Limits" in [5]) |
 | `proxy_quarantined_requests_secure` | Requests the upstream rejected with 4xx: the queued content (headers and body included) plus the quarantine time, status code and reason. With `quarantineResponseBodyMaxBytes` set, also the start of the refusing response body (see "Response Body Kept with a Quarantined Request" in [5]) | Values only (AES-256) | Until resent or discarded. Limited to 30 days, 1000 entries and 20 MB by default (see "Retention Limits" in [5]) |
 | `proxy_dropped_requests_secure` | History of requests removed from the queue or the quarantine store (URL with query, method, time, reason, status code, error message, whether acknowledged, idempotency key, time first accepted). No headers or body | Values only (AES-256) | 30 days by default. The count limit (1000 by default) applies to acknowledged entries only |
-| `proxy_cache_index_secure`, `proxy_cache_body_secure` | Response cache (the default). The metadata box (`proxy_cache_index_secure`) holds the status code, stored time, expiry, Content-Type and body size; the body box (`proxy_cache_body_secure`) holds the headers and body. Keys are the SHA-256 of the normalized URL | Values only (AES-256) | Entries past their stale period and entries beyond `cacheMaxSize` are removed. Deleted, never restored in plain form, when `encryptResponseCache` is switched off |
-| `proxy_cache_index`, `proxy_cache_body` | Response cache when `encryptResponseCache` is `false`. Same content and keys as the encrypted pair | None | Same as the encrypted pair. Moved into the encrypted pair and deleted once `encryptResponseCache` is enabled |
+| `proxy_cache_index_secure`, `proxy_cache_body_secure` | Response cache (the default). The metadata box (`proxy_cache_index_secure`) holds the status code, stored time, expiry, Content-Type and body size; the body box (`proxy_cache_body_secure`) holds the headers and body. `Set-Cookie` and `Set-Cookie2` are removed from the headers (entries stored by 0.25.0 and earlier may still hold them). With `queueOwnerResolver`, the metadata of a user-scoped response also holds the owner's HMAC (`ownerTag`, or `none` while there is no owner yet; "User-Scoped Responses" in [8]). Keys are the SHA-256 of the normalized URL | Values only (AES-256) | Entries past their stale period and entries beyond `cacheMaxSize` are removed. Deleted, never restored in plain form, when `encryptResponseCache` is switched off |
+| `proxy_cache_index`, `proxy_cache_body` | Response cache when `encryptResponseCache` is `false`. Same content and keys as the encrypted pair | None | Same as the encrypted pair. The boxes are compacted after explicit deletion (`clearCache()`, `clearCacheForUrl()`, and `clearExpiredCache()`, which also runs every hour). Eviction beyond `cacheMaxSize` does not compact them, so evicted entries may stay in the file until Hive compacts the box on its own. Moved into the encrypted pair and deleted once `encryptResponseCache` is enabled |
 | `proxy_cache`, `proxy_cache_secure` | Response cache of 0.21.0 and earlier, holding the metadata and body in one value. `proxy_cache_secure` is the one written by 0.21.0 with `encryptResponseCache` enabled | `proxy_cache`: none; `proxy_cache_secure`: values only (AES-256) | Moved into the new pair and deleted at startup. With `encryptResponseCache` off, `proxy_cache_secure` is deleted without being moved |
-| `proxy_web_storage` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on | None | Until the next snapshot overwrites it |
-| `proxy_idempotency` | Idempotency keys that reached the upstream (the SHA-256 when over 255 bytes in UTF-8), with the time they were recorded | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour |
-| `proxy_port_preferences` | The port last bound for each host. With `queueOwnerResolver` set, also the HMAC of the current owner, a fingerprint of the key, and whether a sign-in is being forwarded (see "Owner of Queued Requests" in [5]) | None | Ports: until the next bind overwrites them. Owner: until it is saved again; a value whose key fingerprint does not match is deleted at startup |
-| `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store, the dropped history (and the response cache when encrypted) | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or a new key replaces it as the decision tables say (see "Decision Tables" in [4]) |
+| `proxy_web_storage_secure` | Web storage snapshot received from the page when `enableWebStorageInheritance` is on (see "Web Storage Bridge" in [5]) | Values only (AES-256) | Until the next snapshot overwrites it or `clearWebStorageSnapshot()` removes it. Also deleted when the key is replaced and when the recovery API deletes the key |
+| `proxy_web_storage` | Web storage snapshot of 0.25.0 and earlier | None | When `enableWebStorageInheritance` is on, moved into `proxy_web_storage_secure` at startup (not when the encrypted box already holds a snapshot), then emptied, compacted and deleted. When it is off, deleted without opening it |
+| `proxy_idempotency` | Idempotency keys that reached the upstream, with the time they were recorded. From 0.26.0 the box key is `h1:` followed by the HMAC-SHA256 of the idempotency key in hex (see "Retention Period" in [6]), so the key the page sent is not stored. Records of 0.25.0 and earlier keep the key as sent (the SHA-256 when over 255 bytes in UTF-8) | None | Keys older than `idempotencyRetention` (24 hours by default) are removed every hour, and the box is then compacted. Records of 0.25.0 and earlier disappear the same way |
+| `proxy_port_preferences` | The port last bound for each host. With `queueOwnerResolver` set, also the HMAC of the current owner, a fingerprint of the key, whether a sign-in is being forwarded, and a tag that detects changes (see "Owner of Queued Requests" in [5]) | None | Ports: until the next bind overwrites them. Owner: until it is saved again; a value whose key fingerprint does not match is deleted at startup. The box is compacted whenever the owner record changes |
+| `offline_web_proxy.cookie_box_encryption_key` in secure storage | The key of the encrypted boxes, shared by cookies, the queue, the quarantine store, the dropped history, the web storage snapshot (and the response cache when encrypted). The HMAC keys for idempotency keys and owners are derived from it, one per purpose | Kept in secure storage | Until `recoverEncryptedStorage()` deletes it, or a new key replaces it as the decision tables say (see "Decision Tables" in [4]) |
 | `proxy_queue`, `proxy_quarantined_requests`, `proxy_dropped_requests`, `proxy_cookies` | Content stored in the clear by 0.14.0 or earlier (cookies: before 0.4.0) | None | Deleted after migration to the encrypted boxes. The old queue, quarantine and dropped-history boxes are emptied before deletion |
+
+- **Deletion and compaction**: Hive deletes logically, leaving deletion frames in the file. The unencrypted boxes (the plain response cache, `proxy_idempotency`, `proxy_port_preferences`) are compacted (`compact()`) after deletions or rewrites as the table says, shortening how long deleted values stay in the file. The plain response cache is compacted only after explicit deletion (`clearCache()`, `clearCacheForUrl()`, `clearExpiredCache()`); eviction beyond `cacheMaxSize` can happen on every store, so it is left to Hive's automatic compaction, and evicted entries may stay in the file until then. A failed compaction is not reported, since the deletion itself succeeded. Neither compaction nor deleting a file guarantees erasure from flash storage
+- **Integrity of encryption**: The encrypted boxes carry no MAC (see "Known Limitations" in [4])
 
 ### Proxy Target
 
@@ -83,7 +87,7 @@ In a `text/html` or `text/css` response the proxy serves, an absolute URL matchi
 | Origin not listed | Answers `404`. It is never passed through to the configured origin |
 | Cache | The cache key is the relayed URL. TTL, stale period and storage eligibility follow the same rules as the configured origin |
 | `forceCachePaths` | Matching uses the path the proxy received, so a relay path is listed as `/__offline_web_proxy/ext/**` |
-| Cookie | Only jar entries matching the relayed domain are sent. A `Set-Cookie` from the relayed origin is kept under its own domain |
+| Cookie | Only jar entries matching the relayed domain are sent. A `Set-Cookie` from the relayed origin is kept under its own domain. A cookie whose scope would also reach the host of the configured origin is not saved ("Acceptance Rules for Upstream Set-Cookie" in [4]). Cookies sent by the WebView are not relayed, and a `Set-Cookie` from the relayed origin is not returned to the WebView, because the WebView would store it as a cookie of the proxy origin and send it with requests to the configured origin too ("Set-Cookie Header" in [14]) |
 | `Authorization`, `Origin`, `Referer` | Never sent to a relayed origin |
 | Redirect | A `Location` naming the configured origin or a mirrored origin is rewritten to a proxy URL |
 | Navigation | `resolveNavigationTarget()` treats a mirrored URL as `inWebView` and reports `ProxyNavigationReason.mirroredOriginUrl` |
@@ -120,11 +124,19 @@ Every `ProxyConfig` setting that names paths shares one glob notation. Accepting
 
 - Only the path is compared. Query strings and fragments are excluded
 - Comparison is case sensitive
-- A missing leading `/` is added to both the pattern and the path before comparing
+- Both the pattern and the path are brought to the same form in the following order before comparing, so that a different spelling of the same resource cannot slip past the login paths (`authResumePaths`), the queue exclusion rules (`queueExcludePaths`) or `forceCachePaths`
+  1. Add a missing leading `/`
+  2. Drop everything after `;` in each segment (path parameters such as `;jsessionid=...`)
+  3. Decode only the `%XX` escapes that stand for unreserved characters (`A-Z a-z 0-9 - . _ ~`), so `%6C` becomes `l`. Other `%XX` escapes stay encoded with their hex digits in upper case (`%2F` never becomes `/`). A `%` not followed by two hex digits is left as it is
+  4. Collapse repeated `/` into one
+  5. Drop a trailing `/` (except for the root `/`)
+- A trailing `/*` or `/**` also matches the path in front of it (`/js/*` also matches `/js` and `/js/`). Because the trailing `/` is dropped before comparing, this keeps the 0.25.0 behavior that `/js/*` matches `/js/`
+- `.` and `..` segments are not resolved for matching. A request that hides `.` or `..` behind encoding or the like is refused with `400` before any matching (see "Path Validation" in [2])
 - Patterns are compiled once at startup, never per request
+- Changed in 0.26.0: up to 0.25.0 the spellings were told apart, so `/api/login` did not match `/api/login;jsessionid=1`, `/api/login/` or `/api/%6Cogin`. From 0.26.0 it matches them. `/js/**` now also matches `/js`
 
 ```
-/api/registers/auth.json … matches only /api/registers/auth.json
+/api/registers/auth.json … matches only /api/registers/auth.json (also with ;jsessionid=… or a trailing /)
 /js/*                   … matches /js/haori.js but not /js/vendor/haori.js
 /js/**                  … also matches /js/vendor/haori.js
 ```
@@ -135,17 +147,18 @@ Every `ProxyConfig` setting that names paths shares one glob notation. Accepting
 
 - **Automatic Assignment**: System automatically selects an available port. Avoids port conflicts
 - **Return Value**: Returns the actual port number used when proxy server starts
-- **Bind Target**: Only 127.0.0.1 (local loopback). Prevents external access
+- **Bind Target**: `ProxyConfig.host` (default `127.0.0.1`). Only loopback (`127.0.0.0/8`, `::1`, `localhost`) is allowed (see "Restricting the Listening Host")
 
 ### Security Considerations
 
 - **HTTPS Not Required**: localhost is treated as a secure context by browsers, so HTTP is sufficient
 - **External Access Restriction**: Completely blocks access from outside the device by binding to 127.0.0.1
-- **Other processes on the device**: Over loopback, other apps and browser pages on the device can also reach the proxy. See "Restricting Access" to limit it to the WebView
+- **Other processes on the device**: Over loopback, other apps and browser pages on the device can also reach the proxy. By default, requests without the secret known only to the WebView are refused (see "Restricting Access")
+- **DNS rebinding**: A page on another site can point its own host name at loopback and then reach the proxy. A request whose `Host` header does not name the proxy is refused before the secret check (see "Host Header Matching")
 
 ### Restricting Access
 
-The proxy listens on loopback, but a socket generally cannot tell which process a request came from. By default, therefore, other apps and browser pages on the device can reach the proxy, and on the forwarding path the proxy sends their requests upstream with the sessions in its Cookie Jar. Setting `ProxyConfig.requireAccessToken` to `true` refuses every request that lacks a secret known only to the WebView. The default is `false`.
+The proxy listens on loopback, but a socket generally cannot tell which process a request came from. Without the secret check, other apps and browser pages on the device can reach the proxy, and on the forwarding path the proxy sends their requests upstream with the sessions in its Cookie Jar. `ProxyConfig.requireAccessToken` therefore defaults to `true` and refuses every request that lacks a secret known only to the WebView (the default was `false` up to 0.25.0). Set it to `false` only where no other app or page on the device can reach the proxy, such as in tests.
 
 - **Secret**: On every `start()`, the proxy generates 32 cryptographically random bytes encoded as base64url without padding (43 characters) and returns them from `OfflineWebProxy.accessToken`. A rebind by automatic recovery keeps the value. It is `null` while stopped and after a failed start. It is never returned over HTTP
 - **How it is received**: A request is allowed when either the cookie `__offline_web_proxy_token` (`OfflineWebProxy.accessTokenCookieName`) or the header `X-Offline-Web-Proxy-Token` (`OfflineWebProxy.accessTokenHeaderName`) matches. When several cookies share the name, one match is enough. The comparison runs in constant time
@@ -157,18 +170,57 @@ The proxy listens on loopback, but a socket generally cannot tell which process 
   - Requests the proxy sends upstream by itself, such as `warmupCache()`, do not go through this path
 - **Removal**: Whatever the setting, the secret cookie and header are removed after the check. They are never forwarded upstream or to a mirrored origin, stored in the queue, or resent
   - A cookie of the same name in the upstream response's `Set-Cookie` is not passed to the WebView, so the upstream cannot overwrite the secret there. The proxy still stores it in the Cookie Jar as the upstream's own cookie and sends it upstream on later requests
-- **What the app does**: Before the WebView loads its first page, put the value as an **HttpOnly** cookie on the proxy origin (`baseUri`) with the platform cookie manager (Android's `CookieManager`, `CookieManager.setCookie` of `flutter_inappwebview`, and so on). HttpOnly keeps scripts on the same origin from reading it. After calling `start()` again, put the new value before loading
+- **What the app does**: The check is on by default, so before the WebView loads its first page, put the value as an **HttpOnly** cookie on the proxy origin (`baseUri`) with the platform cookie manager (Android's `CookieManager`, `CookieManager.setCookie` of `flutter_inappwebview`, and so on). HttpOnly keeps scripts on the same origin from reading it. Loading without it gets `403` for every request except the health check. After calling `start()` again, put the new value before loading
+  - `WebViewCookieManager.setCookie` of `webview_flutter` cannot set HttpOnly. If you use it, assume that scripts on the page can read the value
   - Cookies are kept per host. If the WebView uses both `127.0.0.1` and `localhost`, put one on each
   - Cookies do not distinguish ports. A rebind that changes the port needs no new cookie, but the secret is also sent to any other server on the same host
   - With `SameSite=Strict`, the cookie is not sent when a page on another site navigates to the proxy. Navigations back from another site, such as the redirect or `form_post` of an external login, then get `403` as well. Even with `Lax`, a cross-site `POST` does not carry it. Choose the setting that fits the navigations the pages use
   - A request that sends no cookies, such as `fetch` with `credentials: "omit"`, gets `403` unless it carries the header
 - **Remaining risk**: Scripts running in the WebView, including third-party scripts, reach the proxy as same-origin requests that carry the secret. Anyone with root on the device or a WebView debugging connection is not stopped either
 
+### Restricting the Listening Host
+
+- `ProxyConfig.host` must be `localhost` (case-insensitive), an IPv4 address in `127.0.0.0/8` (such as `127.0.0.1` or `127.0.0.2`) or the IPv6 `::1`. Anything else (`0.0.0.0`, `::`, a device address such as `192.168.1.10`, a name with a trailing dot such as `localhost.`, or another host name) makes `start()` throw `ProxyStartException`
+- The proxy sends requests upstream with the secret cookie and the sessions in its Cookie Jar, so it accepts no request from outside the device. There is no setting to lift this restriction (up to 0.25.0 any address could be used)
+
+### Host Header Matching
+
+- For every request, including the health check (`healthCheckPath`), the proxy checks that the `Host` header names the proxy itself. This runs before the secret check
+- **Host name**: Must be one of `ProxyConfig.host`, `127.0.0.1`, `localhost` and `[::1]`, compared case-insensitively. IPv6 is compared in its bracketed form (`[::1]:8080`); another spelling such as `[0:0:0:0:0:0:0:1]` does not match. A name with a trailing dot (`localhost.`) is a different name and does not match. With `ProxyConfig.host` set to `127.0.0.2`, `127.0.0.2` matches too
+- **Port**: Must equal the port in use (`OfflineWebProxy.port`). Because a rebind can change it, every request is compared with the local port of the connection it arrived on (so that a request arriving between the start of listening and the recording of the port is compared correctly). A `Host` without a port matches only while the port in use is 80
+- A request with no `Host` header, several of them, or a malformed one (an empty or non-numeric port, an IPv6 address without brackets, and so on) does not match
+- When the request line carries an absolute URL (`GET http://evil.example/ HTTP/1.1`), the host and port of that URL are checked by the same rules. One with user info (`http://u:p@127.0.0.1:8080/`) does not match either
+- A request carrying `X-Forwarded-Host` or `X-Forwarded-Proto` never matches, whatever the value. dart:io builds the request URL by pasting these values into the `scheme://host` position as they are, so a value with a path or user info (such as `X-Forwarded-Host: 127.0.0.1:8080/injected`) would rewrite the path the proxy matches, the path and query passed upstream, and the URL in events. The WebView never sends these headers (the other headers that claim the requester are not refused; they are only kept from the upstream; see "Headers That Claim the Requester" in [14])
+  - When shelf cannot accept the URL dart:io built, for example because the value contains `#`, shelf answers `400` before any middleware runs
+- **Refusal**: `403` (`text/plain`, `Cache-Control: no-store`). No CORS headers are attached, and the request is counted in neither the statistics nor the events. It is still written to the request log
+
+### Path Validation
+
+- While parsing the request line, dart:io resolves `.` and `..` segments separated by `/` (including those written as `%2E`) and never goes above the root. It also re-encodes a `%` not followed by two hex digits as `%25`
+- By contrast, `..%2F`, `%2E%2E%2F`, `%5C..` and `..%5C`, which encode the separator, and `..;` with a path parameter arrive unresolved. If the upstream server decodes them or strips the `;` part before resolving, they point at a different resource from the path the proxy matched (internal endpoints, `queueExcludePaths`, `authResumePaths`, and so on)
+- After Host header matching and the secret check, and before the router, the proxy therefore decodes `%XX` in each segment, splits the result on `/` and `\`, and refuses with `400` (`text/plain`, `Cache-Control: no-store`) a request in which any part (ignoring anything after `;`) is `.` or `..`. A `%` not followed by two hex digits is refused as well
+  - The `%` check (`malformedPercentEncoding`) is defense in depth. It normally never fires, because dart:io turns a stray `%` into `%25` before the proxy sees it
+- A refusal raises `errorOccurred` (`phase: requestPath`, `reason` set to `dotSegment` or `malformedPercentEncoding`, and `method`). It is not counted in the statistics
+- **Middleware order**: Request log → Host header matching → secret check → path validation → CORS → statistics. A request without the secret gets `403` whatever its path and raises no such event, so another app on the device without the secret cannot flood `errorOccurred`
+- A path that encodes a separator without a `.` or `..` part, such as `a%2Fb` or `%5Cb`, is accepted and passed upstream still encoded
+- Decoding works byte by byte, so this check never refuses a path for being invalid UTF-8. A path containing invalid UTF-8 (such as `%82%A0`) is, however, answered with `400` by shelf before any middleware runs (no `errorOccurred` is raised in that case)
+- Differences in interpretation when the upstream decodes more than once (decoding a double-encoded value, treating `%5C` as a path separator, and so on) are outside the scope of this validation
+
 ### CORS Headers
 
-- By default (`ProxyConfig.addCorsHeaders: true`), the proxy adds `Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` to every response except the internal endpoints. A header of the same name returned by the upstream takes precedence
-- With `false`, the proxy adds none of them. Pages in the WebView share the proxy's origin and do not need CORS headers. Unless a page on another origin has to read the proxy's responses, `false` is recommended
-- CORS headers returned by the upstream itself are passed through regardless of the setting
+- By default (`ProxyConfig.addCorsHeaders: false`), the proxy adds no CORS headers. Pages in the WebView share the proxy's origin and do not need them (up to 0.25.0 the default was `true`, which added `Access-Control-Allow-Origin: *` for every origin)
+- With `true`, the proxy adds CORS headers to responses other than the internal endpoints, only for the origins listed in `ProxyConfig.corsAllowedOrigins`
+  - Only when the request's `Origin` matches an entry does the proxy return that `Origin` value in `Access-Control-Allow-Origin`, together with `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers`. A request from another origin, or without `Origin`, gets none of them
+  - Because the answer depends on `Origin`, responses carry `Vary: Origin`, including those to requests that did not match. When the upstream returned `Vary`, `Origin` is appended to it (left as is when it already contains `Origin` or `*`)
+  - Only when the list is `['*']` does the proxy return `Access-Control-Allow-Origin: *` to every request. `Vary` is not added in that case
+  - `Access-Control-Allow-Credentials` is never added
+  - A header of the same name returned by the upstream takes precedence
+- Each entry of `corsAllowedOrigins` is an `http` / `https` origin without a path, query, fragment or user info (for example `https://app.example.com` or `http://localhost:8080`), or `'*'` alone. Scheme and host are compared case-insensitively, and a default port (80 for `http`, 443 for `https`) matches whether or not it is written. A trailing `/` alone is allowed
+- `start()` throws a `ProxyStartException` when
+  - `addCorsHeaders` is `true` and `corsAllowedOrigins` is empty
+  - `corsAllowedOrigins` contains a value that is not an origin, or mixes `'*'` with other values (checked even while `addCorsHeaders` is `false`)
+- **Interaction with the secret check**: While `requireAccessToken` is enabled (the default), a page on another origin normally cannot send the secret (except when, in the same WebView, it can send the secret cookie with `credentials: 'include'`), and a preflight (`OPTIONS`), which carries no cookies, is refused with `403` as well. The secret is checked before CORS headers are added, so that `403` carries no CORS headers. `Access-Control-Allow-Headers` does not list `X-Offline-Web-Proxy-Token`, and `Access-Control-Allow-Credentials` is never added. CORS headers therefore only take effect with `requireAccessToken: false`. See "Restricting Access" for the risk of disabling it
+- **CORS headers of the upstream**: CORS headers returned by the upstream itself (such as an `Access-Control-Allow-Origin` that reflects the request's `Origin` together with `Access-Control-Allow-Credentials: true`) are outside the proxy's control and are passed through regardless of the setting. When the upstream returns such headers, a page on another origin may still read the proxy's responses even with the default settings (while `requireAccessToken` is enabled, the secret check refuses a page on another origin that cannot send the secret cookie; a page on another origin in the same WebView that can send the cookie with `credentials: 'include'` passes the check)
 
 ### Health Monitoring
 
@@ -176,7 +228,7 @@ The proxy listens on loopback, but a socket generally cannot tell which process 
 - Health checks accept only `GET` and `HEAD` and are answered with `204 No Content` and `Cache-Control: no-store`. Any other method is handled through the normal proxy path.
 - `healthCheckPath` must be a fixed path starting with `/`. Values containing route parameter syntax (`<`, `>`), `?`, `#`, or whitespace are rejected at startup with `ProxyStartException`. An empty value falls back to the default path.
 - Health check requests are never forwarded upstream and are excluded from cache, queue, cookie processing, and statistics counters.
-- Only a request that the router hands to the health check, status or administrative handler — one whose method and path match the router's registration — is treated as an internal endpoint and kept out of the statistics and CORS headers. Of those, only `GET` / `HEAD` health checks and `GET` status requests are also left out of the request log. A `POST` to the status path and administrative paths or methods that are not registered are handled as the forwarding path, as the router does, and are counted in the statistics, given CORS headers and written to the request log.
+- Only a request that the router hands to the health check, status or administrative handler — one whose method and path match the router's registration — is treated as an internal endpoint and kept out of the statistics and CORS headers. The web storage bridge (`/__offline_web_proxy/web_storage` and below) is the exception: it is never forwarded upstream, whatever the setting and method, so it is always treated as an internal endpoint (see "Web Storage Bridge" in [5]). Of those, only `GET` / `HEAD` health checks and `GET` status requests are also left out of the request log. A `POST` to the status path and administrative paths or methods that are not registered are handled as the forwarding path, as the router does, and are counted in the statistics, given CORS headers and written to the request log.
 - Repeated leading slashes in the path (`//__offline_web_proxy/status`, for example) are collapsed into one before routing. The router, the access token check, the statistics and forwarding all see the collapsed path. Because dart:io parses the first segment of `//X/...` as a host name, its letter case may not be preserved.
 - `probe()` sends a request to the health check path on the currently bound port and reports the server as running only when `204` is received. The default timeout is 2 seconds. Connection failure, timeout, and unexpected status are all treated as not running.
 - `isRunning` only returns the internal flag and does not guarantee that the socket actually responds. Use `probe()` to verify actual responsiveness.
@@ -384,8 +436,11 @@ The result of reading the key from secure storage is classified as follows.
 | Temporarily unavailable | `isCupertinoProtectedDataAvailable()` returns `false` on iOS / macOS, for example while the device is locked. Neither a `null` read nor a read error is used for the decision then. A `null` return (platforms other than iOS / macOS), or a failure to obtain the value, counts as available | `temporarilyUnavailable` |
 | Unreadable | The read throws | `keyUnreadable` |
 | Missing | The read returns `null` | `keyMissing` |
-| Invalid | Empty, not Base64, or not 32 bytes. The value itself is wrong, so it is not reread | `keyInvalid` |
+| Invalid | Empty once ASCII whitespace is removed, not Base64, or not 32 bytes. The value itself is wrong, so it is not reread | `keyInvalid` |
 | Present | Anything else | — |
+
+- The stored value is read as Base64 after removing ASCII whitespace (spaces, tabs, line feeds, carriage returns and so on, including a trailing newline). A key registered by hand with a trailing newline is therefore Present
+- The error for an invalid key (`error` and `cause` of `StorageIntegrityException`) is `FormatException('Invalid encryption key encoding')`, or a `FormatException` about the length, and never holds the key string or a position in it. `StorageIntegrityException.toString()` never shows the key string either
 
 #### Rereading the Key
 
@@ -477,12 +532,12 @@ What the recovery does:
 | The key is temporarily unavailable (including by the rereading rules) | Nothing | `rejection: temporarilyUnavailable` |
 | The key is present and no queue, quarantine or dropped-history box is mismatched, corrupted or aborted | Nothing (`start()` discards a problematic cookie box on its own) | `rejection: startWillSucceed` |
 | The key is present and a queue, quarantine or dropped-history box is mismatched, corrupted or aborted (the cookie box is handled by the same rules) | Keep the key and handle each box (table below) | `performed: true` |
-| The key is invalid, or missing or unreadable after rereading, and a queue, quarantine or dropped-history box has content | Delete every encrypted box (cookies, queue, quarantine, dropped history, and the encrypted response cache), then the key | `performed: true`, `keyDeleted: true` |
+| The key is invalid, or missing or unreadable after rereading, and a queue, quarantine or dropped-history box has content | Delete every encrypted box (cookies, queue, quarantine, dropped history, the encrypted response cache and the web storage snapshot), then the key | `performed: true`, `keyDeleted: true` |
 | The key is invalid, or missing or unreadable, and no queue, quarantine or dropped-history box has content | Nothing | `rejection: startWillSucceed` |
 
 - A startup that failed because the key could not be written (`keyWriteFailed`) also gets `startWillSucceed`, since there is no box to delete. Retry `start()` later
 
-Each box is handled as follows when the key is present. Aborted and corrupted boxes are scanned again, without a time limit, in the files as they are after the boxes are closed, before deciding.
+Each box is handled as follows when the key is present. Aborted and corrupted boxes are scanned again, with a limit of 2 minutes per box, in the files as they are after the boxes are closed, before deciding. When scanning any box again takes longer than 2 minutes, nothing is deleted or rebuilt and `rejection: verificationTimedOut` is returned (so that an abnormally large file cannot keep the recovery API from returning; retry once the device is less busy).
 
 | Check result | Handling | Reported in |
 | --- | --- | --- |
@@ -500,19 +555,50 @@ Each box is handled as follows when the key is present. Aborted and corrupted bo
 - **Afterwards**: The shared initialization results are discarded, so `start()` can be called without restarting the process
 - **Counts**: The number of encrypted records cannot be read and is not returned. After startup fails with `StorageIntegrityException`, `getStats()` reports zero, so it must not back a confirmation screen
 
+#### Known Limitations
+
+- **No MAC**: Hive encrypts each value with AES-256-CBC but adds no message authentication code (MAC). The frame CRC only detects accidental damage; tampering is not detected as such. Someone who can rewrite the files can make a value unreadable, or make it decode block by block into a different value. The key is kept in secure storage, and the files rely on the app sandbox for protection. The owner record in the port preference box is not encrypted, so it carries its own HMAC tag to detect changes (see "Storing Owners" in [5])
+
 #### Dependency on Hive's Internal Format
 
 Checking the first frame, scanning, rebuilding and the stored-order rules rely on the internal format of Hive 2.2.3: the frame layout, the key encoding, `calculateKeyCrc`, the handling of `.hive` and `.hivec`, and the key order. Hive's CRC32 is not public, so the proxy carries its own implementation of the same computation. Check compatibility whenever Hive is upgraded. A scan finding a frame that matches by chance is extremely unlikely, but not impossible.
 
 ### Cookie Evaluation Criteria
 
-Implement RFC-compliant cookie evaluation:
+Cookies are evaluated following RFC 6265.
 
 - **Domain**: Validate the domain for which the cookie is valid
-- **Path**: Validate the path for which the cookie is valid
+- **Path**: Validate the path for which the cookie is valid. When the `Path` attribute is empty or does not start with `/`, the default-path computed from the request path (the part before the last `/`, or `/` when there is none) is used (RFC 6265 5.2.4)
 - **Expires/Max-Age**: Manage cookie expiration
+  - `Expires` is parsed with the algorithm of RFC 6265 5.1.1. Besides `Wed, 21 Oct 2026 07:28:00 GMT`, it accepts `Wed, 21-Oct-2026 07:28:00 GMT`, two-digit years (`21-Oct-26`) and asctime (`Wed Oct 21 07:28:00 2026`)
+  - A two-digit year from 70 to 99 is taken as 19xx and from 0 to 69 as 20xx. A value missing the day, month, year or time, a value out of range (a day outside 1 to 31, a year before 1601, or an hour, minute or second out of range) and a date that does not exist (such as 30 February) cannot be parsed, and the whole `Expires` attribute is ignored
+  - `Max-Age` is taken only when it matches `^-?\d+$` (digits, optionally preceded by a single `-`) (RFC 6265 5.2.2). Values such as `0x10`, `+5` and `5s` are ignored as a whole attribute and the previously taken value is kept. A value of 0 or less expires the cookie immediately
+  - `Max-Age`, when present, takes precedence over `Expires`
+  - The expiry received in an upstream `Set-Cookie` is capped at 400 days after it is received (RFC 6265bis). Whether it comes from `Max-Age` or `Expires`, a later expiry is rounded down to 400 days. An expiry passed as structured data to `restoreCookies()` is not capped
+  - A cookie with an `Expires` in the past or a `Max-Age` of 0 or less is not saved and deletes the saved cookie with the same name, domain and path
 - **Secure**: Control cookies that are only sent over HTTPS connections
 - **SameSite**: Process SameSite attribute for CSRF attack prevention
+
+#### Acceptance Rules for Upstream Set-Cookie
+
+A `Set-Cookie` in an upstream response (the configured origin, a relayed origin of `mirroredOrigins`, or a warm-up) is checked against the following rules (RFC 6265 and RFC 6265bis) before it is saved to the Cookie Jar, and is not saved when it breaks one. The `Set-Cookie` in the response returned to the WebView is not affected by these rules.
+
+| `reason` | Not saved when |
+| --- | --- |
+| `domainMismatch` | The request host does not domain-match the `Domain` attribute (the host neither equals the `Domain` nor ends with `.` + `Domain`) |
+| `ipDomain` | The request host is an IP address and the `Domain` attribute differs from it. When they are equal, the cookie is accepted as host-only |
+| `singleLabelDomain` | The `Domain` attribute contains no `.` (`com`, `.com` and so on). When it equals the request host (`localhost`, for example), the cookie is accepted as host-only |
+| `mirroredOriginDomain` | A cookie from a relayed origin would also be sent to the host of the configured origin: for a host-only cookie, the relayed host equals the configured host; with a `Domain`, the configured host domain-matches that `Domain`. Cookies do not distinguish ports, so a relayed origin that differs only in the port is covered too |
+| `insecureSecure` | A response other than `https` set the `Secure` attribute |
+| `securePrefix` | The name starts with `__Secure-` (case-insensitive) and lacks the `Secure` attribute or an `https` response |
+| `hostPrefix` | The name starts with `__Host-` (case-insensitive) and lacks any of the `Secure` attribute, an `https` response, the absence of a `Domain` attribute, or a `Path` attribute whose resolved path (the default-path for an empty value or one not starting with `/`) is `/` |
+| `secureOverwrite` | A cookie from a response other than `https` would overwrite, delete or shadow an unexpired `Secure` cookie (RFC 6265bis 5.7): there is a `Secure` cookie with the same name, whose domain and the new domain domain-match in either direction (including a parent-domain `Domain` shadowing a `Secure` cookie of a child host), and whose path the new cookie's path path-matches. Host-only or not does not matter |
+
+- The checks run in the order `Domain` (`ipDomain`, `singleLabelDomain`, then `domainMismatch`), `mirroredOriginDomain`, `insecureSecure`, `securePrefix`, `hostPrefix`, `secureOverwrite`, and the first one that applies becomes the `reason`
+- This is a simplified check that does not use the Public Suffix List. A cookie whose `Domain` is a multi-label public suffix such as `co.jp` is accepted when the request host domain-matches it
+- A cookie that is not saved is reported with `errorOccurred` (`operation: cookieSave`) carrying a value from the table in `reason` and the cookie name in `cookieName`. The cookie value is never included
+- A `Set-Cookie` that cannot be parsed (`reason: invalidSetCookie`) and a cookie that cannot be saved because the storage is unavailable (`reason: storageFailure`) are not saved either, and are reported with `errorOccurred` (`operation: cookieSave`) carrying the exception type in `error`. In every case the request continues and the upstream response is returned to the WebView
+- Cookies passed to `restoreCookies()` are values from the app and are not subject to these rules. `CookieRestoreEntry.fromSetCookieHeader()` also takes the attributes as they are
 
 ### Management Methods
 
@@ -529,9 +615,11 @@ Provides methods for cookie management. See [20] API Reference for details.
 - **Stored Order**: Resend in ascending order of the stored timestamp to preserve request order
 - **Unique Keys**: Derive keys from a microsecond timestamp plus a per-microsecond sequence number so that requests stored at the same moment are never overwritten
 - **Persistence**: Save queue state in an encrypted Hive box (`proxy_queue_secure`). Continue resending after app restart (see "Encrypted Storage")
+- **Cookies in the Stored Headers**: Of the `Cookie` header the WebView sent, only the names in `ProxyConfig.forwardWebViewCookieNames` are stored. When none remain, the `Cookie` header is not stored at all. A resend filters with the same setting at the time it is sent, so even a request stored by 0.25.0 or earlier with every WebView cookie does not send an unlisted one. The Cookie Jar at the time of the resend takes precedence ("Cookie Header" in [14])
 - **Backoff Handling**: Skip requests that are still waiting for their backoff window and send the following requests whose window has already passed, except while the queue is held after a 429 or paused for a sign-in ("Retry Strategy", "Pausing on an Authentication-Required Answer")
 - **Connection Release**: A resend always reads the upstream response body to completion and releases the connection before moving on, so a queue larger than the concurrent connection limit still drains to the end
 - **When Quarantine Fails**: If the request cannot be moved to the quarantine store, it stays in the queue and is retried with backoff applied (except a request that alone exceeds `quarantineMaxBytes`; see "Retention Limits")
+- **Count and size limits**: A request that would exceed `queueMaxCount` (default 1000) or `queueMaxBytes` (default 50 MiB) is not stored and is answered with `503` and `{"queued":false,"error":"queue_full"}`. A request whose body exceeds `maxRequestBodyBytes` (default 10 MiB) is not queued and is answered with `413` ("Queue and Request Body Limits" under "Retention Limits")
 
 ### Retry Strategy
 
@@ -547,6 +635,7 @@ A request leaves the queue in the following case.
 
 - **4xx Errors**: Client errors (authentication failure, invalid request, etc.). Resending cannot change the result, so the request is removed. 408 and 429 are temporary and are retried instead, and a code listed in `authRequiredStatusCodes` is not removed but pauses sending from the queue ("Pausing on an Authentication-Required Answer")
 - **Owner changed**: With `queueOwnerResolver` set, the owner of the request differs from the user who signed in again. The request is removed without being sent ("Owner of Queued Requests")
+- **Destination origin changed**: The scheme, host or effective port of the stored absolute URL differs from `ProxyConfig.origin` at the time of sending. This applies even to an origin listed in `mirroredOrigins` (the relay path does not accept update requests, so relayed URLs never enter the queue). The request is removed without being sent, so that a request and its cookies never go to the previous destination after the app restarts with another `origin`. The reason is `origin_changed`, the status code is `0`, and `errorMessage` is `Queue origin changed`. The check is made right before sending, once the retry wait has passed. A request stored with a relative URL by an old version is still sent with the current `origin` added, as before
 
 Network errors, 5xx errors, 408 and 429 are treated as temporary failures: they are kept in the queue and retried.
 
@@ -632,30 +721,46 @@ queueOwnerResolver: (context) => switch (context.requestJson) {
 
 #### Recording and Comparing Owners
 
-- **Recording**: When a request is queued, the current owner at that moment is recorded with it. The owner is kept when the request is quarantined and when `retryQuarantinedRequest()` puts it back
+- **Recording**: The current owner at the moment the proxy received the request is recorded with it when it is queued. It stays that owner even when another user signs in while the upstream is still answering. The owner is kept when the request is quarantined and when `retryQuarantinedRequest()` puts it back
 - **Comparing**: Right before a request is sent from the queue, its owner is compared with the current owner. A request waiting for its backoff is compared too, without waiting for its time. When both are known and differ, the request is not sent and leaves the queue as described in `dropPolicy` (with `quarantine`, a request that alone exceeds `quarantineMaxBytes` is recorded in the dropped history as `quarantine_too_large`)
   - The reason is `owner_changed`, the status code is `0`, and `errorMessage` is `Queue owner changed`
   - As for a 4xx, `requestQuarantined` or `requestDropped` is raised. The resend result (`queueResendAttempted`, `recentResendResults`) is recorded with `dropReason: owner_changed` and `statusCode: 0`
   - A request put back with `retryQuarantinedRequest()` while another user is signed in is quarantined again as `owner_changed`. Put it back after its owner signs in again
 - **Requests not compared**: When either the owner of the request or the current owner is unknown, the request is sent as before. This covers requests queued before this setting was used, and requests queued while nobody had signed in (while there is no current owner)
 - **While a sign-in is forwarded**: While a sign-in request (one matching `authResumePaths`) is being forwarded to the upstream, nothing new is sent from the queue. A resend that started before the forward is cancelled right before its body is sent and is sent again in a later pass, without counting as a failure or changing its retry count. This keeps a request from going out with the new session's cookies before the owner is known. When the forward ends, sending starts without waiting for the next periodic pass
+- **Concurrent sign-ins**: Storing the `Set-Cookie` of a sign-in response, determining the owner and saving it run as one step, one sign-in at a time. Even with several sign-ins forwarded at once, the cookies and the owner are settled together in the order the responses arrive, so the session in the cookie jar and the current owner never belong to different users. When this turn cannot be acquired within 30 seconds, only the cookies are stored, the owner is left undetermined and the queue pauses with `ownerUnresolved`; the sign-in response is still returned. The same applies to `restoreCookies()`. The sign-in or restore that held the turn then checks, before settling the owner and before resuming, whether cookies were written outside the turn; if so, it does not settle the owner and pauses the queue with `ownerUnresolved`, so the queue never runs with the session and the owner belonging to different users
+- **When the function returns `null`**: The current owner is kept, and a pause for authentication (`authenticationRequired`) resumes as before. A pause because the owner could not be determined (`ownerUnresolved`) does not end
+
+#### Changing the Session Outside a Sign-in
+
+The session in the cookie jar also changes through `restoreCookies()` and `clearCookies()`. With `queueOwnerResolver` set when the proxy was started (also after it stops), the owner is handled as follows. Without it, the behaviour is the same as in 0.25.0.
+
+- **`restoreCookies(entries, queueOwnerId: ...)`**: As for a sign-in, nothing new is sent from the queue until the cookies are stored and the owner is settled, and a resend already started is cancelled right before its body is sent. Pass the user of the restored session as `queueOwnerId`, in the same form as `queueOwnerResolver` returns. With it, that user becomes the current owner (only the HMAC is stored) and a paused queue resumes. Without it (`null` or an empty string), and when the cookies cannot be stored, the session is taken to belong to an unknown user and the queue pauses with `ownerUnresolved` ("When the Owner Cannot Be Determined")
+- **`clearCookies()`**: Removing every cookie, or a `domain` sent to the host of the configured `origin` (the host itself or a parent domain of it; a leading `.` and case are ignored), leaves the user of the session unknown, so the queue pauses with `ownerUnresolved`. It also pauses when the removal fails. Removing other domains changes nothing
+- **Requests of the previous owner**: Kept in both cases. They are sent as they are once the previous owner signs in again, or when a session is restored with that user as `queueOwnerId`
+- **Before the first start**: Whether a function is set is not known yet, so `queueOwnerId` is not used and the owner does not change. Apps that rely on owners should call these methods after `start()`
 
 #### When the Owner Cannot Be Determined
 
-When the function throws, or the owner cannot be determined or saved:
+When the function throws, or the owner cannot be determined or saved, and likewise for `restoreCookies()` without `queueOwnerId`, `clearCookies()` that removes the session ("Changing the Session Outside a Sign-in") and a start that cannot trust the owner record ("Storing Owners"):
 
 - **Notification**: `ProxyEventType.errorOccurred` is raised with `phase` `queueOwnerResolve` or `queueOwnerPersist` in `data`. Because the message of an exception may quote the body, `error` carries only the type of the exception (or a short reason for a failure that is not an exception)
 - **Pause**: The signed-in user is treated as a new, unknown owner, and the queue pauses with `QueuePauseReason.ownerUnresolved`. `ProxyStats.queuePausedReason` and `queuePausedReason` in the status endpoint become `ownerUnresolved`
 - **Resuming**: `resumeQueue()`, or a later sign-in that is resolved to an owner. A sign-in for which the function returns `null` does not end the pause. `skipPausedRequest()` does not cover it and returns `false`
 - **After resuming**: Requests of a known owner are moved out as `owner_changed`, because a different owner is taken to have signed in. Requests queued while the owner is unknown record that unknown owner, so they are moved out as `owner_changed` after the next sign-in that is resolved to an owner
-- **Persistence**: The pause is kept in memory only and ends with `stop()`. The unknown owner is saved, so on the next start, requests of a known owner are moved out as `owner_changed` without waiting for the user
+- **Persistence**: The pause is kept in memory only and ends with `stop()`. The unknown owner is saved, and when a start finds that the current owner is unknown and the queue holds requests of another owner, it pauses the queue with `ownerUnresolved` again, whatever the cause (no event is raised). Requests of the previous owner are never moved out as `owner_changed` without waiting for the user. It resumes as described above
 
 #### Storing Owners
 
 - **HMAC**: The identifier is never stored as given. The proxy keeps only an HMAC-SHA256 of it, keyed with a key derived from the storage encryption key, and never puts it in events, the status endpoint or the admin endpoints
 - **Current owner**: Saved with a fingerprint of the key in the port preference box (`proxy_port_preferences`, not encrypted), and kept across restarts. A value whose key fingerprint does not match (after the key was replaced, for example) is discarded
+- **Detecting changes**: The port preference box is not encrypted, so the owner record (the owner, the key fingerprint and whether a sign-in is being forwarded) carries an HMAC-SHA256 tag keyed with a key derived from the storage encryption key. In the following cases a start raises `errorOccurred` (`phase: queueOwnerLoad`), treats the signed-in user as an unknown owner and pauses the queue with `ownerUnresolved` ("When the Owner Cannot Be Determined")
+  - The tag does not match, or it is missing although a tagged record has been saved before (`reason: tagMismatch`)
+  - The queue holds requests with an owner while no current owner is recorded (`reason: recordMissing`)
+- **Records from 0.25.0**: A 0.25.0 record, which has no tag, is accepted once, only if no tagged record has been saved before, and is saved again with a tag. When the app goes back to 0.25.0 after starting with 0.26.0 and that version writes the record, the next start with 0.26.0 treats it as changed and pauses
+- **What is not detected**: The tag detects changes to the content of the record. It cannot detect the whole port preference box being put back to an earlier state. A record whose marker and tag are both removed is also accepted as a 0.25.0 record. Hive's encrypted boxes have no way to detect tampering either ([4])
 - **Owner of a request**: Stored with the request in the encrypted queue and quarantine boxes. The dropped history does not keep it
-- **Sign-in in progress**: That a sign-in is being forwarded is saved as well. If the app ends after the cookies are stored and before the owner is saved, the next start treats the signed-in user as an unknown owner, because the new session cookie may already be stored
+- **Sign-in in progress**: That a sign-in is being forwarded is saved as well. If the app ends after the cookies are stored and before the owner is saved, the next start treats the signed-in user as an unknown owner and, when requests of the previous owner are queued, pauses the queue with `ownerUnresolved` ("Persistence" in "When the Owner Cannot Be Determined"), because the new session cookie may already be stored
 - **When the sign-in state cannot be saved**: The sign-in is still forwarded, and `errorOccurred` (`phase: queueOwnerPersist`) is raised. If the app ends during that sign-in, the next start begins with the previous owner
 
 #### Limitations
@@ -730,9 +835,11 @@ A resend happens in the background, so its response never reaches the page that 
 - **Event**: `ProxyEventType.queueResendAttempted` is raised for every outcome — success, quarantine, drop and retry
 - **Content**: URL, method, status code, success, idempotency key, drop reason, whether it will retry, and the attempt time
 - **Body**: Never included, so business data does not leak into a monitoring path
-- **Unreachable upstream**: The status code is `0`. It is also `0` for a request not sent because it belongs to another owner (`owner_changed`)
+- **Unreachable upstream**: The status code is `0`. It is also `0` for a request not sent because it belongs to another owner (`owner_changed`) or because its destination origin changed (`origin_changed`)
+- **Overlapping with `stop()`**: When the answer to a resend arrives while `stop()` is closing the storage, the result (`queueDrained`, `queueResendAttempted`, `recentResendResults`) is not recorded and the request is not removed from the queue. If the request succeeded and its idempotency key could be recorded, the next start treats it as delivered and removes it without sending it to the upstream again. Otherwise it is sent again with the same key
 - **Existing event**: `ProxyEventType.queueDrained` now also carries `statusCode` and `idempotencyKey`
 - **Recent outcomes**: `recentResendResults` exposes up to 20 entries. They are held in memory for monitoring and are not persisted
+- **Query in the URL**: The Dart API `recentResendResults` keeps the full URL including the query. The `url` of the event follows `ProxyConfig.includeQueryInEvents` and drops the query and fragment by default ("URLs in Events" in [18]). The `recentResendResults` of the status endpoint always drops the query and fragment, whatever the setting
 
 ### History Management
 
@@ -811,7 +918,7 @@ The plain boxes of 0.14.0 or earlier (`proxy_queue`, `proxy_quarantined_requests
 
 ### Retention Limits
 
-The following `ProxyConfig` settings limit what the quarantine store and the dropped history keep. The queue itself has no limit, so unsent business data is never thrown away.
+The following `ProxyConfig` settings limit what the queue, request bodies, the quarantine store and the dropped history keep.
 
 | Setting | Default | Counted on | When exceeded |
 | --- | --- | --- | --- |
@@ -821,7 +928,7 @@ The following `ProxyConfig` settings limit what the quarantine store and the dro
 | `droppedRequestMaxCount` | 1000 | Number of dropped history entries | Remove the oldest acknowledged entries. Unacknowledged entries are never removed by count |
 | `droppedRequestRetention` | 30 days | Time since `droppedAt` | Remove, acknowledged or not |
 
-- **Zero and negative values**: `0` (`Duration.zero`) disables that limit. A negative value makes `start()` throw `ProxyStartException`
+- **Zero and negative values**: `0` (`Duration.zero`) disables that limit. A negative value makes `start()` throw `ProxyStartException` (except the queue and request body limits; see "Queue and Request Body Limits" below)
 - **Order of moving out**: A request is written to the dropped history before it is removed from the quarantine store, and is not removed if the write fails. `statusCode` and `errorMessage` keep the values from the quarantine, and `requestDropped` carries `quarantineId` in its `data`
 - **A single request over the total size limit**: It neither pushes existing requests out nor enters the quarantine store. Its body is dropped, it is recorded in the dropped history as `quarantine_too_large`, and it is then removed from the queue. "A request that cannot be quarantined stays queued" does not apply, so the same 4xx is not retried forever
 - **A newly quarantined request**: The check that runs when a request is quarantined never moves out that request
@@ -830,6 +937,29 @@ The following `ProxyConfig` settings limit what the quarantine store and the dro
 - **Compaction**: Hive deletes logically, leaving deletion frames in the file. The checks at startup, every hour and after a deferred migration compact the boxes (`compact()`) outside the locks. Neither guarantees erasure from flash storage
 - **Memory**: Hive loads every value of an open box into memory, so the quarantine store is bounded by total size as well as count. Opening it may briefly use about twice the size limit
 - **Events**: Events raised by the check at startup do not reach an app that subscribes after `start()`. `ProxyStats.unacknowledgedDroppedCount` still reveals them
+
+#### Queue and Request Body Limits
+
+Up to 0.25.0 the queue had no limit and request bodies were read whatever their size. A broken page or a malicious web page that keeps sending large requests could use up the memory and storage of the device, so 0.26.0 adds the following limits.
+
+| Setting | Default | Range | Counted on | When exceeded |
+| --- | --- | --- | --- | --- |
+| `maxRequestBodyBytes` | 10 MiB | 1024 to 268435456 (256 MiB) | The body of one request | Neither forwarded nor queued; answered with `413` |
+| `queueMaxCount` | 1000 | 1 to 100000 | Number of queued requests | Not stored; answered with `503` and `{"queued":false,"error":"queue_full"}` |
+| `queueMaxBytes` | 50 MiB | 1048576 (1 MiB) to 1073741824 (1 GiB) | Total size of the queue | Not stored; answered with `503` and `{"queued":false,"error":"queue_full"}` |
+
+- **Values out of range**: `start()` throws `ProxyStartException`. `0` cannot disable these limits
+- **Checking the body**: `Content-Length` is checked first, and a body over the limit is never kept. For a request without `Content-Length` (chunked), the proxy counts while reading and drops what it has read as soon as the limit is exceeded
+- **The `413` answer**: `413 Payload Too Large` with `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`, `X-Offline-Queued: 0`, `Connection: close` and the body `{"queued":false,"error":"request_body_too_large"}`. It is the same online and offline, and the request is never queued (sending it later would be just as large). An offline request matching `queueExcludePaths` gets the exclusion answer without its body being read
+- **The connection**: Closing a connection with unread data sends a reset to the client, which then cannot read the `413`. The proxy therefore reads and discards the rest of the body, without keeping it, before answering, and closes the connection (later requests are not taken on the same keep-alive connection). At most 16 MiB is discarded: when `Content-Length` exceeds the limit by more than 16 MiB the proxy answers without reading, and a chunked body is no longer read after 16 MiB has been discarded. In that case the client may see the connection closed while sending and never read the `413`
+- **Web storage**: The bridge of `enableWebStorageInheritance` (`POST /__offline_web_proxy/web_storage`) uses the smaller of `maxRequestBodyBytes` and 5 MiB, and answers with the same `413` beyond it (see "Web Storage Bridge" in [5])
+- **Size of a queued request**: The UTF-8 length of the URL and of the header names and values, plus the length of the body. Bookkeeping fields such as the next retry time and the overhead of the stored format are not counted, so the limit only roughly bounds memory and storage use and is not exact (requests moved back from quarantine are not refused either)
+- **Checking the queue**: Before a request is stored, the current count and total plus this request are checked. The count is checked first and gives `limit: count`; exceeding the total size (including a single request larger than `queueMaxBytes`) gives `limit: bytes`. The request is not stored, the answer is `503` with `{"queued":false,"error":"queue_full"}` and `X-Offline-Queued: 0` (the body tells it apart from `{"queued":false}` for a queue that cannot be written), and `errorOccurred` (`phase: queueLimit`, `limit`) is emitted. `requestQueued` is not emitted. An update request answered with an upstream 5xx still gets the upstream answer as is, without `X-Offline-Queued` ("Update requests answered with an upstream 5xx" in [10])
+- **Same idempotency key**: A request the page sends again with the same idempotency key gets the existing queue ID whatever the limits, since it does not grow the queue
+- **Requests already queued**: They are never removed because of these limits. When the queue is over a limit at startup (for example after lowering it) nothing is removed either; new requests are refused until sending or quarantining brings the queue under the limit
+- **Requests moved back from quarantine**: `retryQuarantinedRequest()` and the admin API resend are not refused by these limits. The user moves back a request after checking it, and the request is already on the device
+- **How the queue is counted**: Every request in the box is counted when the box is opened (and at the first check after the box or the legacy box waiting for migration changes), keeping the size of each request. After that, every check matches the kept sizes against the keys of the box: keys missing from the record are counted from the box, and keys no longer in the box are dropped from the record. The total therefore stays right whichever way a request leaves the queue (successful resend, quarantine, drop, owner change, `skipPausedRequest()`, stop and start, storage recovery). Requests in the legacy plaintext queue (`proxy_queue`) still waiting for migration are counted too
+- **Concurrent requests**: The check and the write run one request at a time, so requests that arrive together cannot exceed the limits. When this lock cannot be acquired within 30 seconds, the request is not stored and is answered with `503` and `{"queued":false}`, as for unusable storage
 
 ### Order of Lists and Limit-Based Removal
 
@@ -867,6 +997,7 @@ The unsent count and the online state were reachable only from the Dart API, so 
 
 - **`queuePausedReason`**: Why sending from the queue is stopped (the name of `queuePausedReason` in `getStats()`): `null` when it is not, `"authenticationRequired"` while it waits for a sign-in ("Pausing on an Authentication-Required Answer"), `"rateLimited"` while it is held after a 429 ("Retry Strategy"), `"ownerUnresolved"` while it is stopped because the owner could not be determined ("Owner of Queued Requests"). When both the sign-in wait and the 429 hold apply, `"authenticationRequired"` is returned, because it needs the user to act. `"ownerUnresolved"` is likewise returned in preference to the 429 hold (the sign-in wait and `"ownerUnresolved"` never occur together)
 - **`queuePausedUntil`**: When sending resumes on its own (UTC ISO 8601). Set only for `"rateLimited"`, `null` otherwise
+- **`recentResendResults`**: The latest resend outcomes ("Reporting the Outcome of a Resend"). Because the page can read them, the query (from `?`) and fragment (from `#`) are removed from `url` whatever `includeQueryInEvents` says. Use the Dart API `recentResendResults` when the full URL is needed
 
 With it, "block settlement while something is unsent", "show the unsent count" and "hide the sign-in when offline" are decided entirely in the web app.
 
@@ -920,7 +1051,7 @@ A page that sends an update request with its own idempotency key (section [6]) c
 
 | State | Next state |
 | --- | --- |
-| `queued` | `delivered` (2xx or 303, or treated as sent because the delivered records already hold the key), `quarantined` (4xx other than 408 and 429, or `owner_changed`), `dropped` (4xx or `owner_changed` with `dropPolicy` `drop`, or `quarantine_too_large`). Stays `queued` on 5xx, 408, 429, a 3xx other than 303 or an unreachable upstream, and while the queue is paused by an `authRequiredStatusCodes` answer. The request that paused the queue becomes `quarantined` or `dropped` through `skipPausedRequest()` |
+| `queued` | `delivered` (2xx or 303, or treated as sent because the delivered records already hold the key), `quarantined` (4xx other than 408 and 429, `owner_changed` or `origin_changed`), `dropped` (4xx, `owner_changed` or `origin_changed` with `dropPolicy` `drop`, or `quarantine_too_large`). Stays `queued` on 5xx, 408, 429, a 3xx other than 303 or an unreachable upstream, and while the queue is paused by an `authRequiredStatusCodes` answer. The request that paused the queue becomes `quarantined` or `dropped` through `skipPausedRequest()` |
 | `quarantined` | `queued` (`retryQuarantinedRequest()`), `dropped` (`quarantine_limit`, `quarantine_expired`), `unknown` (discarded) |
 | `dropped` | `unknown` (expired or removed by the count limit, `clearDroppedRequests()`) |
 | `delivered` | `unknown` (after `idempotencyRetention`) |
@@ -944,6 +1075,25 @@ Setting `ProxyConfig.enableAdminApi` to `true` exposes the quarantine store over
 - **Responses**: `200` with `{"retried": true}` for a resend and `{"discarded": true}` for a discard
 - **Failure responses**: `404` when no item matches, and `409` when the item is still waiting for migration from a legacy plain box. Both set `retried` or `discarded` to `false` and carry the reason in `error`. `500` (`text/plain`) when the quarantine lock cannot be acquired within 30 seconds
 
+### Web Storage Bridge
+
+With `enableWebStorageInheritance`, HTML responses get the bridge URL (`/__offline_web_proxy/web_storage/snapshot`) injected, and the page saves a snapshot of its web storage with `POST` and reads it back with `GET`.
+
+- **Storage**: The encrypted box `proxy_web_storage_secure` ("Data Stored on the Device" in [1]). The plain box `proxy_web_storage` of 0.25.0 and earlier is moved and then deleted at startup when the bridge is on, and deleted without being opened when it is off
+- **Accepted requests**: Only requests from pages of the proxy's own origin. The origin is compared with the proxy itself, not with the configured upstream origin: the scheme is `http`, the port is the one the request came in on, and the host name is one the `Host` check ([2]) accepts (`ProxyConfig.host`, `127.0.0.1`, `localhost`, `[::1]`). A value with a path and the like, and `null`, never match
+  - `POST` requires `Origin`; without it the answer is `403`
+  - `GET` without `Origin` is accepted (a same-origin `GET` `fetch` does not send one). When present it must match
+  - A request whose `Sec-Fetch-Site` is present and is neither `same-origin` nor `none` (`same-site`, `cross-site`) gets `403`, whatever the method
+  - Methods other than `GET` and `POST` get `405` (`Allow: GET, POST`)
+- **Responses**: Every response (`200`, `403`, `404`, `405`, `413`, `500`) carries `Cache-Control: no-store`
+- **Internal endpoint**: Never forwarded upstream, never given CORS headers (whatever `corsAllowedOrigins` says), and not counted in the statistics or events. The secret check (`requireAccessToken`) and the `Host` check apply as to any other request
+- **When disabled**: `/__offline_web_proxy/web_storage` and the paths below it are answered with `404` (`Cache-Control: no-store`) for every method and never forwarded upstream
+- **Body limit**: The smaller of `maxRequestBodyBytes` and 5 MiB ("Queue and Request Body Limits"). A body that cannot be read is not stored, and `200` is returned
+- **Access token**: With `requireAccessToken: false`, another app on the device can read the snapshot with a `GET` without `Origin`. Keep `requireAccessToken` enabled when `enableWebStorageInheritance` is on
+- **Damaged encrypted box**: When the encrypted box cannot be opened or holds a value it never stores, it is rebuilt (the page can recreate the snapshot), `errorOccurred` (`phase: webStorageRecovery`) is raised, and startup continues. A plain box left over is still moved into the rebuilt box
+- **Migration failure**: If moving the plain box fails (including after the encrypted box was rebuilt), or deleting it with the bridge off fails, startup continues and `errorOccurred` (`phase: webStorageMigration`, `error` is the exception type) is raised. The plain box is closed and kept, and moved again at the next start
+- **Deletion**: `clearWebStorageSnapshot()` ([20]). While the box is open it is emptied and compacted; otherwise the files of both boxes are deleted. It can be called whether or not the proxy is running, whatever the setting. Erasure from flash storage is not guaranteed
+
 ### Origin Control for Internal Endpoints
 
 The status and administrative endpoints serve only callers on the proxy's own origin.
@@ -951,8 +1101,8 @@ The status and administrative endpoints serve only callers on the proxy's own or
 - A request without an `Origin` header is allowed, because a same-origin `fetch` does not send one
 - A request whose `Origin` equals the proxy's own (`http://<host>:<port>`) is allowed. `127.0.0.1` and `localhost` name the same proxy, so either spelling is accepted
 - Anything else is answered with `403`
-- They are excluded from the CORS middleware and never carry `Access-Control-Allow-Origin: *`
-- A request without an `Origin` is allowed, so other apps on the device can reach them too. To limit them to the WebView, enable `requireAccessToken` as well (section [2], Restricting Access)
+- They are excluded from the CORS middleware and never carry `Access-Control-Allow-Origin`, whatever `corsAllowedOrigins` says
+- A request without an `Origin` is allowed, so if the secret check (`requireAccessToken`, on by default) is disabled, other apps on the device can reach them too (section [2], Restricting Access)
 
 **Note**: Same-origin also means *every script running on the page*. Enabling the administrative endpoints while the page still loads third-party scripts from a CDN would let such a script reach as far as discarding a quarantined request. Move those files into the bundled assets (section [3]) first.
 
@@ -965,7 +1115,8 @@ A queued request is resent without knowing whether the upstream already received
 - **When the key is decided**: On receiving the request. A key supplied by the client is kept; otherwise the proxy generates one
 - **How keys are generated**: From random data, not from the body. Two identical sales totals in a row must not be treated as the same request and collapsed into one
 - **Where it applies**: Both the forwarded attempt and every queue resend carry the same key
-- **Queue deduplication**: Resubmitting the same key does not add a second queue entry
+- **Queue deduplication**: Resubmitting the same key does not add a second queue entry; the ID of the queued request is returned instead, even when the queue limits ("Queue and Request Body Limits" in [5]) are exceeded
+- **Key conflicts**: When a request with the key the client attached is already queued but its owner ("Owner of Queued Requests" in [5]) or its content differs, nothing is stored and the answer is `422` with `{"queued":false,"error":"idempotency_key_conflict"}` and `X-Offline-Queued: 0`. Returning the ID of another request would let the page look up or act on that request. The content is compared through the SHA-256 of the method, URL and body (`requestFingerprint`) recorded when the request is stored; a request stored by 0.25.0 or earlier without it is compared by method and URL. The owners count as equal when `queueOwnerResolver` is not set and when both are unknown. An update request answered with an upstream 5xx still gets the upstream answer as is, without `X-Offline-Queued`
 - **Skipping delivered requests**: A key already known to have reached the upstream within the retention period is not resent
 - **Looking up the state**: A page can look up a request by the key it attached (section [5], "Looking Up a Request's State" under Status Endpoint)
 
@@ -983,7 +1134,10 @@ The proxy guarantees only that the same operation carries the same key. **Dedupl
 - **24 hours by default**: Configurable via `ProxyConfig.idempotencyRetention`. After it expires, a request carrying the key is treated as new
 - **Storage**: Persist with Hive. Valid even after app restart
 - **Expiry**: Removed by the hourly maintenance task
-- **Key length**: A key over 255 bytes in UTF-8 is recorded as its SHA-256 ("Data Stored on the Device" in [1]). Lookups use the same value, so the length makes no difference
+- **Recorded key**: From 0.26.0 the box key is `h1:` followed by the HMAC-SHA256 of the idempotency key in hex (67 bytes). The HMAC key is derived from the storage encryption key with a purpose label (`offline_web_proxy.idempotency_key`), the same mechanism as the owner HMAC with a different label. This keeps the key the page sent out of the unencrypted box. The length of the key makes no difference
+- **Records of 0.25.0 and earlier**: They are also looked up with the value the 0.25.0 rule produces (a key of 255 bytes or less in UTF-8 as is, including a short key starting with `sha256:`; a longer key as `sha256:` followed by its SHA-256). New records never use it. Old records are removed once past the retention period, so they disappear on their own. Under the 0.25.0 rule a short `sha256:<64 hex digits>` key and the longer key it hashes point at the same record, so such old records cannot be told apart (new records can)
+- **When the key is replaced**: Records in the new format can no longer be looked up and stay until they expire. Until then a request with the same key is not held back as already delivered
+- **Compaction**: The box is compacted after expired keys are removed (erasure from flash storage is not guaranteed)
 - **Broken records**: When the box cannot be opened, or holds a value that cannot be read as a recorded time, it is rebuilt, startup continues, and `ProxyEventType.errorOccurred` (`phase: idempotencyStoreRecovery`) reports it. This covers records written by 0.21.0 and earlier with a key over 255 bytes ("Discarding the Cookie Box" in [4]). Rebuilding loses the keys recorded within the retention period, so during that period a request with the same key is not held back as already delivered, and the request-state lookup returns `unknown` instead of `delivered`. This is chosen because it does less harm than a proxy that cannot start
 
 ## [7] Response Compression
@@ -1033,6 +1187,8 @@ The upstream link stays compressed to save bandwidth, and the WebView receives t
 - **no-cache / must-revalidate**: Retained as metadata for saved entries, but not used by the proxy to suppress online forwarding
 - **default TTL**: Apply the configured Content-Type-based default TTL when none of the above are present
 - **Storage failure**: A response that was received from the upstream is returned even when it cannot be stored. The response itself is valid, so a storage failure never discards it; the failure is reported through `ProxyEventType.errorOccurred`
+- **Set-Cookie**: `Set-Cookie` and `Set-Cookie2` are removed from the stored headers, so that no session stays on the device. The response returned to the WebView keeps them (see section [14] for the relay path). A response served from the cache never carries `Set-Cookie` or `Set-Cookie2`, including entries stored by 0.25.0 and earlier. Those entries are not rewritten, so their `Set-Cookie` stays on the device until they pass their stale period and are removed, or `clearCache()` removes them
+- **User-scoped responses**: Whether they are stored, and who they are served to, follows "User-Scoped Responses (cacheUserScopedResponses)" below
 
 #### Fallback Eligibility
 
@@ -1041,7 +1197,8 @@ The upstream link stays compressed to save bandwidth, and the WebView receives t
 3. **On HTTP 4xx**: Return the upstream 4xx response as-is and do not switch to proxy cache
 4. **On HTTP 5xx**: Return the upstream 5xx response as-is and do not switch to proxy cache
 5. **When expired**: Do not return entries whose stale period has also elapsed
-6. **Upstream unreachable with no eligible cache**: GET/HEAD returns 504. A GET page navigation receives the HTML 504 page (replaceable via `ProxyConfig.gatewayTimeoutHtml`), any other GET receives `ProxyConfig.offlineMissResponse`, and HEAD receives a 504 without a body. Mutating requests are queued as before
+6. **When the owner differs**: A user-scoped response stored with an owner tag is returned only while that owner is current ("User-Scoped Responses" below). This applies to 1 and 2 alike, and while the upstream is cut off (section [10], "Upstream Circuit Breaker")
+7. **Upstream unreachable with no eligible cache**: GET/HEAD returns 504. A GET page navigation receives the HTML 504 page (replaceable via `ProxyConfig.gatewayTimeoutHtml`), any other GET receives `ProxyConfig.offlineMissResponse`, and HEAD receives a 504 without a body. Mutating requests are queued as before
 
 #### Storing Despite no-store (forceCachePaths)
 
@@ -1068,9 +1225,33 @@ A skipped response raises `ProxyEventType.cacheSkipped` with the reason (`set-co
 
 **Storage note**: `no-store` exists to ask that a response never be written to storage. The response cache is encrypted by default (section [16], "Encrypting the Response Cache"). With `encryptResponseCache` switched off, the body of a listed path stays on the device in the clear. Even when encrypted, the box keys (the SHA-256 of the URL) stay readable, so weigh what the screen contains, and the impact of a lost device, before listing it.
 
+#### User-Scoped Responses (cacheUserScopedResponses)
+
+The cache key is the URL alone ("Cache Key"), so storing a response whose content depends on who is signed in would serve it offline, unchanged, to another user of a shared device.
+
+- **Criteria**: Whether a response is user-scoped is decided as follows
+  - Always user-scoped: a response carrying `Set-Cookie` or `Set-Cookie2`, and a response whose `Cache-Control` contains `private` (including `private="..."`)
+  - A response for which the proxy sent `Authorization` upstream. Only an actual send counts; it is never sent to a mirrored origin (`mirroredOrigins`)
+  - A response for which the proxy sent a `Cookie` header upstream. Cookies from the cookie jar and the WebView cookies allowed by `forwardWebViewCookieNames` (section [14], "Cookie Header") count. The proxy's access token cookie is never sent upstream and does not count
+  - However, when the only reasons are sending `Authorization` or `Cookie`, and the response's `Cache-Control` contains `public`, the upstream allows sharing it, so the response is not user-scoped. Following RFC 9111 section 3.5, `public` is the only such mark: `s-maxage` and `must-revalidate` allow sharing on the premise of revalidation, which this proxy does not do when it serves from the cache offline, so they do not count (a personal HTML page with `max-age=0, must-revalidate`, for example, is user-scoped)
+  - Even with `public`, a response whose `Vary` names `Cookie`, `Authorization` or `*` is user-scoped, because its content depends on the credentials
+- **With cookie sessions**: Once the upstream keeps its session in a cookie, the cookie jar is sent with almost every request, so nearly every response, static resources included, is user-scoped unless the upstream marks it `public`. With `cacheUserScopedResponses: false`, practically nothing is cached after sign-in. When responses are kept per owner, those static resources too must be fetched again by the new user after the user changes before they can be served offline
+- **`cacheUserScopedResponses: false`**: User-scoped responses are not stored. `ProxyEventType.cacheSkipped` is raised with `reason: userScoped`. It is not raised for a response that would not be stored anyway because of its status or `no-store`
+- **`cacheUserScopedResponses: true` (default) with `queueOwnerResolver`**: The owner current before the request was sent upstream (the same HMAC as in "Owner of Queued Requests" in [5]) is stored in the metadata as the owner tag (`ownerTag`). When there is no owner yet, the fixed value `none` for "no owner" is stored instead; it cannot equal an HMAC or an unresolved owner
+  - **When it is served**: An entry with a tag is served only while the current owner equals the tag (compared for equality; while there is no owner yet, the current owner is compared as `none`). When it differs, or when the proxy was started without `queueOwnerResolver`, the lookup is a miss without reading the body, and `ProxyEventType.cacheMiss` is raised with `reason: ownerMismatch`. This holds for every cache read: offline, upstream unreachable and while the upstream is cut off
+  - **An unresolved owner** (`ownerUnresolved`; "When the Owner Cannot Be Determined" in [5]) is treated as an owner of its own. What it stores carries its tag and is served until the owner changes (a sign-in, `restoreCookies()` or `clearCookies()` giving another value). Entries tagged with the previous owner are not served
+  - **When the owner changes during the fetch**: When a sign-in or `restoreCookies()` starts between sending the request upstream and storing the response, when one was in progress, or when the current owner changed, the cookies sent and the owner may belong to different users, so the response is not stored. `cacheSkipped` is raised with `reason: ownerChanged`. The WebView still receives the response
+  - **Before anyone has signed in**: There is no current owner, so the response is stored with the tag `none`. It is served only while there is no owner, and no longer once an owner is set by a sign-in or similar, or the owner becomes unresolved through `clearCookies()` or similar. This keeps the screens fetched before the first sign-in usable until someone signs in
+- **Without `queueOwnerResolver`**: As in 0.25.0, user-scoped responses are stored without a tag and served to anyone
+- **Entries without a tag**: Entries of responses that are not user-scoped, and entries stored by 0.25.0 and earlier, are served to anyone as before
+- **Same URL**: The tag is not part of the cache key. There is one entry per URL, and another owner fetching the URL replaces it
+- **`forceCachePaths`**: The safety exclusions (`set-cookie`, `vary`, `authorization`) are unchanged. A response not excluded by them (such as one fetched with cookies) is stored under the rules above
+- **Not exposed**: The tag is not included in `CacheEntry`, `getCacheList()`, `getCacheStats()` or events
+
 #### Warmup
 
 - **Cookies**: The cookie jar is sent, exactly as on the forwarding path. Without it, a resource that requires authentication cannot be warmed up
+- **Storage decision**: The same rules as forwarding apply. A response fetched with cookies from the cookie jar is user-scoped, and with `queueOwnerResolver` it carries the tag of the owner current when the fetch started ("User-Scoped Responses")
 - **Accept-Encoding**: The same value as on the forwarding path is sent, and a gzip body is decompressed before it is stored (section [7]), so that the stored response cannot differ between the two routes
 - **Following references**: `warmupCache(followReferences: true)` also fetches the resources referenced by the warmed HTML and CSS
   - In HTML, `<script src>`, `<link href>`, `<img src>` and the `url()` / `@import` references inside `<style>` elements are covered
@@ -1107,8 +1288,8 @@ The response cache is split across two Hive boxes (see "Data Stored on the Devic
 
 | Box | Content | How it is read |
 | --- | --- | --- |
-| Metadata (`proxy_cache_index_secure`; `proxy_cache_index` when not encrypted) | Status code, stored time (`createdAt`), expiry (`expiresAt`), Content-Type, body size (`sizeBytes`) | An ordinary box. Every entry is loaded into memory when it opens (a few hundred bytes each) |
-| Body (`proxy_cache_body_secure`; `proxy_cache_body` when not encrypted) | Headers, body | A LazyBox. An entry is read from the file when it is served from the cache |
+| Metadata (`proxy_cache_index_secure`; `proxy_cache_index` when not encrypted) | Status code, stored time (`createdAt`), expiry (`expiresAt`), Content-Type, body size (`sizeBytes`). For a user-scoped response, the owner tag (`ownerTag`; "User-Scoped Responses"). Entries stored by 0.25.0 and earlier have none and are handled as before | An ordinary box. Every entry is loaded into memory when it opens (a few hundred bytes each) |
+| Body (`proxy_cache_body_secure`; `proxy_cache_body` when not encrypted) | Headers (without `Set-Cookie` and `Set-Cookie2`), body | A LazyBox. An entry is read from the file when it is served from the cache |
 
 - **Why two boxes**: An ordinary Hive box loads every entry when it opens (and decrypts every entry when encrypted) and keeps them in memory until it closes. With bodies included this can reach hundreds of megabytes, so bodies are read only when needed. Removing expired entries, removing entries beyond `cacheMaxSize`, `getCacheStats()` and `getCacheList()` use the metadata alone
 - **Body**: Stored as bytes, with no character conversion
@@ -1146,6 +1327,7 @@ Up to 0.21.0, each entry kept its metadata and body in one value in `proxy_cache
 - **Value**: The SHA-256, in hex (64 characters), of the normalized upstream URL
 - **Normalization**: The scheme and the authority (user info, host and port) are lowercased, runs of slashes in the path are collapsed into one, and the query is appended as is (not sorted). The fragment is dropped. Everything else follows what Dart's `Uri.parse` produces. A URL that cannot be parsed is lowercased as a whole
 - **The URL itself is not stored**: Collisions are not checked. `CacheEntry.url` is an empty string
+- **No user in the key**: Request headers and cookies are not part of the key. User-scoped responses are matched by their owner tag instead ("User-Scoped Responses")
 
 ## [9] Content Type and Character Encoding
 
@@ -1243,7 +1425,15 @@ Add custom headers for debugging to offline responses:
 - **Custom Headers**: `X-Offline-Queued: 1`, `X-Offline-Queue-Id: <queue id>`, `Connection: close`
 - **Content**: `{"queued":true}` (configurable via `ProxyConfig.queuedResponse`)
 - **Why**: The upstream has not processed the request yet, so the web app must be able to tell it apart from a real success. The headers are always added, even when the body is customized, so the decision never depends on the body
-- **When storing fails**: Answers with 503, `{"queued":false}` and `X-Offline-Queued: 0`. Presenting an unsaved request as a success would lose it silently
+- **When storing fails**: Answers with 503, `{"queued":false}` and `X-Offline-Queued: 0`. Presenting an unsaved request as a success would lose it silently. When the queue would exceed `queueMaxCount` or `queueMaxBytes`, the answer is also 503 with `X-Offline-Queued: 0`, but the body is `{"queued":false,"error":"queue_full"}`, so it can be told apart from unusable storage ("Queue and Request Body Limits" in [5]). When the lock for adding to the queue cannot be acquired within 30 seconds, the body is `{"queued":false}` as for unusable storage. In both of these cases `errorOccurred` (`phase: queueSave`) is raised. When a request with the same idempotency key but another owner or content is queued, the answer is `422` with `{"queued":false,"error":"idempotency_key_conflict"}` ("Key conflicts" in [6])
+
+#### Request body too large (update requests)
+
+- **Applies to**: A request whose body exceeds `ProxyConfig.maxRequestBodyBytes` (default 10 MiB), online or offline
+- **Status**: 413 Payload Too Large
+- **Headers**: `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`, `X-Offline-Queued: 0`, `Connection: close`
+- **Content**: `{"queued":false,"error":"request_body_too_large"}`
+- **Why**: The request is neither forwarded nor queued. Sending it later would be just as large, so it is not resent ("Queue and Request Body Limits" in [5])
 
 #### Update requests answered with an upstream 5xx
 
@@ -1311,7 +1501,7 @@ The fallback page starts in "awaiting recovery". The 504 page starts in "continu
 
 #### Request Log
 
-- To keep monitoring from flooding the log, `GET` / `HEAD` requests to `healthCheckPath` and `GET` requests to `statusPath` are omitted from `shelf.logRequests`. The admin API and other methods on the same paths are still logged (see [18])
+- To keep monitoring from flooding the log, `GET` / `HEAD` requests to `healthCheckPath` and `GET` requests to `statusPath` are omitted from the request log. The admin API and other methods on the same paths are still logged (see [18])
 
 ### Processing Cache-Control Response Headers
 
@@ -1363,13 +1553,22 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **passthrough**: Forward cookies from client as-is
 - **off**: Remove Cookie header
 - **mirror relay**: When relaying to a `mirroredOrigins` entry, only jar entries matching the relayed domain are sent and the client's own `Cookie` header is discarded
+- **WebView cookies**: Forwarding to the configured origin and resending from the queue send the Cookie Jar's cookies plus only those WebView cookies whose name is in `ProxyConfig.forwardWebViewCookieNames` and is not in the jar (for a shared name, the jar's value wins). The default is empty, so no WebView cookie is sent. Any page served through the proxy can set cookies on the proxy origin with `document.cookie`, so this keeps a page from planting a cookie the upstream trusts
+  - Names are compared case-sensitively. `{'*'}` alone sends every cookie except the access token (the behavior of 0.25.0 and earlier)
+  - The access token cookie (`OfflineWebProxy.accessTokenCookieName`) is never sent, whatever the setting ([2])
+  - To keep sending a cookie that a page sets in JavaScript, list its name
+  - A `Cookie` header split across several lines is joined with `; ` into one value before filtering. Forwarding and storing in the queue use the same value
+  - Known limitation: A value containing `,` within one line is not split and is treated as the value of that name (unlisted content inside the value of a listed name is not told apart). Browsers allow `,` in values set with `document.cookie`, and dropping such cookies would break values used in practice
+  - Known limitation: The `Cookie` of a request queued by 0.25.0 or earlier may hold several lines already joined with `,`, which cannot be told apart when it is resent
+  - Migration note: A cookie that "Acceptance Rules for Upstream Set-Cookie" in [4] kept out of the Cookie Jar (for example a `Secure` cookie from an `http` upstream) reached the upstream through the WebView up to 0.25.0, but is no longer sent upstream from 0.26.0. You can confirm that it was not saved from `reason` and `cookieName` of `errorOccurred` (`operation: cookieSave`)
 
 ### Set-Cookie Header
 
-- **capture**: Save cookies in Cookie Jar
+- **capture**: Save cookies in Cookie Jar (a cookie breaking "Acceptance Rules for Upstream Set-Cookie" in [4] is not saved)
 - **passthrough**: Pass through as-is
 - **Multiple Set-Cookie headers**: A response received from the upstream passes each `Set-Cookie` to the WebView on its own line, because a browser takes only the first cookie from a single `Set-Cookie` line
-- **Responses from the cache**: The `Set-Cookie` stored with the response is not returned, so a session the upstream updated after caching is not overwritten with an old value. The cookies were already saved to the Cookie Jar when the upstream sent them
+- **Responses from the cache**: The `Set-Cookie` and `Set-Cookie2` stored with the response are not returned, so a session the upstream updated after caching is not overwritten with an old value. The cookies were already saved to the Cookie Jar when the upstream sent them. From 0.26.0, `Set-Cookie` and `Set-Cookie2` are also removed from the headers stored in the response cache ("Storage Policy" in [8])
+- **mirror relay**: A `Set-Cookie` received while relaying to a `mirroredOrigins` entry is not returned to the WebView; it is only saved to the Cookie Jar (unless it breaks the acceptance rules). The WebView would store it as a cookie of the proxy origin and send it with requests to the configured origin too. The same applies when a redirect from the relayed origin is rewritten to a proxy URL
 
 ### Origin/Referer Headers
 
@@ -1377,6 +1576,13 @@ Preserve original Cache-Control header as much as possible even in offline respo
 - **passthrough**: Forward as-is
 - **remove**: Remove header
 - **mirror relay**: Removed when relaying to a `mirroredOrigins` entry, because the value only names the proxy's loopback URL and means nothing to the relayed origin
+
+### Headers That Claim the Requester
+
+- `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, `X-Forwarded-Prefix`, `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, `X-Original-URL` and `X-Rewrite-URL` are never passed on: not when forwarding upstream, relaying to another origin, storing in the queue or resending from the queue. Names are compared case-insensitively
+- Pages in the WebView can set these headers freely. Dropping them keeps the upstream from trusting them as the requester's address or the original URL in access control or when building URLs
+- Requests stored in the queue by 0.25.0 or earlier may still carry them; they are dropped at the time of resending
+- A request carrying `X-Forwarded-Host` or `X-Forwarded-Proto` is refused with `403` by "Host Header Matching" in [2] and never reaches forwarding. For these two, the rule above matters for resending stored requests
 
 ### Accept-Encoding Header
 
@@ -1623,19 +1829,39 @@ Using several `OfflineWebProxy` instances at the same time in one app is not sup
 
 ### Request Log
 
-- `shelf.logRequests` writes one line per request
+- One line per request (time, elapsed time, method, status, path) is written with `debugPrint`. `shelf.logRequests`, used up to 0.25.0, is no longer used
+- Query strings often carry search terms, one-time codes or session identifiers, so they are never logged. A request with a query gets only `?…` after its path (for example `GET     [200] /search?…`)
+- A request whose handling throws gets `[ERROR <exception type>]` instead of the status. The message of the exception is not written
 - To keep the fallback page's monitoring from flooding the log, `GET` / `HEAD` requests to `healthCheckPath` and `GET` requests to `statusPath` are not written (see Auto-reload of the Fallback Page in [10])
+- Requests refused by Host header matching (`403`) and by path validation (`400`) are written too (see [2])
+
+### URLs in Events
+
+- While `ProxyConfig.includeQueryInEvents` is `false` (the default), `ProxyEvent.url` and the URL items in `data` are published without their query (from `?`) and fragment (from `#`). The items are
+  - `requestReceived`: `proxyRequestUrl`, `resolvedUpstreamUrl`, `resolvedProxyUrl`
+  - `redirectHandled`: `proxyRequestUrl`, `sourceUpstreamUrl`, `locationHeader`, `normalizedTargetUrl`, `resolvedUpstreamUrl`, `resolvedProxyUrl`
+  - `queueResendAttempted`: `url`
+- With `includeQueryInEvents: true` the full URLs are published as in 0.25.0 and earlier
+- The `externalUrl` of `redirectHandled` is always the full URL, query included, whatever the setting. For an external launch (`redirectAction: launchExternal`) the proxy answers the WebView with `204` only, so this value is the only way for the app to learn what to launch (a map search term, the `?subject=` of `mailto:`, the `?q=` of `geo:` and so on). **`externalUrl` is meant to be executed by the app and contains the query, so do not write it to logs**
+- The quarantine list of the admin endpoints (`enableAdminApi`, disabled by default) returns full URLs so that requests can be told apart
+- Forwarding to the upstream, the `Location` returned to WebView and the Dart API `recentResendResults` are not affected. The `recentResendResults` of the status endpoint always drops the query ("Status Endpoint" in [5])
+- When a cookie is not saved, `errorOccurred` (`operation: cookieSave`) carries, for a cookie breaking the acceptance rules, the reason for the rejection in `reason` ("Acceptance Rules for Upstream Set-Cookie" in [4]) and the cookie name in `cookieName`; for any other failure, the type of the exception in `error` and `invalidSetCookie` (the `Set-Cookie` could not be parsed) or `storageFailure` (including an unavailable storage) in `reason`. The `Set-Cookie` value (a session identifier, for example) is never included
+- For `errorOccurred` raised when path validation refuses a request (`phase: requestPath`), `ProxyEvent.url` also drops the query and fragment under the rule above
+- `cacheSkipped` (`reason: userScoped`, `ownerChanged`) and `cacheMiss` (`reason: ownerMismatch`) for user-scoped responses carry only `reason` in `data`, never the owner's HMAC, cookies or the value of `Authorization`
+- When a response cannot be stored in the cache, `errorOccurred` (`phase: cacheResponse`) likewise carries only the type of the exception in `error` and `storageFailure` in `reason`, never the message of the exception
+- When a request is not stored because of the queue limits, `errorOccurred` (`phase: queueLimit`) carries `ProxyEvent.url` without the query and fragment under the rule above, and only `phase` and `limit` in `data`. The headers and body of the request are not included. Likewise, when a request is not stored because of the storage or the lock (`phase: queueSave`), `data` carries only `phase` and `reason`
 
 ### Masking Targets
 
-- **Authorization**: Authentication information such as Bearer token
-- **Cookie**: Confidential cookie values such as session ID
-- **Set-Cookie**: Cookie values set in response
+- The request log never contains headers (`Authorization`, `Cookie`, `Set-Cookie` and so on) or bodies
+- `getQueuedRequests()` replaces the values of headers that may carry secrets (`Cookie`, `Authorization`, and names containing `token`, `session` and so on) with `***` (`QueuedRequest` in [20]). The query of the URL is not masked
 
 ### Log Output Example
 
 ```
-INFO: GET /api/user → 200 OK (Authorization: ***, Cookie: ***)
+2026-10-21T16:43:52.727866  0:00:00.005345 GET     [200] /search?…
+2026-10-21T16:43:53.044744  0:00:00.007235 POST    [202] /api/sales.json
+2026-10-21T16:43:53.144145  0:00:00.001021 GET     [ERROR StateError] /page
 ```
 
 ## [19] Platform-Specific Notes
@@ -1689,7 +1915,7 @@ Starts the proxy server.
   - `config`: Configuration object (when omitted, the defaults only; `origin` is then empty, so nothing is forwarded upstream. No configuration file is read)
 - **Return Value**: Actually used port number
 - **Exceptions**:
-  - `ProxyStartException`: When server startup fails, including when the server is already running or still starting, when a retention limit is negative, when `quarantineResponseBodyMaxBytes` is outside 0 to 65536, or when `queueOwnerResolver` is set while `authResumePaths` is empty
+  - `ProxyStartException`: When server startup fails, including when the server is already running or still starting, when a retention limit is negative, when `quarantineResponseBodyMaxBytes` is outside 0 to 65536, when `maxRequestBodyBytes`, `queueMaxCount` or `queueMaxBytes` is out of range, when `queueOwnerResolver` is set while `authResumePaths` is empty, when `forwardWebViewCookieNames` is invalid, when `host` is not loopback (`127.0.0.0/8`, `::1` or `localhost`), or when `addCorsHeaders` is `true` with an empty `corsAllowedOrigins`, `corsAllowedOrigins` holds a value that is not an origin, or `'*'` is mixed with other values (see "CORS Headers" in [2])
   - `StorageIntegrityException`: When the encrypted storage cannot be used (see the decision tables in [4]). A subclass of `ProxyStartException`, thrown without wrapping. Nothing has been deleted
   - `PortBindException`: When port binding fails
 - **Storage**: After storage initialization, the retention limits of the quarantine store and the dropped history are checked (see [5])
@@ -1857,6 +2083,22 @@ Deletes all cache immediately.
 await proxy.clearCache();
 ```
 
+#### `Future<void> clearWebStorageSnapshot()`
+
+Deletes the web storage snapshot saved through `enableWebStorageInheritance` (see "Web Storage Bridge" in [5]). Call it before the user signs out or hands the device over. It can be called whether or not the proxy is running, whatever the setting.
+
+- **Return Value**: None
+- **Exceptions**:
+  - `CacheOperationException`: When the deletion fails (`operation` is `clearWebStorageSnapshot`)
+- **Notes**:
+  - While the encrypted box is open (running with the bridge on), its records are removed and the box is compacted. Otherwise the files of the encrypted box (`proxy_web_storage_secure`) and of the plain box of 0.25.0 and earlier (`proxy_web_storage`) are deleted. A box another instance in the isolate has open is emptied and compacted without being closed
+  - Called before the first start, it initializes Hive and opens the port preference box to find the storage directory
+  - Erasure from flash storage is not guaranteed. The key and the other storage are left alone
+
+```dart
+await proxy.clearWebStorageSnapshot();
+```
+
 #### `Future<void> clearExpiredCache()`
 
 Deletes only Expired state cache.
@@ -1978,17 +2220,20 @@ for (final cookie in cookies) {
 }
 ```
 
-#### `Future<void> restoreCookies(Iterable<CookieRestoreEntry> entries)`
+#### `Future<void> restoreCookies(Iterable<CookieRestoreEntry> entries, {String? queueOwnerId})`
 
 Restores cookies obtained outside the proxy, such as from native implementations. This method can be called before proxy startup, and restored cookies are used for upstream requests after startup.
 
 - **Parameters**:
   - `entries`: List of cookies to restore
+  - `queueOwnerId`: The user of the restored session, in the same form as `queueOwnerResolver` returns. Used only when the proxy was started with `queueOwnerResolver`; it then becomes the current owner of queued requests. Without it, the queue pauses with `ownerUnresolved` ("Changing the Session Outside a Sign-in" in [5]). Not used without `queueOwnerResolver` or before the first start
 - **Return Value**: None
 - **Exceptions**:
   - `CookieOperationException`: When cookie restoration fails
 
 `CookieRestoreEntry` provides both a structured constructor and a factory that parses a `Set-Cookie` string.
+
+The cookies passed are treated as values from the app, and the acceptance rules applied to upstream responses ("Acceptance Rules for Upstream Set-Cookie" in [4]) are not applied. `CookieRestoreEntry.fromSetCookieHeader()` also takes `Domain` and `Secure` as they are without checking them against `requestUrl`. `Expires`, `Max-Age` and `Path` are parsed, and the expiry is capped at 400 days, the same way as in "Cookie Evaluation Criteria" in [4] (an expiry passed to the structured constructor is not capped).
 
 ```dart
 await proxy.restoreCookies([
@@ -2121,7 +2366,7 @@ Deletes cookies.
 - **Return Value**: None
 - **Exceptions**:
   - `CookieOperationException`: When cookie deletion fails
-- **Note**: Deletes from both file and memory cache simultaneously
+- **Note**: Deletes from both file and memory cache simultaneously. With `queueOwnerResolver` set when the proxy was started, removing every cookie or a domain sent to the host of the configured `origin` pauses the queue with `ownerUnresolved` ("Changing the Session Outside a Sign-in" in [5])
 
 ```dart
 await proxy.clearCookies(); // Delete all cookies (file + memory)
@@ -2337,8 +2582,8 @@ Call it when `start()` or a cookie API fails with `StorageIntegrityException` an
 - **Notes**:
   - While a proxy in the isolate is running or starting, nothing is done and `proxyActive` is returned
   - Rebuilding a box damaged at its head loses the records at its head, and how many is unknown (`rebuiltBoxes`)
-  - A box whose check exceeded the time limit is checked again without a time limit after the boxes are closed, and handled by that result: deleted when it does not match the key (`deletedBoxes`), rebuilt when it is damaged at its head (`rebuiltBoxes`). When its first record is only partly written and no record matches the key, it is truncated to 0 bytes, losing nothing (`rebuiltBoxes`)
-  - Deleting the key also removes cookies, and with them the sign-in state. The encrypted response cache (`encryptResponseCache`) is deleted too (not listed in the result)
+  - A box whose check exceeded the time limit is checked again after the boxes are closed, with a limit of 2 minutes per box, and handled by that result (beyond 2 minutes nothing is done and `verificationTimedOut` is returned): deleted when it does not match the key (`deletedBoxes`), rebuilt when it is damaged at its head (`rebuiltBoxes`). When its first record is only partly written and no record matches the key, it is truncated to 0 bytes, losing nothing (`rebuiltBoxes`)
+  - Deleting the key also removes cookies, and with them the sign-in state. The encrypted response cache (`encryptResponseCache`) and the web storage snapshot are deleted too (not listed in the result)
   - After startup fails with `StorageIntegrityException`, `getStats()` returns zero, so do not base a confirmation screen on it
 
 ```dart
@@ -2360,7 +2605,7 @@ try {
   final result = await proxy.recoverEncryptedStorage();
   if (!result.performed &&
       result.rejection != StorageRecoveryRejection.startWillSucceed) {
-    // temporarilyUnavailable / proxyActive: retry later
+    // temporarilyUnavailable / proxyActive / verificationTimedOut: retry later
     rethrow;
   }
   await proxy.start(config: config);
@@ -2472,8 +2717,8 @@ class DroppedRequest {
   final String url; // URL of dropped request
   final String method; // HTTP method
   final DateTime droppedAt; // Date/time dropped
-  final String dropReason; // Drop reason ("4xx_error" and so on; "quarantine_limit", "quarantine_expired" or "quarantine_too_large" for the quarantine retention limits; "authentication_required" for skipPausedRequest(); "owner_changed" when not sent because it belongs to another owner)
-  final int statusCode; // HTTP status code at error (0 for "owner_changed")
+  final String dropReason; // Drop reason ("4xx_error" and so on; "quarantine_limit", "quarantine_expired" or "quarantine_too_large" for the quarantine retention limits; "authentication_required" for skipPausedRequest(); "owner_changed" when not sent because it belongs to another owner; "origin_changed" when not sent because its destination origin changed)
+  final int statusCode; // HTTP status code at error (0 for "owner_changed" and "origin_changed")
   final String errorMessage; // Detailed error message
   final bool acknowledged; // Whether it has been shown to the operator (default: false)
   final bool pendingMigration; // Waiting for migration from a legacy plain box (default: false)
@@ -2494,8 +2739,8 @@ class QuarantinedRequest {
   final DateTime quarantinedAt; // Date/time quarantined
   final DateTime queuedAt; // Date/time stored in the queue before quarantine
   final DateTime acceptedAt; // First accepted (never changes across a retry)
-  final String reason; // Quarantine reason ("4xx_error"; "authentication_required" for skipPausedRequest(); "owner_changed" when not sent because it belongs to another owner)
-  final int statusCode; // HTTP status code returned by the upstream (0 for "owner_changed")
+  final String reason; // Quarantine reason ("4xx_error"; "authentication_required" for skipPausedRequest(); "owner_changed" when not sent because it belongs to another owner; "origin_changed" when not sent because its destination origin changed)
+  final int statusCode; // HTTP status code returned by the upstream (0 for "owner_changed" and "origin_changed")
   final String errorMessage; // Detailed error message
   final bool pendingMigration; // Waiting for migration from a legacy plain box; cannot be resent or discarded (default: false)
   final String? idempotencyKey; // Idempotency key (null when accepted while enableIdempotencyKey was false)
@@ -2547,13 +2792,13 @@ A non-empty return value becomes the current owner; `null` or an empty string le
 
 #### `QueueResendResult`
 
-Class representing the outcome of one resend attempt. The body is never retained.
+Class representing the outcome of one resend attempt. The body is never retained. `url` is the full URL including the query. `toMap({bool includeQuery = true})` with `includeQuery: false` returns a map whose `url` has no query or fragment (the status endpoint uses it).
 
 ```dart
 class QueueResendResult {
   final String url; // URL the request was sent to
   final String method; // HTTP method
-  final int statusCode; // Upstream status code (0 when unreachable, or when not sent because it belongs to another owner)
+  final int statusCode; // Upstream status code (0 when unreachable, or when not sent because it belongs to another owner or its destination origin changed)
   final bool success; // Whether the upstream accepted the request
   final String? idempotencyKey; // Key that was attached
   final String? dropReason; // Why it left the queue
@@ -2601,7 +2846,7 @@ class ProxyStats {
 enum QueuePauseReason {
   authenticationRequired, // A queued request was answered with one of authRequiredStatusCodes ([5])
   rateLimited, // A queued request was answered with 429 and sending is held until it is due ([5])
-  ownerUnresolved // queueOwnerResolver could not tell who signed in ("Owner of Queued Requests" in [5])
+  ownerUnresolved // queueOwnerResolver could not tell who signed in; also restoreCookies() without queueOwnerId, clearCookies() removing the session, or an altered owner record ("Owner of Queued Requests" in [5])
 }
 ```
 
@@ -2656,12 +2901,13 @@ Class representing proxy server configuration.
 ```dart
 class ProxyConfig {
   final String origin; // Upstream server URL (required)
-  final String host; // Host to bind (default: "127.0.0.1")
+  final String host; // Host to bind (default: "127.0.0.1"; only 127.0.0.0/8, ::1 or localhost)
   final int port; // Port to bind (0=automatic assignment)
   final int cacheMaxSize; // Upper limit on the total body size of the response cache (bytes, default: 200 MB, 0 = no limit)
   final Map<String, int> cacheTtl; // TTL setting by Content-Type (seconds)
   final Map<String, int> cacheStale; // Stale period setting by Content-Type (seconds)
   final List<String> forceCachePaths; // Paths stored despite no-store (default: empty)
+  final bool cacheUserScopedResponses; // Store user-scoped responses (default: true; served per owner with queueOwnerResolver; "User-Scoped Responses" in [8])
   final List<String> mirroredOrigins; // Other origins relayed through the proxy (default: empty)
   final int upstreamFailureThreshold; // Consecutive failures treated as unreachable (default: 3, 0=disabled)
   final String upstreamProbePath; // Path used by the reachability probe (default: "/")
@@ -2691,13 +2937,19 @@ class ProxyConfig {
   final int quarantineResponseBodyMaxBytes; // Bytes of the response body kept with a request quarantined after a 4xx (default: 0 = none, at most 65536)
   final int droppedRequestMaxCount; // Maximum number of dropped history entries (default: 1000, 0 = no limit)
   final Duration droppedRequestRetention; // Retention of dropped history entries (default: 30 days, Duration.zero = no limit)
+  final int maxRequestBodyBytes; // Largest request body accepted (bytes, default: 10 MiB, range 1024 to 256 MiB; beyond it 413)
+  final int queueMaxCount; // Maximum number of queued requests (default: 1000, range 1 to 100000; beyond it the request is not stored, 503)
+  final int queueMaxBytes; // Total size limit of the queue (bytes, default: 50 MiB, range 1 MiB to 1 GiB; beyond it the request is not stored, 503)
   final ProxyResponseConfig queuedResponse; // Response for a queued request (default: 202 / JSON)
   final ProxyResponseConfig offlineMissResponse; // Response when nothing can be served (default: 504 / JSON)
   final bool enableAdminApi; // Enable admin API (development only)
-  final bool requireAccessToken; // Refuse requests without the secret with 403 (default: false)
-  final bool addCorsHeaders; // Add CORS headers to responses other than the internal endpoints (default: true)
+  final bool requireAccessToken; // Refuse requests without the secret with 403 (default: true; false up to 0.25.0)
+  final bool addCorsHeaders; // Add CORS headers for the origins in corsAllowedOrigins to responses other than the internal endpoints (default: false; true up to 0.25.0)
+  final List<String> corsAllowedOrigins; // Origins that get CORS headers (default: []; '*' alone allows every origin; start() refuses an empty list with addCorsHeaders: true)
+  final Set<String> forwardWebViewCookieNames; // Names of WebView cookies passed on upstream (default: {}; '*' alone passes every cookie but the access token, as in 0.25.0; start() refuses a name that is not an RFC 6265 token, accessTokenCookieName, or '*' mixed with names)
   final bool enableWebStorageInheritance; // WebStorage inheritance bridge (default: false)
   final String logLevel; // Log level ("debug", "info", "warn", "error")
+  final bool includeQueryInEvents; // Keep the query and fragment in event URLs (default: false; always kept up to 0.25.0)
   final List<String> startupPaths; // Default paths of warmupCache() when paths is omitted (start() does not fetch them)
   final int preferredPort; // Port to use when available (0=unspecified)
   final String healthCheckPath; // Health check path (default: "/__offline_web_proxy/health")
@@ -2716,7 +2968,7 @@ class ProxyConfig {
 }
 ```
 
-A negative value for any of the five retention settings makes `start()` throw `ProxyStartException` (see "Retention Limits" in [5]). So does a `quarantineResponseBodyMaxBytes` outside 0 to 65536, and a `queueOwnerResolver` set while `authResumePaths` is empty.
+A negative value for any of the five retention settings makes `start()` throw `ProxyStartException` (see "Retention Limits" in [5]). So does a `quarantineResponseBodyMaxBytes` outside 0 to 65536, and a `queueOwnerResolver` set while `authResumePaths` is empty. So does a `forwardWebViewCookieNames` that holds a name that is not an RFC 6265 token (one containing spaces, `=`, `;`, `,`, quotes and the like, or an empty string), `OfflineWebProxy.accessTokenCookieName`, or `'*'` mixed with other names (see "Cookie Header" in [14]). So does a `host` that is not loopback (an IPv4 address in `127.0.0.0/8`, `::1` or `localhost`; see "Restricting the Listening Host" in [2]). So does a `maxRequestBodyBytes` (1024 to 268435456), `queueMaxCount` (1 to 100000) or `queueMaxBytes` (1 MiB to 1 GiB) out of range (see "Queue and Request Body Limits" in [5]). So does `addCorsHeaders: true` with an empty `corsAllowedOrigins`, a `corsAllowedOrigins` value that cannot be read as an origin, or `'*'` mixed with other values (checked even when `addCorsHeaders` is `false`; see "CORS Headers" in [2]).
 
 #### `DropPolicy`
 
@@ -2752,7 +3004,7 @@ Class representing proxy server event information (for real-time monitoring).
 ```dart
 class ProxyEvent {
   final ProxyEventType type; // Event type
-  final String url; // Related URL
+  final String url; // Related URL (without the query and fragment by default; see "URLs in Events" in [18])
   final DateTime timestamp; // Event occurrence date/time
   final Map<String, dynamic> data; // Additional information
 }
@@ -2763,7 +3015,7 @@ enum ProxyEventType {
   requestReceived, // Request received
   redirectHandled, // Upstream redirect resolved and handled
   cacheHit, // Cache hit
-  cacheMiss, // Cache miss
+  cacheMiss, // Not served from the cache because the owner differs (not raised for a plain miss)
   cacheStaleUsed, // Stale cache used
   cacheSkipped, // Matched a stored path but was skipped for safety
   requestQueued, // Request queued
@@ -2787,14 +3039,16 @@ enum ProxyEventType {
 
 The `data` of `cacheSkipped` carries why the response was not stored.
 
-- `reason`: One of `set-cookie`, `vary` or `authorization` (the safety exclusions of `forceCachePaths`); `cacheMaxSize` when the body alone exceeds `cacheMaxSize`; `cacheOpening` while the response cache is being opened after startup ("When the Cache Is Opened" in [8])
+- `reason`: One of `set-cookie`, `vary` or `authorization` (the safety exclusions of `forceCachePaths`); `cacheMaxSize` when the body alone exceeds `cacheMaxSize`; `cacheOpening` while the response cache is being opened after startup ("When the Cache Is Opened" in [8]); `userScoped` when `cacheUserScopedResponses: false` kept a user-scoped response out; `ownerChanged` when a sign-in started or the owner changed during the fetch ("User-Scoped Responses" in [8])
+
+`cacheMiss` is raised only when a response stored per user is not served because its owner differs from the current owner (including an entry with an owner read while there is no owner yet, and an entry tagged `none` read after an owner is set). Its `data` carries `reason: ownerMismatch`. A plain miss, with nothing stored, raises nothing ("User-Scoped Responses" in [8]).
 
 The `data` of `cacheEvicted` holds `reason` (`cacheMaxSize`), `evictedCount` (entries) and `evictedBytes` (body bytes). `cacheCleared` is raised only when `clearCache()` removes everything.
 
 The `data` of `queueResendAttempted` carries the outcome of one resend. The body is never included.
 
-- `url`, `method`: The request that was resent
-- `statusCode`: The upstream status code, or `0` when it could not be reached or when the request was not sent because it belongs to another owner (`owner_changed`)
+- `url`, `method`: The request that was resent (`url` drops the query and fragment by default; see "URLs in Events" in [18])
+- `statusCode`: The upstream status code, or `0` when it could not be reached or when the request was not sent because it belongs to another owner (`owner_changed`) or its destination origin changed (`origin_changed`)
 - `success`: Whether the upstream accepted the request
 - `idempotencyKey`: The key that was attached, or `null`
 - `dropReason`: Why it left the queue, or `null` on success or retry
@@ -2807,12 +3061,12 @@ The `data` of `requestQuarantined` carries the following metadata.
 
 - `quarantineId`: Identifier inside the quarantine store (used by `retryQuarantinedRequest` and friends)
 - `statusCode`: Status code returned by the upstream
-- `reason`: Quarantine reason (`"4xx_error"`; `"authentication_required"` for `skipPausedRequest()`; `"owner_changed"` when not sent because it belongs to another owner)
+- `reason`: Quarantine reason (`"4xx_error"`; `"authentication_required"` for `skipPausedRequest()`; `"owner_changed"` when not sent because it belongs to another owner; `"origin_changed"` when not sent because its destination origin changed)
 
 The `data` of `requestDropped` carries the following metadata.
 
-- `statusCode`: Status code returned by the upstream (for a request moved out of the quarantine store, the value from the quarantine; `0` for `owner_changed`)
-- `dropReason`: Why the request was removed (`"4xx_error"` and so on; `quarantine_limit`, `quarantine_expired` or `quarantine_too_large` for the quarantine retention limits; `authentication_required` for `skipPausedRequest()`; `owner_changed` when not sent because it belongs to another owner)
+- `statusCode`: Status code returned by the upstream (for a request moved out of the quarantine store, the value from the quarantine; `0` for `owner_changed` and `origin_changed`)
+- `dropReason`: Why the request was removed (`"4xx_error"` and so on; `quarantine_limit`, `quarantine_expired` or `quarantine_too_large` for the quarantine retention limits; `authentication_required` for `skipPausedRequest()`; `owner_changed` when not sent because it belongs to another owner; `origin_changed` when not sent because its destination origin changed)
 - `quarantineId`: Identifier inside the quarantine store, when a count, age or total size limit moved the request out of it
 
 The `data` of `cookieStorageDiscarded` carries the following metadata.
@@ -2827,9 +3081,27 @@ The `url` of `authenticationRequired` is the URL of the request that paused the 
 
 For `errorOccurred` raised when the response cache cannot be opened, `data` carries `phase` (`cacheOpen`) and `error` ("When the Cache Is Opened" in [8]).
 
+For `errorOccurred` raised when a request that hides `.` or `..` behind encoding or the like is refused, `data` carries `phase` (`requestPath`), `reason` (`dotSegment` or `malformedPercentEncoding`) and `method` (see "Path Validation" in [2]).
+
+For `errorOccurred` raised when a response cannot be stored in the cache, `data` carries `phase` (`cacheResponse`), `error` (the type of the exception) and `reason` (`storageFailure`). The message of the exception is not included.
+
+For `errorOccurred` raised when a request is not stored because it would exceed the queue limits, `data` carries `phase` (`queueLimit`) and `limit` (`count` for the count limit, `bytes` for the total size limit). `ProxyEvent.url` is the path of the request that was not stored (without the query by default; see "URLs in Events" in [18] and "Queue and Request Body Limits" in [5]).
+
 For `errorOccurred` raised when the idempotency key records are rebuilt, `data` carries `phase` (`idempotencyStoreRecovery`) and `error` ("Retention Period" in [6]).
 
+For `errorOccurred` raised by the storage of the web storage snapshot, `data` carries `phase` and `error` (the exception type, never its message). `ProxyEvent.url` is empty ("Web Storage Bridge" in [5]).
+
+- `webStorageRecovery`: The encrypted box could not be opened or held a value it never stores, and was rebuilt
+- `webStorageEncryptionCleanup`: The encrypted box could not be deleted when the key was replaced or the recovery API deleted the key
+- `webStorageMigration`: The plain box of 0.25.0 and earlier could not be moved, or could not be deleted with the bridge off. The plain box is kept and handled again at the next start
+
 For `errorOccurred` raised when the owner of queued requests cannot be determined or saved, `data` carries `phase` (`queueOwnerResolve` for determining, `queueOwnerPersist` for saving) and `error`. `error` carries only the type of the exception (or a short reason for a failure that is not an exception), never its message ("Owner of Queued Requests" in [5]).
+
+For `errorOccurred` raised when a start cannot trust the owner record and pauses the queue, `data` carries `phase` (`queueOwnerLoad`) and `reason` (`tagMismatch` when the tag does not match, `recordMissing` when requests with an owner are queued but no record exists). `ProxyEvent.url` is an empty string ("Storing Owners" in [5]).
+
+For `errorOccurred` raised when a request is not stored because the storage is unusable or the lock for adding to the queue cannot be acquired, `data` carries `phase` (`queueSave`) and `reason` (`storageUnavailable` or `lockTimeout`). `ProxyEvent.url` is the path of the request (without the query by default). The headers and body of the request are not included ("When storing fails" in [10]).
+
+For `errorOccurred` raised when a cookie from the upstream is not saved, `data` carries `operation` (`cookieSave`) and `reason`. For a cookie breaking the acceptance rules, `reason` carries the reason for the rejection (`domainMismatch`, `ipDomain`, `singleLabelDomain`, `mirroredOriginDomain`, `insecureSecure`, `hostPrefix`, `securePrefix` or `secureOverwrite`; "Acceptance Rules for Upstream Set-Cookie" in [4]) and `cookieName` the cookie name. For any other failure, `reason` carries `invalidSetCookie` or `storageFailure` (including an unavailable storage) and `error` the type of the exception. Neither the `Set-Cookie` value nor the message of the exception is included ("URLs in Events" in [18]).
 
 For `errorOccurred` raised by the legacy plain box migration and the retention limits, `data` carries `operation` (`legacyStorageDelete` or `legacyStorageMigration` for the migration, `retentionLimit` for the retention limits) and `error`. With `legacyStorageDelete`, `box` holds the name of the legacy plain box.
 
@@ -2854,7 +3126,7 @@ The `data` of `serverUnavailable` and `serverRecovered` carries the following me
 - `webResourceErrorCode`: Error code passed in when recovery was triggered by a WebView error
 - `isMainFrame`: Whether the WebView failure was in the main frame, when recovery was triggered by a WebView error
 
-For `requestReceived`, `data` may include the following metadata:
+For `requestReceived`, `data` may include the following metadata. The URL items drop the query and fragment by default ("URLs in Events" in [18]):
 
 - `proxyRequestUrl`: Absolute URL received by the proxy
 - `resolvedUpstreamUrl`: Upstream URL restored by the resolver API
@@ -2865,7 +3137,7 @@ For `requestReceived`, `data` may include the following metadata:
 - `usedSourceUrl`: Whether a relative target was resolved using `sourceUrl`
 - `isStaticResource`: Whether the request was classified as a proxy-local static resource
 
-For `redirectHandled`, `data` may include the following metadata:
+For `redirectHandled`, `data` may include the following metadata. The URL items, including `locationHeader`, drop the query and fragment by default. Only `externalUrl` is always the full URL with its query, because it is the only way for the app to learn what to launch; it is meant to be executed by the app, so do not write it to logs ("URLs in Events" in [18]):
 
 - `proxyRequestUrl`: Absolute proxy URL that triggered the redirect
 - `sourceUpstreamUrl`: Upstream request URL used to resolve `Location`
@@ -2875,7 +3147,7 @@ For `redirectHandled`, `data` may include the following metadata:
 - `normalizedTargetUrl`: Normalized target URL after relative resolution
 - `resolvedUpstreamUrl`: Resolved upstream URL for the redirect target
 - `resolvedProxyUrl`: Proxy URL returned to WebView after rewrite
-- `externalUrl`: URL to hand to the app for external launch
+- `externalUrl`: URL to hand to the app for external launch (always the full URL with its query; do not log it)
 - `navigationDisposition`: `ProxyNavigationDisposition` name
 - `navigationReason`: `ProxyNavigationReason` name
 
@@ -3011,9 +3283,12 @@ Enum representing why the recovery API did nothing.
 enum StorageRecoveryRejection {
   proxyActive, // A proxy is running or starting
   temporarilyUnavailable, // The key cannot be read for now, for example while the device is locked
-  startWillSucceed // No box needs deleting; retry start() (also after keyWriteFailed)
+  startWillSucceed, // No box needs deleting; retry start() (also after keyWriteFailed)
+  verificationTimedOut // Checking a box again exceeded the per-box limit (2 minutes); nothing was deleted. Retry later (added in 0.26.0)
 }
 ```
+
+- `verificationTimedOut` was added in 0.26.0. A `switch` that covers every `StorageRecoveryRejection` value must handle it
 
 #### `EncryptedStorageRecoveryResult`
 

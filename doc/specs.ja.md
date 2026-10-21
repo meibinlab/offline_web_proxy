@@ -25,22 +25,26 @@ Flutter アプリ内で動作するオフライン対応ローカルプロキシ
 
 ### 端末に保存するデータ
 
-proxy は Hive の Box と secure storage にデータを保存します。暗号化 Box で暗号化されるのは値だけで、Box のキーは平文のまま保存されます（キュー・隔離・ドロップ履歴は保存した時刻から採番した ID、Cookie はドメイン・パス・名前など）。Hive はキーの長さを 1 バイトの欄に書くため、UTF-8 で 255 バイトを超えるキー（長いパスや名前の Cookie、画面が付けた長いべき等性キー）は、`sha256:` に続く SHA-256 の 16 進に置き換えて保存します。**キューと隔離は、要求のヘッダと本文をそのまま保持します。** 保存先ごとの内容、暗号化の有無、保持期間は次のとおりです。
+proxy は Hive の Box と secure storage にデータを保存します。暗号化 Box で暗号化されるのは値だけで、Box のキーは平文のまま保存されます（キュー・隔離・ドロップ履歴は保存した時刻から採番した ID、Cookie はドメイン・パス・名前など）。Hive はキーの長さを 1 バイトの欄に書くため、UTF-8 で 255 バイトを超えるキー（長いパスや名前の Cookie など）は、`sha256:` に続く SHA-256 の 16 進に置き換えて保存します。べき等性キーは、0.26.0 から長さによらず HMAC に置き換えます（【6】の「保持期間」）。`sha256:` で始まるキーも、長さによらず同じく置き換えます（`sha256:<64 桁の 16 進>` の短いキーが、別の長いキーを置き換えた値と同じ記録を指さないようにするため）。**キューと隔離は、要求のヘッダと本文をそのまま保持します。** 保存先ごとの内容、暗号化の有無、保持期間は次のとおりです。
 
 | 保存先 | 内容 | 暗号化 | 保持期間 |
 | --- | --- | --- | --- |
 | `proxy_cookies_secure` | Cookie（名前、値、ドメイン、パス、有効期限、属性）。キーはドメイン、パス、名前など（UTF-8 で 255 バイトを超える場合は SHA-256） | 値のみ（AES-256） | 有効期限を過ぎたものは、送信する Cookie を探すときに削除。`clearCookies()` で削除 |
-| `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど。`queueOwnerResolver` を指定した場合は持ち主の HMAC）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。上限なし |
+| `proxy_queue_secure` | 未送信の更新系要求（クエリを含む URL、メソッド、ヘッダ、本文、受け付けた日時、べき等性キーなど。`queueOwnerResolver` を指定した場合は持ち主の HMAC）。キーは保存した時刻から採番した ID | 値のみ（AES-256） | 送信に成功するか、隔離またはドロップ履歴へ移すまで。既定では 1000 件、50 MiB が上限で、超える要求は保存しない（【5】の「保持上限」） |
 | `proxy_quarantined_requests_secure` | 上流が 4xx で拒否した要求。キューの内容（ヘッダと本文を含む）に、隔離した日時、ステータスコード、理由を加えたもの。`quarantineResponseBodyMaxBytes` を指定した場合は、断られた応答の本文の先頭も加える（【5】の「隔離に残す応答本文」） | 値のみ（AES-256） | 再送または破棄するまで。既定では 30 日、1000 件、20 MB が上限（【5】の「保持上限」） |
 | `proxy_dropped_requests_secure` | キューまたは隔離から外した要求の履歴（クエリを含む URL、メソッド、日時、理由、ステータスコード、エラーメッセージ、確認済みか、べき等性キー、受け付けた日時）。ヘッダと本文は持たない | 値のみ（AES-256） | 既定では 30 日。件数の上限（既定 1000 件）は確認済みの履歴だけに適用 |
-| `proxy_cache_index_secure`、`proxy_cache_body_secure` | 応答キャッシュ（既定）。メタデータの Box（`proxy_cache_index_secure`）にステータスコード・保存日時・有効期限・Content-Type・本文の大きさを、本文の Box（`proxy_cache_body_secure`）にヘッダと本文を保存する。キーは正規化した URL の SHA-256 | 値のみ（AES-256） | stale 期間を過ぎたものと、`cacheMaxSize` を超えた分を削除。`encryptResponseCache` を無効にすると、平文へ戻さずに削除 |
-| `proxy_cache_index`、`proxy_cache_body` | `encryptResponseCache` を `false` にした場合の応答キャッシュ。内容とキーは暗号化した組と同じ | なし | 暗号化した組と同じ。`encryptResponseCache` を有効にすると、暗号化した組へ移して削除 |
+| `proxy_cache_index_secure`、`proxy_cache_body_secure` | 応答キャッシュ（既定）。メタデータの Box（`proxy_cache_index_secure`）にステータスコード・保存日時・有効期限・Content-Type・本文の大きさを、本文の Box（`proxy_cache_body_secure`）にヘッダと本文を保存する。ヘッダから `Set-Cookie` と `Set-Cookie2` は除く（0.25.0 以前の記録には残り得る）。`queueOwnerResolver` を指定した場合、利用者ごとの応答のメタデータには持ち主の HMAC（`ownerTag`。持ち主がまだ無い間は `none`）も保存する（【8】の「利用者ごとの応答」）。キーは正規化した URL の SHA-256 | 値のみ（AES-256） | stale 期間を過ぎたものと、`cacheMaxSize` を超えた分を削除。`encryptResponseCache` を無効にすると、平文へ戻さずに削除 |
+| `proxy_cache_index`、`proxy_cache_body` | `encryptResponseCache` を `false` にした場合の応答キャッシュ。内容とキーは暗号化した組と同じ | なし | 暗号化した組と同じ。明示的な消去（`clearCache()`、`clearCacheForUrl()`、1 時間ごとにも実行する `clearExpiredCache()`）の後に Box を圧縮。`cacheMaxSize` による追い出しでは圧縮しないため、追い出した記録は Hive の自動圧縮までファイルに残り得る。`encryptResponseCache` を有効にすると、暗号化した組へ移して削除 |
 | `proxy_cache`、`proxy_cache_secure` | 0.21.0 以前の応答キャッシュ。1 件の値にメタデータと本文をまとめた形式。`proxy_cache_secure` は 0.21.0 で `encryptResponseCache` を有効にした場合 | `proxy_cache` はなし、`proxy_cache_secure` は値のみ（AES-256） | 起動時に新しい組へ移して削除。`encryptResponseCache` を無効にした場合、`proxy_cache_secure` は移さずに削除 |
-| `proxy_web_storage` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット | なし | 次のスナップショットで上書きされるまで |
-| `proxy_idempotency` | 上流へ届いたべき等性キー（UTF-8 で 255 バイトを超える場合は SHA-256）と、その記録日時 | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除 |
-| `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号。`queueOwnerResolver` を指定した場合は、現在の持ち主の HMAC、鍵の指紋、ログインを転送中かどうか（【5】の「送信待ちの持ち主」） | なし | ポート番号は次のバインドで上書きされるまで。持ち主は次に保存し直すまでで、鍵の指紋が合わない値は起動時に削除 |
-| secure storage の `offline_web_proxy.cookie_box_encryption_key` | 暗号化 Box の鍵。Cookie、キュー、隔離、ドロップ履歴（と、有効にした場合の応答キャッシュ）で共有 | secure storage に保存 | `recoverEncryptedStorage()` が削除するか、判定表に従って作り直すまで（【4】の「判定表」） |
+| `proxy_web_storage_secure` | `enableWebStorageInheritance` を有効にした場合に、Web ページから受け取った Web ストレージのスナップショット（【5】の「Web ストレージの受け渡し」） | 値のみ（AES-256） | 次のスナップショットで上書きされるか、`clearWebStorageSnapshot()` で削除するまで。鍵を作り直す場合と、復旧 API が鍵を削除する場合も削除 |
+| `proxy_web_storage` | 0.25.0 以前の Web ストレージのスナップショット | なし | `enableWebStorageInheritance` が有効なら起動時に `proxy_web_storage_secure` へ移し（暗号化 Box に既にあれば移さない）、空にして圧縮してから削除。無効なら Box を開かずに削除 |
+| `proxy_idempotency` | 上流へ届いたべき等性キーと、その記録日時。0.26.0 から、Box のキーは `h1:` にべき等性キーの HMAC-SHA256 の 16 進を付けた値（【6】の「保持期間」）で、画面が送ったキーは保存しない。0.25.0 以前の記録は送られたキーそのまま（UTF-8 で 255 バイトを超える場合は SHA-256） | なし | `idempotencyRetention`（既定 24 時間）を過ぎたものを 1 時間ごとに削除し、削除した後に Box を圧縮。0.25.0 以前の記録も同じく消える |
+| `proxy_port_preferences` | ホストごとの、直前にバインドしたポート番号。`queueOwnerResolver` を指定した場合は、現在の持ち主の HMAC、鍵の指紋、ログインを転送中かどうか、書き換えを検出するタグ（【5】の「送信待ちの持ち主」） | なし | ポート番号は次のバインドで上書きされるまで。持ち主は次に保存し直すまでで、鍵の指紋が合わない値は起動時に削除。持ち主の記録を書き換えるたびに Box を圧縮 |
+| secure storage の `offline_web_proxy.cookie_box_encryption_key` | 暗号化 Box の鍵。Cookie、キュー、隔離、ドロップ履歴、Web ストレージのスナップショット（と、有効にした場合の応答キャッシュ）で共有。べき等性キーと持ち主の HMAC の鍵も、この鍵から用途ごとに導出する | secure storage に保存 | `recoverEncryptedStorage()` が削除するか、判定表に従って作り直すまで（【4】の「判定表」） |
 | `proxy_queue`、`proxy_quarantined_requests`、`proxy_dropped_requests`、`proxy_cookies` | 0.14.0 以前（Cookie は 0.4.0 より前）が平文で保存した内容 | なし | 暗号化 Box へ移行した後に削除。キュー・隔離・ドロップ履歴の旧 Box は、削除の前に空にする |
+
+- **削除と圧縮**: Hive の削除は論理削除で、削除を表すフレームがファイルに残ります。暗号化しない Box（平文の応答キャッシュ、`proxy_idempotency`、`proxy_port_preferences`）は、上表のとおり削除や書き換えの後に圧縮（`compact()`）し、消した値が残る期間を短くします。平文の応答キャッシュを圧縮するのは明示的な消去（`clearCache()`、`clearCacheForUrl()`、`clearExpiredCache()`）の後だけです。`cacheMaxSize` による追い出しは保存のたびに起こり得るため Hive の自動圧縮に任せ、追い出した記録はそれまでファイルに残り得ます。削除は済んでいるため、圧縮の失敗は知らせません。圧縮とファイルの削除は、フラッシュストレージ上の完全消去を保証しません
+- **暗号化の完全性**: 暗号化 Box には MAC がありません（【4】の「既知の制約」）
 
 ### プロキシ対象
 
@@ -83,7 +87,7 @@ proxy が返す `text/html` と `text/css` の応答について、`mirroredOrig
 | 許可外の origin | `404` を返します。設定済み origin へ素通しさせません |
 | キャッシュ | キャッシュキーは中継先の URL です。TTL、stale 期間、保存判定は設定済み origin と同じ規則で働きます |
 | `forceCachePaths` | 照合対象は proxy が受け取ったパスです。中継経路を対象にする場合は `/__offline_web_proxy/ext/**` の形で指定します |
-| Cookie | Cookie Jar のうち中継先のドメインに一致するものだけを送ります。中継先が返す `Set-Cookie` も自身のドメインで保存します |
+| Cookie | Cookie Jar のうち中継先のドメインに一致するものだけを送ります。中継先が返す `Set-Cookie` も自身のドメインで保存します。ただし、設定済み origin のホストへも送られる範囲の Cookie は保存しません（【4】の「上流の Set-Cookie の受け入れ規則」）。WebView が送った Cookie は中継先へ送らず、中継先の `Set-Cookie` は WebView へ返しません。WebView は受け取った Cookie を proxy の origin の Cookie として保存し、設定済み origin への要求でも送るためです（【14】の「Set-Cookie ヘッダ」） |
 | `Authorization`、`Origin`、`Referer` | 中継先へは送りません |
 | redirect | `Location` が設定済み origin かミラー対象を指す場合は proxy URL へ書き換えます |
 | 遷移解決 | `resolveNavigationTarget()` はミラー対象の URL を `inWebView` と判定し、`ProxyNavigationReason.mirroredOriginUrl` を返します |
@@ -120,11 +124,19 @@ proxy が返す `text/html` と `text/css` の応答について、`mirroredOrig
 
 - 照合対象はパスだけです。クエリ文字列とフラグメントは含みません
 - 大文字と小文字は区別します
-- パターンとパスの双方について、先頭に `/` が無い場合は補って比較します
+- パターンとパスの双方を、次の順で同じ形にそろえてから比較します。同じ資源を指す書き方の違いで、ログインのパス（`authResumePaths`）やキューへ入れない規則（`queueExcludePaths`）、`forceCachePaths` の照合をすり抜けないようにするためです
+  1. 先頭に `/` が無い場合は補う
+  2. 各セグメントの `;` 以降（`;jsessionid=...` などのパスパラメータ）を取り除く
+  3. 非予約文字（`A-Z a-z 0-9 - . _ ~`）を表す `%XX` だけを復号する（`%6C` → `l`）。それ以外の `%XX` は 16 進を大文字にそろえ、符号化したまま残す（`%2F` は `/` にしない）。16 進数 2 桁が続かない `%` はそのまま残す
+  4. `/` の重複を 1 つにまとめる
+  5. 末尾の `/` を取り除く（ルート `/` を除く）
+- 末尾の `/*` と `/**` は、その手前のパスそのものにも一致します（`/js/*` は `/js` と `/js/` にも一致）。末尾の `/` を取り除いて比較するため、0.25.0 までの「`/js/*` は `/js/` に一致する」動作を保つためです
+- `.` と `..` のセグメントは照合では解決しません。符号化などで隠した `.` と `..` を含む要求は、照合の前に `400` で拒否します（【2】の「パスの検証」）
 - パターンは起動時に一度だけ組み立て、リクエストごとの生成は行いません
+- 0.26.0 での変更: 0.25.0 までは書き方の違いを区別していたため、`/api/login` は `/api/login;jsessionid=1`、`/api/login/`、`/api/%6Cogin` に一致しませんでした。0.26.0 からは一致します。また `/js/**` が `/js` にも一致します
 
 ```
-/api/registers/auth.json … /api/registers/auth.json のみに一致
+/api/registers/auth.json … /api/registers/auth.json のみに一致（;jsessionid=… や末尾の / を付けても一致）
 /js/*                   … /js/haori.js に一致、/js/vendor/haori.js には一致しない
 /js/**                  … /js/vendor/haori.js にも一致
 ```
@@ -135,17 +147,18 @@ proxy が返す `text/html` と `text/css` の応答について、`mirroredOrig
 
 - **自動割当**: システムが利用可能なポートを自動選択。ポート衝突を回避
 - **戻り値**: プロキシサーバ起動時に実際に使用されるポート番号を返却
-- **バインド先**: 127.0.0.1（ローカルループバック）のみ。外部からのアクセスを防止
+- **バインド先**: `ProxyConfig.host`（既定 `127.0.0.1`）。ループバック（`127.0.0.0/8`、`::1`、`localhost`）以外は指定できません（「待ち受けるホストの制限」を参照）
 
 ### セキュリティ考慮
 
 - **HTTPS 不要**: localhost はブラウザでセキュアコンテキストとして扱われるため、HTTP でも十分
 - **外部アクセス制限**: 127.0.0.1 バインドにより、デバイス外からのアクセスを完全に遮断
-- **端末内の別プロセス**: ループバックでは、端末内の別アプリやブラウザのページからも到達できます。WebView に限る場合は「到達の制限」を参照
+- **端末内の別プロセス**: ループバックでは、端末内の別アプリやブラウザのページからも到達できます。既定では、WebView だけが知る秘密値を持たない要求を拒否します（「到達の制限」を参照）
+- **DNS rebinding**: 別のサイトのページが自分のホスト名をループバックへ向けると、そのページから proxy へ要求が届きます。`Host` ヘッダが proxy 自身を指さない要求は、秘密値の検査より前に拒否します（「Host ヘッダの照合」を参照）
 
 ### 到達の制限
 
-proxy はループバックで待ち受けますが、要求がどのプロセスから来たかをソケットから確かめる手段は一般にありません。このため既定では、端末内の別アプリやブラウザのページからも到達でき、転送経路では Cookie Jar のセッションを付けて上流へ送ります。`ProxyConfig.requireAccessToken` を `true` にすると、WebView だけが知る秘密値を持たない要求を拒否します。既定は `false` です。
+proxy はループバックで待ち受けますが、要求がどのプロセスから来たかをソケットから確かめる手段は一般にありません。秘密値の検査が無いと、端末内の別アプリやブラウザのページからも到達でき、転送経路では Cookie Jar のセッションを付けて上流へ送ります。このため `ProxyConfig.requireAccessToken` の既定は `true` で、WebView だけが知る秘密値を持たない要求を拒否します（0.25.0 までの既定は `false`）。`false` にするのは、端末内の別アプリやページから到達されない環境（テストなど）に限ってください。
 
 - **秘密値**: `start()` のたびに、暗号論的乱数 32 バイトを base64url（パディングなし、43 文字）にした値を生成し、`OfflineWebProxy.accessToken` で返します。自動復旧の再バインドでは変えません。停止中と起動に失敗した後は `null` です。HTTP では返しません
 - **受け取り方**: Cookie `__offline_web_proxy_token`（`OfflineWebProxy.accessTokenCookieName`）またはヘッダ `X-Offline-Web-Proxy-Token`（`OfflineWebProxy.accessTokenHeaderName`）のどちらかが一致すれば許可します。同じ名前の Cookie が複数ある場合は、いずれかが一致すれば許可します。比較は定数時間で行います
@@ -157,18 +170,57 @@ proxy はループバックで待ち受けますが、要求がどのプロセ�
   - `warmupCache()` など proxy 自身が上流へ送る要求は、この経路を通りません
 - **除去**: 設定にかかわらず、秘密値の Cookie とヘッダは検査の後に取り除いてから処理します。上流や中継先への転送、キューへの保存、再送のいずれにも含めません
   - 上流の応答の `Set-Cookie` のうち同じ名前の Cookie は、WebView の秘密値を上書きさせないよう WebView へ返しません。この Cookie は上流自身の Cookie として Cookie Jar には保存し、以後の転送で上流へ送ります
-- **利用側の手順**: WebView が最初のページを読み込む前に、ネイティブの Cookie 管理（Android の `CookieManager`、`flutter_inappwebview` の `CookieManager.setCookie` など）で、proxy の origin（`baseUri`）へ **HttpOnly** の Cookie として置きます。同じ origin で動くスクリプトから値を読めないようにするためです。`start()` し直した後は、新しい値を置き直してから読み込みます
+- **利用側の手順**: 既定で必須のため、WebView が最初のページを読み込む前に、ネイティブの Cookie 管理（Android の `CookieManager`、`flutter_inappwebview` の `CookieManager.setCookie` など）で、proxy の origin（`baseUri`）へ **HttpOnly** の Cookie として置きます。同じ origin で動くスクリプトから値を読めないようにするためです。置かずに読み込むと、稼働確認を除く全ての要求が `403` になります。`start()` し直した後は、新しい値を置き直してから読み込みます
+  - `webview_flutter` の `WebViewCookieManager.setCookie` は HttpOnly を指定できません。使う場合はページのスクリプトから値を読めることを前提にしてください
   - Cookie はホストごとに保持されます。WebView が `127.0.0.1` と `localhost` の両方を使う場合は、それぞれに置きます
   - Cookie はポートを区別しません。再バインドでポートが変わっても置き直す必要はありませんが、同じホストの別ポートのサーバへも秘密値が送られます
   - `SameSite=Strict` にすると、別サイトのページから proxy への遷移では Cookie が送られません。一方、外部ログインのリダイレクトや `form_post` のように別サイトから戻る遷移も `403` になります。`Lax` でも、別サイトからの `POST` では送られません。ページが使う遷移に合わせて選んでください
   - `fetch` の `credentials: "omit"` のように Cookie を送らない要求は、ヘッダを付けない限り `403` になります
 - **残るリスク**: WebView 内で動くスクリプト（第三者のスクリプトを含む）は、同一 origin の要求として秘密値付きで到達できます。端末の root 権限や WebView のデバッグ接続を持つ者も防げません
 
+### 待ち受けるホストの制限
+
+- `ProxyConfig.host` は、`localhost`（大小文字は区別しない）、`127.0.0.0/8` の IPv4 アドレス（`127.0.0.1`、`127.0.0.2` など）、IPv6 の `::1` のいずれかです。それ以外（`0.0.0.0`、`::`、`192.168.1.10` などの端末のアドレス、`localhost.` のような末尾にドットを付けた名前、他のホスト名）では、`start()` が `ProxyStartException` を投げます
+- proxy は秘密値の Cookie や Cookie Jar のセッションを付けて上流へ要求するため、端末の外から届く要求を受け付けません。この制限を外す設定はありません（0.25.0 までは任意のアドレスで待ち受けられました）
+
+### Host ヘッダの照合
+
+- 稼働確認（`healthCheckPath`）を含む全ての要求について、`Host` ヘッダが proxy 自身を指すことを確かめます。秘密値の検査より前に行います
+- **ホスト名**: `ProxyConfig.host`、`127.0.0.1`、`localhost`、`[::1]` のいずれかに一致すること。大文字と小文字は区別しません。IPv6 は角括弧で囲んだ形（`[::1]:8080`）で比べ、`[0:0:0:0:0:0:0:1]` のような別の書き方は一致しません。末尾にドットを付けた名前（`localhost.`）は別の名前として扱い、一致しません。`ProxyConfig.host` が `127.0.0.2` の場合は `127.0.0.2` も一致します
+- **ポート**: 稼働中のポート（`OfflineWebProxy.port`）と一致すること。再バインドでポートが変わるため、要求ごとに、その要求を受けた接続のローカルポートと比べます（待ち受けを始めてからポートを記録するまでの間に届いた要求も正しく比べるため）。ポートを書かない `Host` は、稼働中のポートが 80 の場合だけ一致します
+- `Host` ヘッダが無い要求、複数ある要求、形式に合わない要求（空のポート、数字以外のポート、角括弧で囲まない IPv6 など）は一致しません
+- 要求行が絶対 URL（`GET http://evil.example/ HTTP/1.1`）の場合は、その URL のホストとポートも同じ規則で確かめます。userinfo（`http://u:p@127.0.0.1:8080/`）を持つ場合も一致しません
+- `X-Forwarded-Host` か `X-Forwarded-Proto` を持つ要求は、値にかかわらず一致しません。dart:io はこれらの値を `scheme://host` の位置へそのまま埋め込んで要求の URL を組み立てるため、値にパスや userinfo を含めると（`X-Forwarded-Host: 127.0.0.1:8080/injected` など）、proxy が照合するパスや、上流へ渡すパス・クエリ、イベントに載る URL まで書き換えられます。WebView はこれらのヘッダを送りません（他の要求元を名乗るヘッダは拒否せず、上流へ渡さないだけです。【14】の「要求元を名乗るヘッダ」）
+  - 値に `#` を含む場合など、dart:io が組み立てた URL を shelf が受け付けない場合は、ミドルウェアより前に shelf が `400` を返します
+- **拒否**: `403`（`text/plain`、`Cache-Control: no-store`）を返します。CORS ヘッダは付けず、統計とイベントにも数えません。要求ログには出力します
+
+### パスの検証
+
+- dart:io は要求行を解釈する際に、`/` で区切った `.` と `..`（`%2E` で書いたものを含む）を先に解決し、ルートより上へは戻しません。また、16 進数 2 桁が続かない `%` は `%25` に符号化し直します
+- 一方、区切りを符号化した `..%2F`、`%2E%2E%2F`、`%5C..`、`..%5C` や、パスパラメータを付けた `..;` は解決されないまま届き、上流のサーバが復号や `;` の除去をしてから解決すると、proxy が照合したパス（内部エンドポイント、`queueExcludePaths`、`authResumePaths` など）とは別の資源を指します
+- そこで、`Host` ヘッダの照合と秘密値の検査の後、ルーターより前に、パスをセグメントごとに `%XX` を復号し、`/` と `\` で分けた各部分（`;` 以降を除く）が `.` か `..` になる要求を `400`（`text/plain`、`Cache-Control: no-store`）で拒否します。`%` の後に 16 進数 2 桁が続かない場合も拒否します
+  - `%` の検査（`malformedPercentEncoding`）は多重防御です。通常は dart:io が不正な `%` を `%25` に直してから渡すため起きません
+- 拒否すると `errorOccurred`（`phase: requestPath`、`reason` に `dotSegment` か `malformedPercentEncoding`、`method`）を発行します。統計には数えません
+- **ミドルウェアの順序**: 要求ログ → `Host` ヘッダの照合 → 秘密値の検査 → パスの検証 → CORS → 統計 の順に通します。秘密値を持たない要求はパスによらず `403` になり、このイベントも出ないため、秘密値を持たない端末内の別アプリが `errorOccurred` を大量に出させることはできません
+- `a%2Fb` や `%5Cb` のように、区切りを符号化していても `.` と `..` を伴わないパスは受け付け、符号化したまま上流へ渡します
+- 復号はバイト単位で行うため、この検査では UTF-8 として不正なバイト列を理由に拒否しません。ただし、不正な UTF-8 を含むパス（`%82%A0` など）は、shelf がミドルウェアより前に `400` にします（この場合 `errorOccurred` は発行しません）
+- 上流が多重に復号する場合（二重に符号化した値を復号する、`%5C` をパスの区切りとして扱うなど）の解釈のずれは、この検証の対象外です
+
 ### CORS ヘッダ
 
-- 既定（`ProxyConfig.addCorsHeaders: true`）では、内部エンドポイントを除くすべての応答へ `Access-Control-Allow-Origin: *`、`Access-Control-Allow-Methods`、`Access-Control-Allow-Headers` を付けます。上流が同じ名前のヘッダを返した場合は、上流の値を優先します
-- `false` にすると、proxy はこれらを付けません。WebView のページは proxy と同一 origin のため、CORS ヘッダを必要としません。別 origin のページから proxy の応答を読ませる必要が無い限り、`false` を推奨します
-- 上流が自ら返した CORS ヘッダは、設定にかかわらずそのまま返します
+- 既定（`ProxyConfig.addCorsHeaders: false`）では、proxy は CORS ヘッダを付けません。WebView のページは proxy と同一 origin のため、CORS ヘッダを必要としません（0.25.0 までの既定は `true` で、全 origin へ `Access-Control-Allow-Origin: *` を付けていました）
+- `true` にした場合は、`ProxyConfig.corsAllowedOrigins` に挙げた origin にだけ、内部エンドポイントを除く応答へ CORS ヘッダを付けます
+  - 要求の `Origin` が一覧のいずれかと一致した場合に限り、`Access-Control-Allow-Origin` にその `Origin` の値を返し、`Access-Control-Allow-Methods`、`Access-Control-Allow-Headers` を付けます。一致しない要求と `Origin` の無い要求には付けません
+  - 応答が `Origin` によって変わるため、一致しない要求への応答を含め、`Vary: Origin` を付けます。上流が `Vary` を返した場合は末尾に `Origin` を加えます（既に `Origin` か `*` を含む場合は変えません）
+  - 一覧が `['*']` の場合だけ、全ての要求へ `Access-Control-Allow-Origin: *` を返します。この場合は `Vary` を付けません
+  - `Access-Control-Allow-Credentials` は付けません
+  - 上流が同じ名前のヘッダを返した場合は、上流の値を優先します
+- `corsAllowedOrigins` の各値は、パス・クエリ・フラグメント・ユーザー情報を持たない `http` / `https` の origin（例 `https://app.example.com`、`http://localhost:8080`）か、`'*'` 単独です。scheme とホストの大小文字は区別せず、既定ポート（`http` は 80、`https` は 443）は書いても書かなくても同じ origin とみなします。末尾の `/` だけは許します
+- 次の場合、`start()` は `ProxyStartException` を投げます
+  - `addCorsHeaders` が `true` で `corsAllowedOrigins` が空
+  - `corsAllowedOrigins` に origin として解釈できない値がある、または `'*'` と他の値が混在している（`addCorsHeaders` が `false` でも検証します）
+- **秘密値の検査との関係**: `requireAccessToken` が有効な間（既定）、別 origin のページは通常は秘密値を送れず（同じ WebView 内で `credentials: 'include'` により秘密値の Cookie を送れる場合は除く）、Cookie を送らない preflight（`OPTIONS`）も `403` になります。秘密値の検査は CORS ヘッダの付与より前に行うため、この `403` には CORS ヘッダが付きません。また `Access-Control-Allow-Headers` に `X-Offline-Web-Proxy-Token` を含めず、`Access-Control-Allow-Credentials` も付けません。このため CORS ヘッダは、実質 `requireAccessToken: false` の場合にだけ意味を持ちます。無効にする危険は「到達の制限」を参照してください
+- **上流自身の CORS ヘッダ**: 上流が自ら返した CORS ヘッダ（要求の `Origin` を反射した `Access-Control-Allow-Origin` と `Access-Control-Allow-Credentials: true` など）は proxy の制御外で、設定にかかわらずそのまま返します。上流がそうしたヘッダを返す場合、既定の設定でも別 origin のページから proxy の応答を読める余地が残ります（`requireAccessToken` が有効な間、秘密値の Cookie を送れない別 origin のページは秘密値の検査で拒否されます。同じ WebView 内の別 origin のページが `credentials: 'include'` で Cookie を送れる場合は、この検査を通ります）
 
 ### 死活監視
 
@@ -176,7 +228,7 @@ proxy はループバックで待ち受けますが、要求がどのプロセ�
 - ヘルスチェックは `GET` と `HEAD` のみを受け付け、`204 No Content` と `Cache-Control: no-store` を返します。それ以外のメソッドは通常のプロキシ経路として扱います。
 - `healthCheckPath` は `/` で始まる固定パスとします。パスパラメータ記法（`<`、`>`）、`?`、`#`、空白を含む値は起動時に `ProxyStartException` で拒否します。空文字を指定した場合は既定パスを使用します。
 - ヘルスチェック要求は上流サーバへ転送せず、キャッシュ、キュー、Cookie 処理、統計カウンタの対象外とします。
-- ヘルスチェック・状態通知・管理の各エンドポイントとして扱う（統計と CORS ヘッダの対象から外す）のは、ルーターがそれぞれのハンドラへ渡す要求、つまりメソッドとパスがルーターの登録と一致する要求だけです。要求ログから外すのは、そのうち `GET` / `HEAD` の稼働確認と `GET` の状態通知だけです。`POST` の状態通知や、登録していない管理のパスやメソッドは、ルーターと同じく転送経路として扱い、統計・CORS ヘッダ・要求ログの対象にします。
+- ヘルスチェック・状態通知・管理の各エンドポイントとして扱う（統計と CORS ヘッダの対象から外す）のは、ルーターがそれぞれのハンドラへ渡す要求、つまりメソッドとパスがルーターの登録と一致する要求だけです。Web ストレージの受け渡し（`/__offline_web_proxy/web_storage` とその下）は例外で、設定とメソッドによらず上流へ転送しないため、常に内部エンドポイントとして扱います（【5】の「Web ストレージの受け渡し」）。要求ログから外すのは、そのうち `GET` / `HEAD` の稼働確認と `GET` の状態通知だけです。`POST` の状態通知や、登録していない管理のパスやメソッドは、ルーターと同じく転送経路として扱い、統計・CORS ヘッダ・要求ログの対象にします。
 - パス先頭の `/` の重複（`//__offline_web_proxy/status` など）は、ルーターより前で 1 つにまとめます。ルーター、秘密値の検査、統計、転送のいずれも、まとめた後のパスで扱います。なお、dart:io は `//X/...` の先頭セグメントをホスト名として解析するため、その部分の大文字小文字は保たれない場合があります。
 - `probe()` は現在バインドしているポートのヘルスチェックパスへ要求を送り、`204` を受け取った場合のみ稼働中と判定します。既定タイムアウトは 2 秒です。接続失敗、タイムアウト、想定外のステータスは停止と判定します。
 - `isRunning` は内部状態のフラグのみを返し、ソケットが実際に応答するかは保証しません。実応答の確認には `probe()` を使用します。
@@ -384,8 +436,11 @@ secure storage から鍵を読んだ結果は、次のように区分します�
 | 一時的に読めない | iOS / macOS で `isCupertinoProtectedDataAvailable()` が `false`（端末のロック中など）。このときは読み取りの `null` も例外も判定に使わない。戻り値が `null`（iOS / macOS 以外）の場合と、値を取得できなかった場合は利用可能とみなす | `temporarilyUnavailable` |
 | 読み取り不能 | 読み取りが例外で失敗した | `keyUnreadable` |
 | なし | 読み取りの結果が `null` | `keyMissing` |
-| 形式不正 | 空文字、Base64 として読めない、または 32 バイトでない。値そのものの問題のため読み直さない | `keyInvalid` |
+| 形式不正 | ASCII の空白を除くと空文字、Base64 として読めない、または 32 バイトでない。値そのものの問題のため読み直さない | `keyInvalid` |
 | あり | 上記以外 | — |
+
+- 保存された値は、ASCII の空白（空白、タブ、改行、復帰など。末尾の改行を含む）を除いてから Base64 として読む。手作業での登録などで末尾に改行が付いた鍵も「あり」になる
+- 形式不正のときのエラー（`StorageIntegrityException` の `error` と `cause`）は `FormatException('Invalid encryption key encoding')` か長さの不一致を示す `FormatException` で、鍵の文字列や位置を含まない。`StorageIntegrityException.toString()` にも鍵の文字列は出ない
 
 #### 読み直し
 
@@ -477,12 +532,12 @@ secure storage から鍵を読んだ結果は、次のように区分します�
 | 鍵を一時的に読めない（読み直しの規則による場合を含む） | 何もしない | `rejection: temporarilyUnavailable` |
 | 鍵があり、キュー・隔離・ドロップ履歴の Box に不一致・破損・照合打ち切りが無い | 何もしない（Cookie Box だけの問題は `start()` が破棄して続けるため） | `rejection: startWillSucceed` |
 | 鍵があり、キュー・隔離・ドロップ履歴の Box に不一致・破損・照合打ち切りがある（Cookie Box も同じ規則で扱う） | 鍵を残し、Box ごとに扱う（下の表） | `performed: true` |
-| 形式不正、または なし・読み取り不能（読み直しても続く）で、キュー・隔離・ドロップ履歴の Box に中身がある | 暗号化 Box（Cookie・キュー・隔離・ドロップ履歴と、暗号化した応答キャッシュ）をすべて削除してから、鍵を削除する | `performed: true`、`keyDeleted: true` |
+| 形式不正、または なし・読み取り不能（読み直しても続く）で、キュー・隔離・ドロップ履歴の Box に中身がある | 暗号化 Box（Cookie・キュー・隔離・ドロップ履歴と、暗号化した応答キャッシュ、Web ストレージのスナップショット）をすべて削除してから、鍵を削除する | `performed: true`、`keyDeleted: true` |
 | 形式不正、または なし・読み取り不能で、キュー・隔離・ドロップ履歴の Box に中身が無い | 何もしない | `rejection: startWillSucceed` |
 
 - 鍵を書き込めずに起動に失敗した場合（`keyWriteFailed`）も、消す必要のある Box が無いため `startWillSucceed` になる。時間をおいて `start()` を再試行する
 
-鍵がある場合の Box ごとの扱いは、次のとおりです。照合打ち切りと破損の Box は、Box を閉じた後のファイルを時間の上限なしで走査し直してから扱いを決めます。
+鍵がある場合の Box ごとの扱いは、次のとおりです。照合打ち切りと破損の Box は、Box を閉じた後のファイルを、Box ごとに 2 分を上限として走査し直してから扱いを決めます。どれかの Box の走査し直しが 2 分を超えた場合は、何も削除・作り直しせずに `rejection: verificationTimedOut` を返します（異常に大きなファイルで復旧 API が戻らなくならないようにするため。端末の負荷が下がってから再試行する）。
 
 | 照合結果 | 扱い | 戻り値の分類 |
 | --- | --- | --- |
@@ -500,19 +555,50 @@ secure storage から鍵を読んだ結果は、次のように区分します�
 - **終了後**: 共有していた初期化の結果を捨てるため、プロセスを再起動せずに `start()` できる
 - **件数**: 暗号化された記録の件数は読めないため返さない。`StorageIntegrityException` で起動に失敗した後の `getStats()` は 0 件を返すため、確認画面の根拠に使わない
 
+#### 既知の制約
+
+- **MAC が無い**: Hive は値を AES-256-CBC で暗号化しますが、メッセージ認証コード（MAC）は付けません。フレームの CRC は偶発的な破損を検出するだけで、改ざんは改ざんとして検出できません。保存先のファイルを書き換えられる者は、値を読めなくしたり、ブロック単位で別の値として読ませたりできます。鍵は secure storage に置き、ファイルの保護はアプリのサンドボックスに頼ります。ポート設定 Box の持ち主の記録は暗号化しないため、別に HMAC のタグで書き換えを検出します（【5】の「持ち主の保存」）
+
 #### Hive の内部形式への依存
 
 先頭フレームの照合、走査、作り直し、保存順の前提は、Hive 2.2.3 の内部形式（フレームの並び、キーの符号化、`calculateKeyCrc`、`.hive` と `.hivec` の扱い、キーの並べ方）に依存します。Hive の CRC32 は公開されていないため、同じ計算を proxy の中に実装しています。Hive を更新するときは、これらの互換を確認してください。走査が偶然一致するフレームを見つける確率は極めて小さいものの、ゼロではありません。
 
 ### Cookie 評価基準
 
-RFC 準拠の Cookie 評価を実装：
+RFC 6265 に沿って Cookie を評価します。
 
 - **Domain**: Cookie が有効なドメインの検証
-- **Path**: Cookie が有効なパスの検証
+- **Path**: Cookie が有効なパスの検証。`Path` 属性が空か `/` で始まらない場合は、要求先のパスから求めた default-path（最後の `/` より前の部分。無ければ `/`）を使います（RFC 6265 5.2.4）
 - **Expires/Max-Age**: Cookie の有効期限の管理
+  - `Expires` は RFC 6265 5.1.1 の手順で解釈します。`Wed, 21 Oct 2026 07:28:00 GMT` のほか、`Wed, 21-Oct-2026 07:28:00 GMT`、2 桁の年（`21-Oct-26`）、asctime（`Wed Oct 21 07:28:00 2026`）も受け付けます
+  - 2 桁の年は 70～99 を 1900 年代、0～69 を 2000 年代とみなします。日・月・年・時刻のどれかが無い値、範囲外の値（日が 1～31 の外、年が 1601 未満、時・分・秒が範囲外）、存在しない日付（2 月 30 日など）は解釈できない値として `Expires` 属性ごと無視します
+  - `Max-Age` は `^-?\d+$` に合う値（先頭に `-` を 1 つ置けるほかは数字だけ）だけを採ります（RFC 6265 5.2.2）。`0x10`、`+5`、`5s` などは属性ごと無視し、先に採った値を保ちます。0 以下は即時の失効です
+  - `Max-Age` があれば `Expires` より優先します
+  - 上流の `Set-Cookie` から受け取る有効期限は、受信日時から 400 日後を上限とします（RFC 6265bis）。`Max-Age` と `Expires` のどちらでも、より先を指す場合は 400 日後に丸めます。`restoreCookies()` に構造化データで渡す有効期限は丸めません
+  - 過去の日時の `Expires` か 0 以下の `Max-Age` を持つ Cookie は保存せず、同じ名前・ドメイン・パスの保存済み Cookie を削除します
 - **Secure**: HTTPS 接続時のみ送信する Cookie の制御
 - **SameSite**: CSRF 攻撃防止のための SameSite 属性の処理
+
+#### 上流の Set-Cookie の受け入れ規則
+
+上流の応答（設定済み origin、`mirroredOrigins` の中継先、ウォームアップ）の `Set-Cookie` は、Cookie Jar へ保存する前に次の規則（RFC 6265、RFC 6265bis）で確かめ、外れたものは保存しません。WebView へ返す応答の `Set-Cookie` は、この規則の影響を受けません。
+
+| `reason` | 保存しない条件 |
+| --- | --- |
+| `domainMismatch` | `Domain` 属性が要求先ホストに domain-match しない（要求先ホストが `Domain` と等しくなく、`.` + `Domain` で終わりもしない） |
+| `ipDomain` | 要求先ホストが IP アドレスで、`Domain` 属性がホストと異なる。等しい場合はホスト限定の Cookie として受け入れる |
+| `singleLabelDomain` | `Domain` 属性に `.` が無い（`com`、`.com` など）。要求先ホストと等しい場合（`localhost` など）はホスト限定の Cookie として受け入れる |
+| `mirroredOriginDomain` | 中継先の応答の Cookie が、設定済み origin のホストへも送られる範囲を指す。ホスト限定の Cookie では中継先のホストが設定済み origin のホストと等しい場合、`Domain` 付きでは設定済み origin のホストがその `Domain` に domain-match する場合。Cookie はポートを区別しないため、ポートだけが違う中継先も当たる |
+| `insecureSecure` | `https` 以外の応答が `Secure` 属性を付けた |
+| `securePrefix` | 名前が `__Secure-` で始まり（大文字小文字を区別しない）、`Secure` 属性か `https` の応答を欠く |
+| `hostPrefix` | 名前が `__Host-` で始まり（大文字小文字を区別しない）、`Secure` 属性、`https` の応答、`Domain` 属性なし、`Path` 属性があり解決後のパス（`/` で始まらない値や空の値は default-path）が `/`、のどれかを欠く |
+| `secureOverwrite` | `https` 以外の応答の Cookie が、期限内の `Secure` の Cookie を上書き・削除するか影で覆う（RFC 6265bis 5.7）。名前が等しく、ドメインのどちらかがもう一方に domain-match し（親ドメインの `Domain` で子ホストの `Secure` の Cookie を覆う場合を含む）、新しい Cookie のパスが既存の Cookie のパスに path-match する `Secure` の Cookie があれば当たる。ホスト限定かどうかは問わない |
+
+- 判定は `Domain`（`ipDomain`、`singleLabelDomain`、`domainMismatch` の順）、`mirroredOriginDomain`、`insecureSecure`、`securePrefix`、`hostPrefix`、`secureOverwrite` の順に行い、最初に当たったものを `reason` にします
+- 公開サフィックスリストは使わない簡易判定です。`co.jp` のような複数ラベルの公開サフィックスを `Domain` に指定した Cookie も、要求先ホストが domain-match すれば受け入れます
+- 保存しなかった Cookie は、`errorOccurred`（`operation: cookieSave`）の `reason` に上表の値、`cookieName` に Cookie 名を入れて知らせます。Cookie の値は載せません
+- `Set-Cookie` を解釈できない場合（`reason: invalidSetCookie`）と、保存領域を使えない場合（`reason: storageFailure`）も保存せず、`errorOccurred`（`operation: cookieSave`）の `error` に例外の型名を入れて知らせます。どの場合も要求の処理は続け、上流の応答を WebView へ返します
+- `restoreCookies()` に渡す Cookie はアプリが渡す値のため、この規則の対象外です。`CookieRestoreEntry.fromSetCookieHeader()` も属性をそのまま取り込みます
 
 ### 管理メソッド
 
@@ -529,9 +615,11 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 - **保存順の維持**: 保存日時の昇順で再送し、リクエストの順序を保持
 - **キーの一意性**: マイクロ秒精度のタイムスタンプと同一マイクロ秒内の連番でキーを採番し、同時に保存したリクエストが上書きで失われないようにする
 - **永続化**: Hive の暗号化 Box（`proxy_queue_secure`）でキュー状態を保存。アプリ再起動後も再送を継続（「保存領域の暗号化」）
+- **保存するヘッダの Cookie**: WebView が送った `Cookie` のうち、`ProxyConfig.forwardWebViewCookieNames` に含まれる名前だけを保存します。残る Cookie が無い場合は `Cookie` ヘッダごと保存しません。再送でも送る時点で同じ設定で絞るため、0.25.0 以前に WebView の Cookie をすべて保存した要求からも、許可しない Cookie は送りません。再送の Cookie は、送る時点の Cookie Jar を優先します（【14】の「Cookie ヘッダ」）
 - **再試行待ちの扱い**: バックオフ待機中のリクエストは今回の送信対象から外し、待機時間を過ぎた後続のリクエストを先に送信する。ただし 429 で送信を控えている間と、認証待ちで一時停止している間は、後続も送らない（「再試行戦略」「認証が必要な応答での一時停止」）
 - **接続の解放**: 再送では上流の応答本文を必ず読み切り、接続を解放してから次の要求へ進む。件数が同時接続数の上限を超えても最後まで送り切れるようにする
 - **隔離できない場合**: 隔離領域へ退避できない状況では、キューから取り除かずバックオフを適用して再試行する（1 件で `quarantineMaxBytes` を超える場合を除く。「保持上限」）
+- **件数と大きさの上限**: `queueMaxCount`（既定 1000 件）と `queueMaxBytes`（既定 50 MiB）を超える要求は保存せず `503` と `{"queued":false,"error":"queue_full"}` を返す。要求本文が `maxRequestBodyBytes`（既定 10 MiB）を超える場合は、キューへ入れず `413` を返す（「保持上限」の「キューと要求本文の上限」）
 
 ### 再試行戦略
 
@@ -547,6 +635,7 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 
 - **4xx 系エラー**: クライアントエラー（認証失敗、不正リクエスト等）。再送しても結果が変わらないため取り除く。ただし 408 と 429 は一時的な状態のため取り除かずに再試行し、`authRequiredStatusCodes` に指定した状態コードは取り除かずにキューの送信を一時停止する（「認証が必要な応答での一時停止」）
 - **持ち主の変更**: `queueOwnerResolver` を指定していて、要求の持ち主がログインし直した利用者と違う場合。送らずに取り除く（「送信待ちの持ち主」）
+- **送信先の origin の変更**: 保存した絶対 URL の scheme・host・実効ポートが、送る時点の `ProxyConfig.origin` と違う場合。`mirroredOrigins` に含まれる origin でも取り除きます（中継の経路は更新系を受け付けないため、中継先の URL はキューに入りません）。`origin` の設定を変えて起動し直した後に、前の送信先へ要求と Cookie を送らないため、送らずに取り除く。理由は `origin_changed`、ステータスコードは `0`、`errorMessage` は `Queue origin changed` です。照合は再試行の待ち時間が過ぎて送る直前に行います。相対 URL で保存した旧版の要求は、従来どおり送る時点の `origin` を補って送ります
 
 ネットワークエラー、5xx 系エラー、408、429 は一時的な障害とみなし、取り除かずに再試行を継続します。
 
@@ -632,30 +721,46 @@ queueOwnerResolver: (context) => switch (context.requestJson) {
 
 #### 持ち主の記録と比較
 
-- **記録**: キューへ入れるとき、その時点の現在の持ち主を要求と一緒に記録します。隔離へ移しても、`retryQuarantinedRequest()` で戻しても引き継ぎます
+- **記録**: proxy が要求を受け付けた時点の現在の持ち主を、キューへ入れるときに要求と一緒に記録します。上流が応答を待たせている間に別の利用者がログインしても、受け付けた時点の持ち主のままです。隔離へ移しても、`retryQuarantinedRequest()` で戻しても引き継ぎます
 - **比較**: キューから送る直前に、要求の持ち主と現在の持ち主を比べます。再試行を待っている要求も、待ち時間が過ぎるのを待たずに比べます。両方分かっていて違う場合は送らず、`dropPolicy` に従って隔離またはドロップ履歴へ移します（隔離する方針で、1 件で `quarantineMaxBytes` を超える要求は、ドロップ履歴へ `quarantine_too_large` で記録します）
   - 理由は `owner_changed`、ステータスコードは `0`、`errorMessage` は `Queue owner changed` です
   - 通知は 4xx で取り除いた場合と同じく `requestQuarantined` か `requestDropped` です。再送結果（`queueResendAttempted`、`recentResendResults`）は `dropReason: owner_changed`、`statusCode: 0` で記録します
   - 別の利用者がログインしている間に `retryQuarantinedRequest()` で戻すと、再び `owner_changed` で隔離されます。持ち主がログインし直してから戻してください
 - **比べない要求**: 要求の持ち主か現在の持ち主のどちらかが分からない場合は、従来どおり送ります。この設定を使う前に入れた要求と、誰もログインしていない間（現在の持ち主が無い間）に入れた要求です
 - **ログインの転送中**: ログインの要求（`authResumePaths` に一致する要求）を上流へ転送している間は、キューから新しく送りません。転送を始める前から送り始めていた要求は、本文を送る直前に中断し、次の周回で送り直します。失敗には数えず、再試行回数も変えません。新しいセッションの Cookie で、持ち主を決める前に送らないためです。転送が終わると、次の定期処理を待たずに送信を始めます
+- **並行したログイン**: ログインの応答の `Set-Cookie` の保存から、持ち主の判定と保存までを、1 件ずつ順に行います。複数のログインを並行して転送しても、応答が届いた順に Cookie と持ち主がそろって確定するため、Cookie Jar のセッションと現在の持ち主が別の利用者になることはありません。この順番待ちを 30 秒以内に取得できない場合は、Cookie だけを保存し、持ち主を決めずに `ownerUnresolved` で一時停止します。ログインの応答はそのまま返します。`restoreCookies()` も同じです。このとき順番待ちを持っていた側のログインや復元は、ロックの外で Cookie が書かれたことを持ち主を決める前と再開する前に確かめ、書かれていれば持ち主を決めずに `ownerUnresolved` で一時停止します。Cookie Jar のセッションと持ち主が別の利用者のまま送らないためです
+- **判定関数が `null` を返した場合**: 現在の持ち主を変えず、認証待ちの一時停止（`authenticationRequired`）は従来どおり再開します。持ち主を判定できずに止めている間（`ownerUnresolved`）は再開しません
+
+#### ログイン以外でセッションを変える操作
+
+Cookie Jar のセッションは、ログインの要求のほかに `restoreCookies()` と `clearCookies()` でも変わります。`queueOwnerResolver` を指定して起動している場合（停止した後を含む）は、次のとおり持ち主も扱います。指定していない場合は 0.25.0 と同じです。
+
+- **`restoreCookies(entries, queueOwnerId: ...)`**: ログインと同じく、Cookie を保存して持ち主を決めるまでキューから新しく送らず、送り始めていた要求は本文を送る直前に中断します。`queueOwnerId` には、`queueOwnerResolver` が返す値と同じ形で、復元するセッションの利用者を渡します。指定した場合はその利用者を現在の持ち主にし（HMAC だけを保存）、一時停止していたキューを再開します。指定しない場合（`null` か空文字列）と、Cookie の保存に失敗した場合は、正体の分からない利用者に変わったものとして `ownerUnresolved` で一時停止します（「持ち主を判定できない場合」）
+- **`clearCookies()`**: すべてを削除する場合と、設定済み `origin` のホストへ送られる `domain`（ホストと一致するか、ホストを含む上位のドメイン。先頭の `.` と大文字小文字は区別しない）を削除する場合は、セッションの利用者が分からなくなるため `ownerUnresolved` で一時停止します。削除に失敗した場合も一時停止します。それ以外のドメインの削除では変えません
+- **前の持ち主の要求**: どちらの場合も捨てません。前の持ち主がログインし直すか、`queueOwnerId` に同じ利用者を渡して復元すると、そのまま送ります
+- **一度も起動していない間**: 判定関数の有無が分からないため、`queueOwnerId` は使わず、持ち主も変えません。持ち主を使うアプリは、`start()` の後に呼び出してください
 
 #### 持ち主を判定できない場合
 
-判定関数が例外を投げた場合と、持ち主を決められない場合・保存できない場合は、次のとおり扱います。
+判定関数が例外を投げた場合と、持ち主を決められない場合・保存できない場合は、次のとおり扱います。`queueOwnerId` を渡さない `restoreCookies()`、セッションを消す `clearCookies()`（「ログイン以外でセッションを変える操作」）と、起動時に持ち主の記録を信頼できない場合（「持ち主の保存」）も同じです。
 
 - **通知**: `ProxyEventType.errorOccurred` を発行します。`data` の `phase` は `queueOwnerResolve` か `queueOwnerPersist` です。例外の文字列には本文の抜粋が入り得るため、`error` には例外の型名（例外ではない失敗では短い理由）だけを載せます
 - **一時停止**: ログインした利用者を正体の分からない新しい持ち主とみなし、キューを `QueuePauseReason.ownerUnresolved` で一時停止します。`ProxyStats.queuePausedReason` と状態通知の `queuePausedReason` は `ownerUnresolved` になります
 - **再開の契機**: `resumeQueue()` と、持ち主が決まる次のログインです。判定関数が `null` を返すログインでは再開しません。`skipPausedRequest()` の対象外で、`false` を返します
 - **再開した後**: 持ち主が分かっている要求は、ログインしたのが別の持ち主とみなされるため、`owner_changed` で移ります。正体の分からない持ち主の間に入れた要求もその持ち主を記録するため、次に持ち主が決まるログインの後は `owner_changed` で移ります
-- **永続化**: 一時停止はメモリ上だけに持ち、`stop()` で解除します。正体の分からない持ち主は保存するため、次の起動では利用者の操作を待たずに、持ち主が分かっている要求を `owner_changed` で移します
+- **永続化**: 一時停止はメモリ上だけに持ち、`stop()` で解除します。正体の分からない持ち主は保存し、起動時に現在の持ち主が正体の分からない持ち主で、別の持ち主の要求がキューにある場合は、理由を問わず `ownerUnresolved` で一時停止し直します（イベントは発行しません）。前の持ち主の要求を、利用者の操作を待たずに `owner_changed` で移すことはありません。再開の契機は上と同じです
 
 #### 持ち主の保存
 
 - **HMAC**: 識別子はそのまま保存しません。保存領域の暗号化鍵から導出した鍵で HMAC-SHA256 を取り、その値だけを持ちます。イベント、状態通知、管理エンドポイントには出しません
 - **現在の持ち主**: ポート設定の Box（`proxy_port_preferences`。暗号化しない）に、鍵の指紋と一緒に保存し、起動し直しても引き継ぎます。鍵の指紋が合わない値（鍵を作り直した場合など）は捨てます
+- **書き換えの検出**: ポート設定の Box は暗号化しないため、持ち主の記録（持ち主、鍵の指紋、ログインを転送中かどうか）に、保存領域の暗号化鍵から導出した鍵の HMAC-SHA256 のタグを付けます。起動時に次の場合は、`errorOccurred`（`phase: queueOwnerLoad`）を発行し、ログインした利用者を正体の分からない持ち主とみなして `ownerUnresolved` で一時停止します（「持ち主を判定できない場合」）
+  - タグが合わない場合、タグを付けて保存した後なのにタグが無い場合（`reason: tagMismatch`）
+  - 持ち主を記録した要求がキューにあるのに、現在の持ち主の記録が無い場合（`reason: recordMissing`）
+- **0.25.0 の記録**: タグの無い 0.25.0 の記録は、タグを付けて保存したことが無い場合に限り 1 回だけ受け入れ、タグを付けて保存し直します。一度 0.26.0 で起動した後に 0.25.0 へ戻して記録を書いた場合も、次の 0.26.0 の起動では書き換えとみなして一時停止します
+- **検出できないもの**: タグは記録の中身の書き換えを検出するもので、ポート設定の Box を過去の時点の内容へ丸ごと戻すことは検出できません。タグを付けた印とタグの両方を消した記録も、0.25.0 の記録として受け入れます。Hive の暗号化 Box にも改ざんを検出する仕組みはありません（【4】）
 - **要求の持ち主**: キューと隔離の暗号化 Box に、要求と一緒に保存します。ドロップ履歴には残しません
-- **ログインの転送中**: 転送中であることも保存します。Cookie を保存してから持ち主を保存するまでの間にアプリが終了した場合、次の起動では、ログインした利用者を正体の分からない持ち主として扱います。新しいセッションの Cookie が既に保存されている可能性があるためです
+- **ログインの転送中**: 転送中であることも保存します。Cookie を保存してから持ち主を保存するまでの間にアプリが終了した場合、次の起動では、ログインした利用者を正体の分からない持ち主として扱い、前の持ち主の要求があれば `ownerUnresolved` で一時停止します（「持ち主を判定できない場合」の「永続化」）。新しいセッションの Cookie が既に保存されている可能性があるためです
 - **転送中であることを保存できない場合**: ログインは転送し、`errorOccurred`（`phase: queueOwnerPersist`）を発行します。その間にアプリが終了すると、次の起動は前の持ち主で始まります
 
 #### 制約
@@ -730,9 +835,11 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - **イベント**: `ProxyEventType.queueResendAttempted` を、成功・隔離・破棄・再試行のすべてで発行します
 - **内容**: URL、メソッド、ステータスコード、成否、べき等性キー、取り除いた理由、再試行の有無、試行日時
 - **本文**: 含みません。会計データが監視経路へ流れないようにします
-- **上流へ到達できなかった場合**: ステータスコードは `0` になります。持ち主が違うため送らなかった場合（`owner_changed`）も `0` です
+- **上流へ到達できなかった場合**: ステータスコードは `0` になります。持ち主が違うため送らなかった場合（`owner_changed`）と、送信先の origin が変わったため送らなかった場合（`origin_changed`）も `0` です
+- **停止と重なった場合**: `stop()` の途中で再送の応答を受け取った場合は、保存領域を閉じ始めているため、結果（`queueDrained`、`queueResendAttempted`、`recentResendResults`）を記録せず、要求もキューから取り除きません。成功した要求は、べき等性キーの記録を保存できていれば、次の起動で送信済みとみなし、上流へ送り直さずに取り除きます。保存できていなければ同じキーで送り直します
 - **既存イベント**: `ProxyEventType.queueDrained` にも `statusCode` と `idempotencyKey` を追加しました
 - **直近の結果**: `recentResendResults` で最大 20 件を参照できます。監視用にメモリ上へ保持するだけで永続化しないため、アプリのプロセスが終了すると失われます
+- **URL のクエリ**: Dart API の `recentResendResults` は、クエリを含む完全な URL を保持します。イベントの `url` は `ProxyConfig.includeQueryInEvents` に従い、既定ではクエリとフラグメントを除きます（【18】の「イベントの URL」）。状態通知エンドポイントの `recentResendResults` は、設定によらずクエリとフラグメントを除きます
 
 ### 履歴管理
 
@@ -811,7 +918,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 ### 保持上限
 
-隔離とドロップ履歴は、`ProxyConfig` の次の設定で保持する量を制限します。キューには上限を設けません（未送信の業務データを捨てないため）。
+キューと要求本文、隔離とドロップ履歴は、`ProxyConfig` の次の設定で保持する量を制限します。
 
 | 設定 | 既定 | 対象 | 超えた場合 |
 | --- | --- | --- | --- |
@@ -821,7 +928,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 | `droppedRequestMaxCount` | 1000 | ドロップ履歴の件数 | 確認済みの古いものから削除する。未確認は件数では消さない |
 | `droppedRequestRetention` | 30 日 | `droppedAt` からの経過 | 確認済みかどうかを問わず削除する |
 
-- **0 と負の値**: `0`（`Duration.zero`）はその上限を無効にする。負の値は `start()` が `ProxyStartException` を送出する
+- **0 と負の値**: `0`（`Duration.zero`）はその上限を無効にする。負の値は `start()` が `ProxyStartException` を送出する（キューと要求本文の上限は除く。下の「キューと要求本文の上限」）
 - **隔離から移す順序**: ドロップ履歴へ記録してから隔離から削除する。記録できない場合は削除しない。`statusCode` と `errorMessage` は隔離時の値を引き継ぎ、`requestDropped` の `data` に `quarantineId` を含める
 - **1 件で合計バイト数の上限を超える場合**: 既存の隔離を追い出さず、隔離にも入れない。本文を捨ててドロップ履歴へ `quarantine_too_large` で記録してから、キューから取り除く。同じ 4xx を再試行し続けないため、「隔離できない場合はキューに残す」には当てはめない
 - **追加した隔離**: 隔離を追加したときの判定では、追加した 1 件は追い出さない
@@ -830,6 +937,29 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - **圧縮**: Hive の削除は論理削除で、削除を表すフレームがファイルに残る。起動時・1 時間ごと・遅らせた移行の後の判定では、ロックの外で Box を圧縮する（`compact()`）。いずれもフラッシュストレージ上の完全消去は保証しない
 - **メモリ**: Hive は Box を開くと値をすべてメモリに読み込むため、隔離は件数だけでなく合計バイト数でも制限する。開く瞬間は合計バイト数の上限の約 2 倍を使い得る
 - **イベント**: 起動時の判定で出したイベントは、`start()` の後に購読したアプリには届かない。`ProxyStats.unacknowledgedDroppedCount` で気付ける
+
+#### キューと要求本文の上限
+
+0.25.0 まではキューに上限が無く、要求本文も大きさを問わず読み込んでいました。画面の不具合や悪意のある Web ページが大きな要求を送り続けると、端末のメモリと保存領域を使い切るため、0.26.0 から次の上限を設けます。
+
+| 設定 | 既定 | 範囲 | 対象 | 超えた場合 |
+| --- | --- | --- | --- | --- |
+| `maxRequestBodyBytes` | 10 MiB | 1024〜268435456（256 MiB） | 1 件の要求本文 | 転送もキュー保存もせず `413` を返す |
+| `queueMaxCount` | 1000 | 1〜100000 | キューの件数 | 保存せず `503` と `{"queued":false,"error":"queue_full"}` を返す |
+| `queueMaxBytes` | 50 MiB | 1048576（1 MiB）〜1073741824（1 GiB） | キューの合計サイズ | 保存せず `503` と `{"queued":false,"error":"queue_full"}` を返す |
+
+- **範囲外の値**: `start()` が `ProxyStartException` を送出する。`0` で上限を無効にすることはできない
+- **本文の上限の判定**: `Content-Length` を先に見て、上限を超える場合は本文を保持しない。`Content-Length` の無い（chunked の）要求は、読みながら数えて超えた時点で読んだ分を捨てる
+- **`413` の応答**: `413 Payload Too Large`、`Content-Type: application/json; charset=utf-8`、`Cache-Control: no-store`、`X-Offline-Queued: 0`、`Connection: close`、本文 `{"queued":false,"error":"request_body_too_large"}`。オンラインでもオフラインでも同じで、キューへは入れない（後で送っても同じく大きすぎるため）。`queueExcludePaths` に一致するオフラインの要求は、本文を読まずに除外の応答を返す
+- **接続の扱い**: 読み残しがあるまま接続を閉じるとクライアントへ RST が届き、`413` を受け取れないため、上限を超えた分は保持せずに読み捨ててから応答し、接続を閉じる（keep-alive の同じ接続で後続の要求を受けない）。読み捨てる量は 16 MiB までで、`Content-Length` が上限を 16 MiB より多く超える場合は読まずに応答し、chunked の要求は 16 MiB を読み捨てた時点で読むのをやめる。この場合、クライアントは送信の途中で接続を閉じられ、`413` を受け取れないことがある
+- **Web ストレージ**: `enableWebStorageInheritance` の受け渡し（`POST /__offline_web_proxy/web_storage`）は、`maxRequestBodyBytes` と 5 MiB の小さい方を上限にし、超えた場合は同じ `413` を返す（【5】の「Web ストレージの受け渡し」）
+- **キューの大きさ**: 1 件の大きさは、URL、ヘッダの名前と値の UTF-8 長と本文の長さの和。再送の予定時刻などの管理用の項目と保存形式の余分は数えないため、メモリと保存領域の使用量は目安として抑えるだけで、厳密な上限ではない（隔離から戻す要求も上限で断らない）
+- **キューの判定**: 保存する前に、今の件数と合計に 1 件を加えて判定する。件数を先に判定し、超える場合は `limit: count`、合計サイズを超える場合（1 件で `queueMaxBytes` を超える場合を含む）は `limit: bytes`。保存せずに `503` と `{"queued":false,"error":"queue_full"}`、`X-Offline-Queued: 0` を返し（キューを書けない場合の `{"queued":false}` と本文で区別できる）、`errorOccurred`（`phase: queueLimit`、`limit`）を発行する。`requestQueued` は発行しない。上流が 5xx を返した更新系では、従来どおり上流の応答をそのまま返し、`X-Offline-Queued` を付けない（【10】の「上流が 5xx を返した更新系」）
+- **同じべき等性キー**: 画面が同じべき等性キーで送り直した要求は、上限によらず既存のキュー ID を返す（キューを増やさないため）
+- **既存の要求**: 上限を超えたことを理由に既存の要求は消さない。起動時に上限を超えている場合（上限を下げた場合など）も消さず、送信や隔離で下回るまで新しい要求を断る
+- **隔離から戻す要求**: `retryQuarantinedRequest()` と管理 API の再送は、上限で断らない。利用者が内容を確かめて戻す操作で、既に端末にある要求を移すだけのため
+- **数え方**: Box を開いたとき（と、Box や移行を待っている旧 Box が変わった後の最初の判定のとき）に Box の全件を数えて要求ごとの大きさを控え、以降は判定のたびに控えと Box のキーを突き合わせる。控えに無いキーは Box の値から数え、Box に無くなったキーは控えから外すため、再送の成功・隔離・ドロップ・持ち主の変更・`skipPausedRequest()`・停止と起動・保存領域の復旧のどれで取り除いても合計がずれない。移行を待っている旧平文キュー（`proxy_queue`）の要求も数える
+- **同時の投入**: 判定から保存までを 1 件ずつ行い、同時に届いた要求が上限を超えて保存されないようにする。この排他を 30 秒以内に取得できない場合は、保存領域を使えない場合と同じく保存せず `503` と `{"queued":false}` を返す
 
 ### 一覧と上限による削除の順
 
@@ -867,6 +997,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 - **`queuePausedReason`**: キューの送信を止めている理由（`getStats()` の `queuePausedReason` の名前）。止めていなければ `null`、認証待ちなら `"authenticationRequired"`（「認証が必要な応答での一時停止」）、429 を受けて控えているなら `"rateLimited"`（「再試行戦略」）、持ち主を判定できずに止めているなら `"ownerUnresolved"`（「送信待ちの持ち主」）です。認証待ちと 429 の両方に当たる場合は、利用者の操作が必要な `"authenticationRequired"` を返します。`"ownerUnresolved"` も、429 の控えより優先して返します（認証待ちと `"ownerUnresolved"` は同時には起きません）
 - **`queuePausedUntil`**: 自動で再開する時刻（UTC の ISO 8601）。`"rateLimited"` の場合だけ値があり、それ以外は `null` です
+- **`recentResendResults`**: 直近の再送結果（「再送結果の通知」）。画面から読めるため、`includeQueryInEvents` によらず `url` のクエリ（`?` 以降）とフラグメント（`#` 以降）を除きます。クエリ込みの URL が必要な場合は Dart API の `recentResendResults` を使います
 
 これにより「未送信があるときは精算させない」「未送信件数を表示する」「オフラインならレジ認証を出さない」が Web 側だけで完結します。
 
@@ -920,7 +1051,7 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 
 | 状態 | 次の状態 |
 | --- | --- |
-| `queued` | `delivered`（2xx か 303、または届いた記録に同じキーがあり、送らずに成功とみなした場合）、`quarantined`（408・429 以外の 4xx、`owner_changed`）、`dropped`（4xx か `owner_changed` で `dropPolicy` が `drop` の場合、`quarantine_too_large` の場合）。5xx・408・429・303 以外の 3xx や到達できない間と、`authRequiredStatusCodes` の応答で一時停止している間は `queued` のまま。一時停止させた要求は `skipPausedRequest()` で `quarantined` か `dropped` になる |
+| `queued` | `delivered`（2xx か 303、または届いた記録に同じキーがあり、送らずに成功とみなした場合）、`quarantined`（408・429 以外の 4xx、`owner_changed`、`origin_changed`）、`dropped`（4xx か `owner_changed`、`origin_changed` で `dropPolicy` が `drop` の場合、`quarantine_too_large` の場合）。5xx・408・429・303 以外の 3xx や到達できない間と、`authRequiredStatusCodes` の応答で一時停止している間は `queued` のまま。一時停止させた要求は `skipPausedRequest()` で `quarantined` か `dropped` になる |
 | `quarantined` | `queued`（`retryQuarantinedRequest()`）、`dropped`（`quarantine_limit`・`quarantine_expired`）、`unknown`（破棄） |
 | `dropped` | `unknown`（保持期間か件数の上限で消えた場合、`clearDroppedRequests()`） |
 | `delivered` | `unknown`（`idempotencyRetention` を過ぎた場合） |
@@ -944,6 +1075,25 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - **応答**: 再送は `{"retried": true}`、破棄は `{"discarded": true}` を `200` で返します
 - **失敗時の応答**: 該当が無い場合は `404`、旧平文 Box から移行を待っている項目の場合は `409` を返します。どちらも `retried` / `discarded` が `false` で、`error` に理由が入ります。隔離のロックを 30 秒以内に取得できない場合は `500`（`text/plain`）を返します
 
+### Web ストレージの受け渡し
+
+`enableWebStorageInheritance` を有効にすると、HTML 応答に受け渡しの URL（`/__offline_web_proxy/web_storage/snapshot`）を注入し、画面は `POST` で Web ストレージのスナップショットを保存し、`GET` で読み戻します。
+
+- **保存先**: 暗号化 Box `proxy_web_storage_secure`（【1】の「端末に保存するデータ」）。0.25.0 以前の平文の Box `proxy_web_storage` は、有効なら起動時に移してから削除し、無効なら Box を開かずに削除する
+- **受け付ける要求**: proxy 自身の origin のページからの要求だけ。比べる相手は設定済みの上流 origin ではなく proxy 自身で、scheme が `http`、ポートが要求を受けたポート、ホスト名が `Host` の検査（【2】）で受け付ける名前（`ProxyConfig.host`、`127.0.0.1`、`localhost`、`[::1]`）のいずれかの場合に一致とみなす。パスなどを含む値と `null` は一致しない
+  - `POST` は `Origin` が必須。無ければ `403`
+  - `GET` は `Origin` が無ければ受け付ける（同一 origin の `GET` の `fetch` は `Origin` を送らないため）。ある場合は一致が必要
+  - `Sec-Fetch-Site` があり、`same-origin` と `none` 以外（`same-site`、`cross-site`）の要求は、メソッドによらず `403`
+  - `GET` と `POST` 以外のメソッドは `405`（`Allow: GET, POST`）
+- **応答**: すべての応答（`200`、`403`、`404`、`405`、`413`、`500`）に `Cache-Control: no-store` を付ける
+- **内部エンドポイント**: 上流へ転送せず、CORS ヘッダを付けず（`corsAllowedOrigins` によらない）、統計とイベントにも数えない。秘密値の検査（`requireAccessToken`）と `Host` の検査は他の要求と同じく受ける
+- **無効な場合**: `/__offline_web_proxy/web_storage` とその下のパスは、メソッドによらず `404`（`Cache-Control: no-store`）を返し、上流へは転送しない
+- **本文の上限**: `maxRequestBodyBytes` と 5 MiB の小さい方（「キューと要求本文の上限」）。読めない本文は保存せずに `200` を返す
+- **秘密値**: `requireAccessToken: false` にすると、端末内の別アプリが `Origin` の無い `GET` でスナップショットを読める。`enableWebStorageInheritance` を有効にする場合は、`requireAccessToken` を有効のままにする
+- **壊れた暗号化 Box**: 暗号化 Box を開けない場合や、保存しない形の値がある場合は、写しは画面から作り直せるため、Box を作り直して `errorOccurred`（`phase: webStorageRecovery`）で知らせ、起動を続ける。作り直した後も平文の Box があれば移す
+- **移行の失敗**: 平文の Box の移行に失敗した場合（暗号化 Box を作り直した後を含む）と、無効な設定で平文の Box を削除できなかった場合は、起動を止めず、`errorOccurred`（`phase: webStorageMigration`、`error` は例外の型名）で知らせる。平文の Box は閉じて残し、次の起動で移し直す
+- **削除**: `clearWebStorageSnapshot()`（【20】）。Box を開いている間は空にして圧縮し、開いていなければ新旧の Box のファイルを削除する。稼働中かどうかと設定によらず呼び出せる。フラッシュストレージ上の完全消去は保証しない
+
 ### 内部エンドポイントの origin 制御
 
 状態通知と管理の各エンドポイントは、proxy 自身の origin からの要求だけを受け付けます。
@@ -951,8 +1101,8 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - `Origin` ヘッダが無い場合は許可します。同一 origin の `fetch` は `Origin` を送らないためです
 - `Origin` が proxy 自身（`http://<host>:<port>`）と一致する場合は許可します。`127.0.0.1` と `localhost` は同じ proxy を指すため、どちらの表記でも許可します
 - それ以外は `403` を返します
-- CORS ミドルウェアの対象外とし、`Access-Control-Allow-Origin: *` を付与しません
-- `Origin` の無い要求を許可するため、端末内の別アプリからも到達できます。WebView に限る場合は `requireAccessToken` を併用してください（【2】到達の制限）
+- CORS ミドルウェアの対象外とし、`corsAllowedOrigins` の設定にかかわらず `Access-Control-Allow-Origin` を付与しません
+- `Origin` の無い要求を許可するため、秘密値の検査（`requireAccessToken`、既定で有効）を無効にすると、端末内の別アプリからも到達できます（【2】到達の制限）
 
 **注意**: この制御は「同じ origin で動くスクリプトすべてに操作を許す」ことでもあります。CDN など第三者のスクリプトを読み込んだままで管理エンドポイントを有効にすると、そのスクリプトから隔離の破棄まで到達し得ます。同梱アセットの配信（【3】）へ切り替えてから有効にしてください。
 
@@ -965,7 +1115,8 @@ proxy は最初に受け付けた時点を保持し、初回転送と以降の�
 - **キーの決定**: リクエスト受信時に決定します。クライアントがヘッダを付けている場合はその値を尊重し、無い場合は乱数で採番します
 - **採番方法**: 本文の内容ではなく乱数を使います。同じ金額の会計が連続した場合に、別々の要求を同一とみなして失わないためです
 - **適用範囲**: 上流への転送とキューからの再送の両方に同じキーを付与します
-- **キューの重複防止**: クライアントが同じキーで送り直した場合、キューへ二重に積みません
+- **キューの重複防止**: クライアントが同じキーで送り直した場合、キューへ二重に積まず、既にキューにある要求の ID を返します。キューの上限（【5】の「キューと要求本文の上限」）を超えていても同じです
+- **キーの衝突**: クライアントが付けたキーの要求がキューにあり、持ち主（【5】の「送信待ちの持ち主」）か内容が違う場合は、保存せずに `422` と `{"queued":false,"error":"idempotency_key_conflict"}`、`X-Offline-Queued: 0` を返します。別の要求の ID を返すと、その要求を照会・操作できてしまうためです。内容は、保存するときに記録するメソッド、URL、本文の SHA-256（`requestFingerprint`）で比べます。記録の無い 0.25.0 以前の要求は、メソッドと URL で比べます。持ち主は、`queueOwnerResolver` を指定していない場合と、どちらも分からない場合は同じとみなします。上流が 5xx を返した更新系では、従来どおり上流の応答をそのまま返し、`X-Offline-Queued` を付けません
 - **送信済みの抑止**: 保持期間内に上流へ届いたことが確認できているキーは再送しません
 - **状態の照会**: 画面は、自分で付けたキーで要求の状態を照会できます（【5】状態通知エンドポイントの「要求の状態の照会」）
 
@@ -983,7 +1134,10 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 - **既定 24 時間**: `ProxyConfig.idempotencyRetention` で変更できます。期限切れ後は新規リクエストとして扱います
 - **ストレージ**: Hive で永続化。アプリ再起動後も有効
 - **期限切れの削除**: 1 時間ごとの定期処理で削除します
-- **キーの長さ**: UTF-8 で 255 バイトを超えるキーは、SHA-256 に置き換えて記録します（【1】の「端末に保存するデータ」）。照会も同じ値で探すため、長さによる扱いの違いはありません
+- **記録するキー**: 0.26.0 から、`h1:` にべき等性キーの HMAC-SHA256 の 16 進を付けた値（67 バイト）を Box のキーにします。HMAC の鍵は、保存領域の暗号化鍵から用途を表す値（`offline_web_proxy.idempotency_key`）で導出します（持ち主の HMAC と同じ仕組みで、値だけを分ける）。暗号化しない Box に、画面が送ったキーを残さないためです。長さによる扱いの違いはありません
+- **0.25.0 以前の記録**: 0.25.0 の規則（UTF-8 で 255 バイト以下はそのまま。`sha256:` で始まる短いキーもそのまま。255 バイトを超えるキーは `sha256:` に続く SHA-256）で作った値でも照会します。新しく書く記録には使いません。0.25.0 以前の記録は保持期間を過ぎると削除され、自然に消えます。0.25.0 の規則では `sha256:<64 桁の 16 進>` の短いキーと、それを SHA-256 とする長いキーが同じ記録を指すため、その組み合わせの旧記録は区別できません（新しい記録は区別する）
+- **鍵を作り直した場合**: 鍵が変わると新しい形式の記録は照会できなくなり、保持期間を過ぎて消えるまで残ります。その間は同じキーの要求を送信済みとして止められません
+- **圧縮**: 期限切れを削除した後に Box を圧縮します（フラッシュストレージ上の完全消去は保証しない）
 - **記録が壊れている場合**: Box を開けない場合や、記録日時として読めない値がある場合は、作り直して起動を続け、`ProxyEventType.errorOccurred`（`phase: idempotencyStoreRecovery`）で知らせます。0.21.0 以前の版が、255 バイトを超えるキーで書いた記録が該当します（【4】の「Cookie Box の破棄と通知」）。作り直すと保持期間内に届いた記録が失われるため、その間は同じキーの要求を送信済みとして止められず、要求の状態の照会は `delivered` ではなく `unknown` を返します。起動できなくなるより影響が小さいため、作り直しを選びます
 
 ## 【7】レスポンス圧縮
@@ -1033,6 +1187,8 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 - **no-cache / must-revalidate**: オンライン時の送信抑止には使わず、保存済みエントリの再検証要件として保持する
 - **default TTL**: 上記が未指定の場合は Content-Type ごとの既定 TTL を適用
 - **保存の失敗**: 保存に失敗しても上流から受け取れた応答はそのまま返します。応答自体は成立しているため、保存できないことを理由に失わせません。失敗は `ProxyEventType.errorOccurred` で通知します
+- **Set-Cookie**: 保存するヘッダから `Set-Cookie` と `Set-Cookie2` を除きます。セッションを端末へ残さないためです。WebView へ返す応答からは除きません（中継経路の扱いは【14】）。キャッシュから返す応答には、0.25.0 以前に保存した記録を含めて `Set-Cookie` も `Set-Cookie2` も付けません。0.25.0 以前に保存した記録は書き換えないため、その `Set-Cookie` は有効期限（stale 期間）を過ぎて削除されるか、`clearCache()` で消すまで端末に残ります
+- **利用者ごとの応答**: 保存するか、誰に返すかを後述の「利用者ごとの応答（cacheUserScopedResponses）」に従って決めます
 
 #### フォールバック利用条件
 
@@ -1041,7 +1197,8 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 3. **HTTP 4xx 時**: upstream が応答した 4xx はそのまま返し、proxy キャッシュへ切り替えない
 4. **HTTP 5xx 時**: upstream が応答した 5xx はそのまま返し、proxy キャッシュへ切り替えない
 5. **expired 時**: stale 期間も超過したキャッシュは返却対象にしない
-6. **上流到達不能かつ代替キャッシュ無し**: GET/HEAD は 504 を返す。GET のページ遷移には HTML の 504 ページ（`ProxyConfig.gatewayTimeoutHtml` で差し替え可能）を、それ以外の GET には `ProxyConfig.offlineMissResponse` を返し、HEAD は本文を持たない 504 を返す。更新系リクエストは従来どおりキューへ保存する
+6. **持ち主が違う時**: 持ち主のタグを付けて保存した利用者ごとの応答は、現在の持ち主と一致する場合だけ返す（後述の「利用者ごとの応答」）。1 と 2 のどちらの場合も、上流を遮断している間（【10】の「上流到達性のサーキットブレーカ」）も同じ
+7. **上流到達不能かつ代替キャッシュ無し**: GET/HEAD は 504 を返す。GET のページ遷移には HTML の 504 ページ（`ProxyConfig.gatewayTimeoutHtml` で差し替え可能）を、それ以外の GET には `ProxyConfig.offlineMissResponse` を返し、HEAD は本文を持たない 504 を返す。更新系リクエストは従来どおりキューへ保存する
 
 #### no-store を無視する保存（forceCachePaths）
 
@@ -1068,9 +1225,33 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 
 **保存領域の注意**: `no-store` は本来「保存しないこと」を求めるヘッダです。応答キャッシュは既定で暗号化して保存します（【16】の「応答キャッシュの暗号化」）。`encryptResponseCache` を無効にすると、指定したパスの応答本文が端末内に平文で残ります。暗号化しても Box のキー（URL の SHA-256）は平文のため、画面が含む情報と端末紛失時の影響を踏まえて指定してください。
 
+#### 利用者ごとの応答（cacheUserScopedResponses）
+
+キャッシュキーは URL だけのため（「キャッシュキー」）、ログインした利用者ごとに内容が変わる応答を保存すると、端末を共用する別の利用者へオフラインでそのまま返ってしまいます。
+
+- **判定**: 次のとおり、利用者ごとの応答かどうかを決めます
+  - 常に利用者ごと: 応答に `Set-Cookie` か `Set-Cookie2` がある応答と、応答の `Cache-Control` に `private` がある応答（`private="..."` を含む）
+  - 上流へ `Authorization` ヘッダを送った応答。実際に送った場合だけで、中継先（`mirroredOrigins`）へは送らないため数えません
+  - 上流へ `Cookie` ヘッダを送った応答。Cookie Jar の Cookie と、`forwardWebViewCookieNames` で許した WebView の Cookie（【14】の「Cookie ヘッダ」）を数えます。proxy の秘密値の Cookie は上流へ送らないため数えません
+  - ただし、該当する理由が `Authorization` か `Cookie` を送ったことだけで、応答の `Cache-Control` に `public` がある場合は、上流が共有を許しているため利用者ごとの応答としません。RFC 9111 3.5 を参考に、印は `public` だけです。`s-maxage` と `must-revalidate` は再検証を前提に共有を許すもので、オフラインでは再検証せずに返すこの proxy では前提が成り立たないため、印にしません（例えば `max-age=0, must-revalidate` の個人向け HTML は利用者ごとの応答です）
+  - `public` があっても、応答の `Vary` に `Cookie`、`Authorization`、`*` のいずれかがある場合は、資格情報によって内容が変わるため利用者ごとの応答とします
+- **Cookie を送る構成での注意**: セッションを Cookie で持つ上流では、Cookie が 1 つでもあればほぼすべての要求で Cookie Jar を送るため、上流が `public` を付けない限り、静的資源を含むほぼすべての応答が利用者ごとの応答になります。`cacheUserScopedResponses: false` では、ログインした後は事実上何もキャッシュされません。持ち主ごとに扱う場合も、利用者を切り替えた後は、該当する静的資源も新しい利用者で取り直すまでオフラインで返せません
+- **`cacheUserScopedResponses: false`**: 利用者ごとの応答を保存しません。`ProxyEventType.cacheSkipped` を `reason: userScoped` で発行します。ステータスや `no-store` で元々保存しない応答では発行しません
+- **`cacheUserScopedResponses: true`（既定）で `queueOwnerResolver` を指定した場合**: 要求を上流へ送る前の現在の持ち主（【5】の「送信待ちの持ち主」と同じ HMAC）を、持ち主のタグ（`ownerTag`）としてメタデータに保存します。持ち主がまだ無い場合は、「持ち主なし」を表す固定の値 `none`（HMAC とも正体の分からない持ち主の値とも重ならない）を保存します
+  - **返す条件**: タグのある記録は、現在の持ち主がタグと一致する場合だけ返します（等値で比べ、持ち主がまだ無い間は現在の持ち主を `none` として比べます）。一致しない場合と、`queueOwnerResolver` を外して起動した場合は、本文を読まずにミスとし、`ProxyEventType.cacheMiss` を `reason: ownerMismatch` で発行します。オフライン、上流到達不能、上流を遮断している間のいずれの読み取りも同じです
+  - **正体の分からない持ち主**（`ownerUnresolved`。【5】の「持ち主を判定できない場合」）: 1 人の持ち主として扱います。その間に保存した応答はその持ち主のタグを持ち、持ち主が変わる（ログイン、`restoreCookies()`、`clearCookies()` で別の値になる）まで返します。前の持ち主のタグの記録は返しません
+  - **取得の間に持ち主が変わった場合**: 上流へ送ってから保存するまでに、ログインや `restoreCookies()` が始まった場合、それらが転送中だった場合、現在の持ち主が変わった場合は、送った Cookie と持ち主が別の利用者になり得るため保存しません。`cacheSkipped` を `reason: ownerChanged` で発行します。WebView へは応答をそのまま返します
+  - **誰もログインしていない間**: 現在の持ち主が無いため、`none` のタグを付けて保存します。持ち主が無い間だけ返し、ログインなどで持ち主が決まった後や、`clearCookies()` などで正体の分からない持ち主になった後は返しません。初回ログイン前の画面を、ログイン前の間だけ使えるようにするためです
+- **`queueOwnerResolver` を指定しない場合**: 0.25.0 と同じく、利用者ごとの応答もタグを付けずに保存し、誰にでも返します
+- **タグの無い記録**: 利用者ごとでない応答の記録と、0.25.0 以前に保存した記録は、従来どおり誰にでも返します
+- **同じ URL**: タグはキャッシュキーに含めません。同じ URL の記録は 1 件だけで、別の持ち主が取得すると置き換わります
+- **`forceCachePaths`**: 安全側の除外（`set-cookie`・`vary`・`authorization`）は変わりません。除外に当たらない応答（Cookie を送って取得した応答など）は、上の規則で保存します
+- **公開しないもの**: タグは `CacheEntry`、`getCacheList()`、`getCacheStats()`、イベントに載せません
+
 #### ウォームアップ
 
 - **Cookie の付与**: 転送経路と同じく Cookie Jar の内容を送ります。認証が必要な資源をウォームアップで取得するために必要です
+- **保存の判定**: 転送と同じ規則で保存します。Cookie Jar の Cookie を送った応答は利用者ごとの応答として扱い、`queueOwnerResolver` を指定した場合は、取得を始めたときの持ち主のタグを付けます（「利用者ごとの応答」）
 - **Accept-Encoding**: 転送経路と同じ値を送り、gzip の本文は解凍してから保存します（【7】）。経路によって保存する応答が割れないようにするためです
 - **参照資源の連鎖取得**: `warmupCache(followReferences: true)` を指定すると、取得した HTML と CSS が参照する資源も続けて取得します
   - HTML の対象は `<script src>`、`<link href>`、`<img src>` と、`<style>` 要素内の `url()` / `@import` です
@@ -1107,8 +1288,8 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 
 | Box | 内容 | 読み方 |
 | --- | --- | --- |
-| メタデータ（`proxy_cache_index_secure`。暗号化しない場合は `proxy_cache_index`） | ステータスコード、保存日時（`createdAt`）、有効期限（`expiresAt`）、Content-Type、本文の大きさ（`sizeBytes`） | 通常の Box。開くと全件がメモリに載ります（1 件あたり数百バイト） |
-| 本文（`proxy_cache_body_secure`。暗号化しない場合は `proxy_cache_body`） | ヘッダ、本文 | LazyBox。キャッシュから返すときに 1 件ずつファイルから読みます |
+| メタデータ（`proxy_cache_index_secure`。暗号化しない場合は `proxy_cache_index`） | ステータスコード、保存日時（`createdAt`）、有効期限（`expiresAt`）、Content-Type、本文の大きさ（`sizeBytes`）。利用者ごとの応答では持ち主のタグ（`ownerTag`。「利用者ごとの応答」）。0.25.0 以前の記録には無く、無い記録は従来どおり扱います | 通常の Box。開くと全件がメモリに載ります（1 件あたり数百バイト） |
+| 本文（`proxy_cache_body_secure`。暗号化しない場合は `proxy_cache_body`） | ヘッダ（`Set-Cookie` と `Set-Cookie2` を除く）、本文 | LazyBox。キャッシュから返すときに 1 件ずつファイルから読みます |
 
 - **分ける理由**: Hive の通常の Box は、開くときに全件を読み込み（暗号化 Box では全件を復号し）、閉じるまでメモリに置きます。本文を含めると数百 MB になり得るため、本文は必要なときにだけ読みます。期限切れの削除、`cacheMaxSize` による削除、`getCacheStats()`、`getCacheList()` はメタデータだけで行います
 - **本文**: バイト列のまま保存します。文字コードの変換はしません
@@ -1146,6 +1327,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 - **値**: 上流の URL を正規化した文字列の SHA-256 の 16 進（64 文字）です
 - **正規化**: スキームと authority（ユーザー情報・ホスト・ポート）を小文字にし、パスの連続するスラッシュを 1 つにまとめ、クエリはそのまま（並べ替えない）付けます。フラグメントは含めません。それ以外は Dart の `Uri.parse` の解析結果に従います。解析できない URL は、全体を小文字にした文字列を使います
 - **URL は保存しません**: 衝突の照合は行いません。`CacheEntry.url` は空文字です
+- **利用者を含めません**: 要求ヘッダや Cookie はキーに含めません。利用者ごとの応答は、キーではなく持ち主のタグで照合します（「利用者ごとの応答」）
 
 ## 【9】コンテンツタイプと文字コード
 
@@ -1243,7 +1425,15 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 - **カスタムヘッダ**: `X-Offline-Queued: 1`、`X-Offline-Queue-Id: <キュー ID>`、`Connection: close`
 - **内容**: `{"queued":true}`（`ProxyConfig.queuedResponse` で変更可能）
 - **理由**: 上流が処理した結果ではないため、Web アプリ側が成功と区別できる必要があります。判別を本文に依存させないよう、設定を変更してもヘッダは常に付与します
-- **保存できなかった場合**: 503 と `{"queued":false}`、`X-Offline-Queued: 0` を返します。保存されていない状態を成功に見せると、送信されないまま失われるためです
+- **保存できなかった場合**: 503 と `{"queued":false}`、`X-Offline-Queued: 0` を返します。保存されていない状態を成功に見せると、送信されないまま失われるためです。キューが `queueMaxCount` か `queueMaxBytes` を超える場合も 503 と `X-Offline-Queued: 0` を返しますが、本文は `{"queued":false,"error":"queue_full"}` で、保存領域を使えない場合と区別できます（【5】の「キューと要求本文の上限」）。キューへの投入のロックを 30 秒以内に取得できない場合は、保存領域を使えない場合と同じ `{"queued":false}` です。保存領域を使えない場合とロックを取得できない場合は、`errorOccurred`（`phase: queueSave`）を発行します。同じべき等性キーで持ち主か内容の違う要求がキューにある場合は、`422` と `{"queued":false,"error":"idempotency_key_conflict"}` を返します（【6】の「キーの衝突」）
+
+#### 要求本文が大きすぎる場合（更新系）
+
+- **対象**: 本文が `ProxyConfig.maxRequestBodyBytes`（既定 10 MiB）を超える要求。オンラインでもオフラインでも同じ
+- **ステータス**: 413 Payload Too Large
+- **ヘッダ**: `Content-Type: application/json; charset=utf-8`、`Cache-Control: no-store`、`X-Offline-Queued: 0`、`Connection: close`
+- **内容**: `{"queued":false,"error":"request_body_too_large"}`
+- **理由**: 上流へ転送せず、キューにも入れません。後で送っても同じく大きすぎるため、再送の対象にしません（【5】の「キューと要求本文の上限」）
 
 #### 上流が 5xx を返した更新系
 
@@ -1311,7 +1501,7 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 
 #### 要求ログ
 
-- 監視による要求でログが埋まらないよう、GET / HEAD の `healthCheckPath` と GET の `statusPath` は `shelf.logRequests` の出力から除外する。管理 API と、同じパスへの他メソッドの要求は記録する（【18】）
+- 監視による要求でログが埋まらないよう、GET / HEAD の `healthCheckPath` と GET の `statusPath` は要求ログの出力から除外する。管理 API と、同じパスへの他メソッドの要求は記録する（【18】）
 
 ### Cache-Control 応答ヘッダの処理
 
@@ -1363,13 +1553,22 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 - **passthrough**: クライアントからの Cookie をそのまま転送
 - **off**: Cookie ヘッダを削除
 - **ミラー中継**: `mirroredOrigins` への中継では Cookie Jar のうち中継先ドメインに一致するものだけを送り、クライアントが送った Cookie は使わない
+- **WebView の Cookie**: 設定済み origin への転送とキューからの再送では、Cookie Jar の Cookie に加えて、WebView が送った Cookie のうち `ProxyConfig.forwardWebViewCookieNames` に含まれる名前で、Cookie Jar に同じ名前が無いものだけを送ります（同じ名前は Cookie Jar の値を優先）。既定は空で、WebView の Cookie は送りません。WebView の proxy origin の Cookie は、proxy を通るどのページのスクリプトからも `document.cookie` で置けるため、上流が信頼する Cookie を差し込まれないようにします
+  - 名前は大小文字を区別して比べます。`{'*'}` 単独で、秘密値の Cookie を除く全件を送ります（0.25.0 以前と同じ動作）
+  - 秘密値の Cookie（`OfflineWebProxy.accessTokenCookieName`）は、設定にかかわらず送りません（【2】）
+  - ページのスクリプトで置いた Cookie を上流へ送り続ける場合は、その名前を指定します
+  - `Cookie` ヘッダが複数の行に分かれている場合は、`; ` で 1 つにまとめてから絞ります。転送とキューへの保存は同じ値を使います
+  - 既知の制約: 1 行の値に `,` を含む場合は分割せず、その名前の値として扱います（許可した名前の値に許可していない内容が含まれていても区別しません）。ブラウザは `document.cookie` で `,` を含む値を許し、落とすと実運用の値を壊すためです
+  - 既知の制約: 0.25.0 以前にキューへ保存した要求の Cookie は、複数行が `,` で連結済みの場合があり、再送時に区別できません
+  - 移行の注意: 【4】の「上流の Set-Cookie の受け入れ規則」で Cookie Jar に保存されなかった Cookie（例: `http` の上流が返す `Secure` の Cookie）は、0.25.0 までは WebView 経由で上流へ届いていましたが、0.26.0 からは上流へ送られません。保存されなかったことは `errorOccurred`（`operation: cookieSave`）の `reason` と `cookieName` で確かめられます
 
 ### Set-Cookie ヘッダ
 
-- **capture**: Cookie Jar で Cookie を保存
+- **capture**: Cookie Jar で Cookie を保存（【4】の「上流の Set-Cookie の受け入れ規則」に外れたものは保存しない）
 - **passthrough**: そのまま透過
 - **複数の Set-Cookie**: 上流から受け取った応答では、1 件ずつ別の行で WebView へ返します。ブラウザは 1 行の `Set-Cookie` から先頭の Cookie しか受け取らないためです
-- **キャッシュからの応答**: 保存時の `Set-Cookie` は返しません。キャッシュした後に上流が更新したセッションなどを、古い値で上書きしないためです。Cookie Jar には上流から受け取った時点で保存済みです
+- **キャッシュからの応答**: 保存時の `Set-Cookie` と `Set-Cookie2` は返しません。キャッシュした後に上流が更新したセッションなどを、古い値で上書きしないためです。Cookie Jar には上流から受け取った時点で保存済みです。0.26.0 からは、応答キャッシュへ保存するヘッダからも `Set-Cookie` と `Set-Cookie2` を除きます（【8】の「保存ポリシー」）
+- **ミラー中継**: `mirroredOrigins` への中継で受け取った `Set-Cookie` は WebView へ返さず、Cookie Jar にだけ保存します（受け入れ規則に外れたものは保存しない）。WebView は受け取った Cookie を proxy の origin の Cookie として保存し、設定済み origin への要求でも送るためです。中継先からの redirect を proxy URL へ書き換えて返す場合も同じです
 
 ### Origin/Referer ヘッダ
 
@@ -1377,6 +1576,13 @@ proxy が保証するのは「同じ操作には同じキーが付く」こと�
 - **passthrough**: そのまま転送
 - **remove**: ヘッダを削除
 - **ミラー中継**: `mirroredOrigins` への中継では削除。値は proxy の loopback URL を指すだけで中継先には意味を持たない
+
+### 要求元を名乗るヘッダ
+
+- `Forwarded`、`X-Forwarded-For`、`X-Forwarded-Host`、`X-Forwarded-Proto`、`X-Forwarded-Port`、`X-Forwarded-Prefix`、`X-Real-IP`、`X-Client-IP`、`True-Client-IP`、`CF-Connecting-IP`、`X-Original-URL`、`X-Rewrite-URL` は、上流への転送、別 origin への中継、キューへの保存、キューからの再送のいずれでも渡しません。名前の大小文字は区別しません
+- WebView のページはこれらのヘッダを自由に付けられます。上流が要求元のアドレスや元の URL として信じ、アクセス制御や URL の組み立てに使わないようにするためです
+- 0.25.0 以前にキューへ保存した要求に含まれていても、再送する時点で落とします
+- このうち `X-Forwarded-Host` と `X-Forwarded-Proto` を持つ要求は、【2】の「Host ヘッダの照合」で `403` にするため、転送まで届きません。上の扱いは保存済みの要求の再送に効きます
 
 ### Accept-Encoding ヘッダ
 
@@ -1623,19 +1829,39 @@ final port = await proxy.start(
 
 ### 要求ログ
 
-- `shelf.logRequests` で要求ごとに 1 行を出力する
+- 要求ごとに 1 行（時刻、経過時間、メソッド、ステータス、パス）を `debugPrint` で出力する。0.25.0 までの `shelf.logRequests` は使わない
+- クエリには検索語や一度きりの符号、セッション識別子が入ることが多いため、ログに出さない。クエリがある要求は、パスの後ろに `?…` とだけ付ける（例: `GET     [200] /search?…`）
+- 処理中に例外が起きた要求は、ステータスの代わりに `[ERROR <例外の型名>]` を出す。例外の文字列は出さない
 - 代替ページの監視による要求でログが埋まらないよう、GET / HEAD の `healthCheckPath` と GET の `statusPath` は出力しない（【10】の「代替ページの自動復帰」）
+- `Host` ヘッダの照合で拒否した要求（`403`）とパスの検証で拒否した要求（`400`）も出力する（【2】）
+
+### イベントの URL
+
+- `ProxyEvent.url` と、`data` 内の URL の項目は、`ProxyConfig.includeQueryInEvents` が `false`（既定）の間、クエリ（`?` 以降）とフラグメント（`#` 以降）を除いて載せる。対象の項目は次のとおり
+  - `requestReceived`: `proxyRequestUrl`、`resolvedUpstreamUrl`、`resolvedProxyUrl`
+  - `redirectHandled`: `proxyRequestUrl`、`sourceUpstreamUrl`、`locationHeader`、`normalizedTargetUrl`、`resolvedUpstreamUrl`、`resolvedProxyUrl`
+  - `queueResendAttempted`: `url`
+- `includeQueryInEvents: true` にすると、0.25.0 までと同じく完全な URL を載せる
+- `redirectHandled` の `externalUrl` は、設定によらずクエリを含む完全な URL を載せる。外部起動（`redirectAction: launchExternal`）では proxy が WebView へ `204` だけを返すため、アプリが起動先（地図の検索語、`mailto:` の `?subject=`、`geo:` の `?q=` など）を知る唯一の値になる。**`externalUrl` はアプリが実行するための値でクエリを含むため、ログへ出さないこと**
+- 管理エンドポイントの隔離の一覧（`enableAdminApi`、既定無効）は、要求を見分けるため完全な URL を返す
+- 上流への転送、WebView へ返す `Location`、Dart API の `recentResendResults` は影響を受けない。状態通知の `recentResendResults` は設定によらずクエリを除く（【5】の「状態通知エンドポイント」）
+- Cookie を保存しなかった場合の `errorOccurred`（`operation: cookieSave`）は、受け入れ規則に外れた場合は `reason` に拒否理由（【4】の「上流の Set-Cookie の受け入れ規則」）と `cookieName` に Cookie 名を、それ以外の失敗は `error` に例外の型名と `reason` に `invalidSetCookie`（`Set-Cookie` を解釈できない）か `storageFailure`（保存領域を使えない場合を含む）を載せる。`Set-Cookie` の値（セッション識別子など）は載せない
+- パスの検証で拒否した場合の `errorOccurred`（`phase: requestPath`）の `ProxyEvent.url` も、上の規則でクエリとフラグメントを除く
+- 利用者ごとの応答の `cacheSkipped`（`reason: userScoped`、`ownerChanged`）と `cacheMiss`（`reason: ownerMismatch`）は、`data` に `reason` だけを載せる。持ち主の HMAC、Cookie、`Authorization` の値は載せない
+- 応答をキャッシュへ保存できなかった場合の `errorOccurred`（`phase: cacheResponse`）も、`error` に例外の型名、`reason` に `storageFailure` だけを載せ、例外の文字列は載せない
+- キューの上限で保存しなかった場合の `errorOccurred`（`phase: queueLimit`）は、`ProxyEvent.url` を上の規則でクエリとフラグメントを除いて載せ、`data` には `phase` と `limit` だけを載せる。要求のヘッダと本文は載せない。保存領域やロックの都合で保存しなかった場合（`phase: queueSave`）も同じく、`data` には `phase` と `reason` だけを載せる
 
 ### マスキング対象
 
-- **Authorization**: Bearer token 等の認証情報
-- **Cookie**: セッション ID 等の機密 Cookie 値
-- **Set-Cookie**: レスポンスで設定される Cookie 値
+- 要求ログには、ヘッダ（`Authorization`、`Cookie`、`Set-Cookie` など）も本文も出さない
+- `getQueuedRequests()` は、秘密を含み得るヘッダ（`Cookie`、`Authorization` や、名前に `token`・`session` などを含むもの）の値を `***` に置き換えて返す（【20】の `QueuedRequest`）。URL のクエリは置き換えない
 
 ### ログ出力例
 
 ```
-INFO: GET /api/user → 200 OK (Authorization: **\***, Cookie: **\***)
+2026-10-21T16:43:52.727866  0:00:00.005345 GET     [200] /search?…
+2026-10-21T16:43:53.044744  0:00:00.007235 POST    [202] /api/sales.json
+2026-10-21T16:43:53.144145  0:00:00.001021 GET     [ERROR StateError] /page
 ```
 
 ## 【19】プラットフォーム固有の注意事項
@@ -1689,7 +1915,7 @@ INFO: GET /api/user → 200 OK (Authorization: **\***, Cookie: **\***)
   - `config`: 設定オブジェクト（省略時は既定値だけの設定。`origin` が空のため上流へは転送しない。設定ファイルは読み込まない）
 - **戻り値**: 実際に使用されるポート番号
 - **例外**:
-  - `ProxyStartException`: サーバ起動に失敗した場合。既に稼働中の場合、起動処理中の場合、保持上限に負の値を指定した場合、`quarantineResponseBodyMaxBytes` が 0〜65536 の範囲外の場合、`queueOwnerResolver` を指定したのに `authResumePaths` が空の場合を含む
+  - `ProxyStartException`: サーバ起動に失敗した場合。既に稼働中の場合、起動処理中の場合、保持上限に負の値を指定した場合、`quarantineResponseBodyMaxBytes` が 0〜65536 の範囲外の場合、`maxRequestBodyBytes`・`queueMaxCount`・`queueMaxBytes` が範囲外の場合、`queueOwnerResolver` を指定したのに `authResumePaths` が空の場合、`forwardWebViewCookieNames` が不正な場合、`host` がループバック（`127.0.0.0/8`、`::1`、`localhost`）でない場合、`addCorsHeaders` が `true` で `corsAllowedOrigins` が空の場合、`corsAllowedOrigins` に origin として解釈できない値がある場合、`'*'` と他の値が混在している場合（【2】の「CORS ヘッダ」）を含む
   - `StorageIntegrityException`: 暗号化した保存領域を使えない場合（【4】の判定表）。`ProxyStartException` のサブクラスで、包まずに送出する。何も消していない
   - `PortBindException`: ポートバインドに失敗した場合
 - **保存領域**: 保存領域の初期化の後に、隔離とドロップ履歴の保持上限を判定する（【5】）
@@ -1857,6 +2083,22 @@ WidgetsBinding.instance.addObserver(guard);
 await proxy.clearCache();
 ```
 
+#### `Future<void> clearWebStorageSnapshot()`
+
+`enableWebStorageInheritance` で保存した Web ストレージのスナップショットを削除します（【5】の「Web ストレージの受け渡し」）。利用者のサインアウトや端末の引き渡しの前に呼びます。稼働中かどうかと設定によらず呼び出せます。
+
+- **戻り値**: なし
+- **例外**:
+  - `CacheOperationException`: 削除に失敗した場合（`operation` は `clearWebStorageSnapshot`）
+- **注意**:
+  - 暗号化 Box を開いている間（有効な設定で稼働中）は、記録を消して Box を圧縮する。開いていない場合は、暗号化 Box（`proxy_web_storage_secure`）と 0.25.0 以前の平文の Box（`proxy_web_storage`）をファイルごと削除する。この isolate の別のインスタンスが開いている Box は、閉じずに記録を消して圧縮する
+  - 起動前に呼んだ場合は Hive を初期化し、保存先を求めるためにポート設定 Box を開く
+  - フラッシュストレージ上の完全消去は保証しない。鍵や他の保存領域には触れない
+
+```dart
+await proxy.clearWebStorageSnapshot();
+```
+
 #### `Future<void> clearExpiredCache()`
 
 Expired 状態のキャッシュのみ削除します。
@@ -1978,17 +2220,20 @@ for (final cookie in cookies) {
 }
 ```
 
-#### `Future<void> restoreCookies(Iterable<CookieRestoreEntry> entries)`
+#### `Future<void> restoreCookies(Iterable<CookieRestoreEntry> entries, {String? queueOwnerId})`
 
 ネイティブ実装など外部で取得した Cookie を復元します。proxy 起動前でも呼び出せ、復元済み Cookie は起動後の上流リクエスト送信時に利用されます。
 
 - **パラメータ**:
   - `entries`: 復元対象の Cookie 一覧
+  - `queueOwnerId`: 復元するセッションの利用者の識別子（`queueOwnerResolver` が返す値と同じ形）。`queueOwnerResolver` を指定して起動している場合だけ使い、指定するとその利用者を送信待ちの現在の持ち主にします。指定しないと、キューを `ownerUnresolved` で一時停止します（【5】の「ログイン以外でセッションを変える操作」）。`queueOwnerResolver` を指定していない場合と、一度も起動していない間は使いません
 - **戻り値**: なし
 - **例外**:
   - `CookieOperationException`: Cookie 復元に失敗した場合
 
 `CookieRestoreEntry` は、構造化データのコンストラクタと `Set-Cookie` 文字列から生成する factory の両方を提供します。
+
+渡した Cookie はアプリが渡す値として扱い、上流の応答に適用する受け入れ規則（【4】の「上流の Set-Cookie の受け入れ規則」）は適用しません。`CookieRestoreEntry.fromSetCookieHeader()` も `Domain` や `Secure` を `requestUrl` と照合せず、そのまま取り込みます。`Expires`、`Max-Age`、`Path` の解釈と有効期限の 400 日の上限は、【4】の「Cookie 評価基準」と同じです（構造化データのコンストラクタで渡す有効期限は丸めません）。
 
 ```dart
 await proxy.restoreCookies([
@@ -2121,7 +2366,7 @@ Cookie を削除します。
 - **戻り値**: なし
 - **例外**:
   - `CookieOperationException`: Cookie 削除に失敗した場合
-- **注意**: ファイルから削除すると同時にメモリキャッシュからも削除されます
+- **注意**: ファイルから削除すると同時にメモリキャッシュからも削除されます。`queueOwnerResolver` を指定して起動している場合、すべてを削除するか、設定済み `origin` のホストへ送られるドメインを削除すると、キューを `ownerUnresolved` で一時停止します（【5】の「ログイン以外でセッションを変える操作」）
 
 ```dart
 await proxy.clearCookies(); // 全Cookie削除（ファイル+メモリ）
@@ -2337,8 +2582,8 @@ await proxy.clearQuarantinedRequests();
 - **注意**:
   - この isolate の proxy が稼働中または起動処理中の場合は、何もせずに `proxyActive` を返す
   - 先頭側が壊れた Box を作り直すと、先頭側の記録が件数不明のまま失われる（`rebuiltBoxes`）
-  - 照合が時間の上限を超えた Box は、Box を閉じた後に時間の上限を設けずに照合し直し、その結果で扱う。鍵と一致しなければ削除（`deletedBoxes`）、先頭側が壊れていれば作り直し（`rebuiltBoxes`）。先頭の記録が書きかけで鍵と一致する記録も無ければ 0 バイトに切り詰め、失うものは無い（`rebuiltBoxes`）
-  - 鍵を削除した場合は、Cookie（ログイン状態）も消える。暗号化した応答キャッシュ（`encryptResponseCache`）も削除する（結果の一覧には含めない）
+  - 照合が時間の上限を超えた Box は、Box を閉じた後に Box ごとに 2 分を上限として照合し直し、その結果で扱う（2 分を超えた場合は何もせず `verificationTimedOut` を返す）。鍵と一致しなければ削除（`deletedBoxes`）、先頭側が壊れていれば作り直し（`rebuiltBoxes`）。先頭の記録が書きかけで鍵と一致する記録も無ければ 0 バイトに切り詰め、失うものは無い（`rebuiltBoxes`）
+  - 鍵を削除した場合は、Cookie（ログイン状態）も消える。暗号化した応答キャッシュ（`encryptResponseCache`）と Web ストレージのスナップショットも削除する（結果の一覧には含めない）
   - `StorageIntegrityException` で起動に失敗した後の `getStats()` は 0 件を返すため、確認画面の根拠に使わない
 
 ```dart
@@ -2360,7 +2605,7 @@ try {
   final result = await proxy.recoverEncryptedStorage();
   if (!result.performed &&
       result.rejection != StorageRecoveryRejection.startWillSucceed) {
-    // temporarilyUnavailable / proxyActive: 時間をおいて再試行する
+    // temporarilyUnavailable / proxyActive / verificationTimedOut: 時間をおいて再試行する
     rethrow;
   }
   await proxy.start(config: config);
@@ -2472,8 +2717,8 @@ class DroppedRequest {
   final String url; // ドロップされたリクエストのURL
   final String method; // HTTPメソッド
   final DateTime droppedAt; // ドロップされた日時
-  final String dropReason; // ドロップ理由（"4xx_error" など。隔離の保持上限では "quarantine_limit"、"quarantine_expired"、"quarantine_too_large"。skipPausedRequest() では "authentication_required"。持ち主が違うため送らなかった場合は "owner_changed"）
-  final int statusCode; // エラー時のHTTPステータスコード（"owner_changed" では 0）
+  final String dropReason; // ドロップ理由（"4xx_error" など。隔離の保持上限では "quarantine_limit"、"quarantine_expired"、"quarantine_too_large"。skipPausedRequest() では "authentication_required"。持ち主が違うため送らなかった場合は "owner_changed"、送信先の origin が変わったため送らなかった場合は "origin_changed"）
+  final int statusCode; // エラー時のHTTPステータスコード（"owner_changed" と "origin_changed" では 0）
   final String errorMessage; // 詳細なエラーメッセージ
   final bool acknowledged; // 利用者へ提示済みか（既定: false）
   final bool pendingMigration; // 旧平文 Box から移行を待っている履歴か（既定: false）
@@ -2494,8 +2739,8 @@ class QuarantinedRequest {
   final DateTime quarantinedAt; // 隔離された日時
   final DateTime queuedAt; // 隔離される前にキューへ保存された日時
   final DateTime acceptedAt; // 最初に受け付けた日時（隔離と再送を経ても不変）
-  final String reason; // 隔離理由（"4xx_error"、skipPausedRequest() では "authentication_required"、持ち主が違うため送らなかった場合は "owner_changed"）
-  final int statusCode; // 上流から返されたHTTPステータスコード（"owner_changed" では 0）
+  final String reason; // 隔離理由（"4xx_error"、skipPausedRequest() では "authentication_required"、持ち主が違うため送らなかった場合は "owner_changed"、送信先の origin が変わったため送らなかった場合は "origin_changed"）
+  final int statusCode; // 上流から返されたHTTPステータスコード（"owner_changed" と "origin_changed" では 0）
   final String errorMessage; // 詳細なエラーメッセージ
   final bool pendingMigration; // 旧平文 Box から移行を待っている項目か。再送も破棄もできない（既定: false）
   final String? idempotencyKey; // べき等性キー（enableIdempotencyKey が false の間に受け付けた場合は null）
@@ -2547,13 +2792,13 @@ class QueueOwnerContext {
 
 #### `QueueResendResult`
 
-キュー再送を 1 件試行した結果を表すクラス。本文は保持しません。
+キュー再送を 1 件試行した結果を表すクラス。本文は保持しません。`url` はクエリを含む完全な URL です。`toMap({bool includeQuery = true})` に `includeQuery: false` を渡すと、`url` のクエリとフラグメントを除いた Map を返します（状態通知はこれを使います）。
 
 ```dart
 class QueueResendResult {
   final String url; // 再送先のURL
   final String method; // HTTPメソッド
-  final int statusCode; // 上流のステータスコード（到達できない場合と、持ち主が違うため送らなかった場合は 0）
+  final int statusCode; // 上流のステータスコード（到達できない場合と、持ち主が違うか送信先の origin が変わったため送らなかった場合は 0）
   final bool success; // 上流が受け付けたかどうか
   final String? idempotencyKey; // 付与したべき等性キー
   final String? dropReason; // キューから取り除いた理由
@@ -2601,7 +2846,7 @@ class ProxyStats {
 enum QueuePauseReason {
   authenticationRequired, // キューから送った要求が authRequiredStatusCodes の状態コードを返した（【5】）
   rateLimited, // キューから送った要求が 429 を返し、送り直す時刻まで控えている（【5】）
-  ownerUnresolved // queueOwnerResolver がログインした利用者を判定できなかった（【5】の「送信待ちの持ち主」）
+  ownerUnresolved // queueOwnerResolver がログインした利用者を判定できなかった。queueOwnerId の無い restoreCookies()、セッションを消す clearCookies()、持ち主の記録の書き換えでも止まる（【5】の「送信待ちの持ち主」）
 }
 ```
 
@@ -2656,12 +2901,13 @@ class WarmupEntry {
 ```dart
 class ProxyConfig {
   final String origin; // 上流サーバのURL（必須）
-  final String host; // バインドするホスト（デフォルト: "127.0.0.1"）
+  final String host; // バインドするホスト（デフォルト: "127.0.0.1"。127.0.0.0/8、::1、localhost のみ）
   final int port; // バインドするポート（0=自動割当）
   final int cacheMaxSize; // 応答キャッシュの本文の合計の上限（バイト、既定: 200 MB、0=上限なし）
   final Map<String, int> cacheTtl; // Content-Type別TTL設定（秒）
   final Map<String, int> cacheStale; // Content-Type別Stale期間設定（秒）
   final List<String> forceCachePaths; // no-store を無視して保存するパス（既定: 空）
+  final bool cacheUserScopedResponses; // 利用者ごとの応答を保存する（既定: true。queueOwnerResolver があれば持ち主ごとに返す。【8】の「利用者ごとの応答」）
   final List<String> mirroredOrigins; // proxy 経由で中継する別 origin（既定: 空）
   final int upstreamFailureThreshold; // 上流断とみなす連続失敗回数（既定: 3、0=無効）
   final String upstreamProbePath; // 復帰確認のパス（既定: "/"）
@@ -2691,13 +2937,19 @@ class ProxyConfig {
   final int quarantineResponseBodyMaxBytes; // 4xx で隔離した要求に残す応答本文の先頭のバイト数（既定: 0=残さない、上限 65536）
   final int droppedRequestMaxCount; // ドロップ履歴の件数の上限（既定: 1000、0=上限なし）
   final Duration droppedRequestRetention; // ドロップ履歴の保持期間（既定: 30 日、Duration.zero=上限なし）
+  final int maxRequestBodyBytes; // 受け付ける要求本文の上限（バイト、既定: 10 MiB、範囲 1024〜256 MiB。超えると 413）
+  final int queueMaxCount; // キューの件数の上限（既定: 1000、範囲 1〜100000。超える要求は保存せず 503）
+  final int queueMaxBytes; // キューの合計サイズの上限（バイト、既定: 50 MiB、範囲 1 MiB〜1 GiB。超える要求は保存せず 503）
   final ProxyResponseConfig queuedResponse; // キュー投入時の応答（既定: 202 / JSON）
   final ProxyResponseConfig offlineMissResponse; // 代替できない場合の応答（既定: 504 / JSON）
   final bool enableAdminApi; // 管理API有効化（開発時のみ）
-  final bool requireAccessToken; // 秘密値を持たない要求を 403 で拒否（既定: false）
-  final bool addCorsHeaders; // 内部エンドポイント以外の応答へ CORS ヘッダを付ける（既定: true）
+  final bool requireAccessToken; // 秘密値を持たない要求を 403 で拒否（既定: true。0.25.0 までは false）
+  final bool addCorsHeaders; // 内部エンドポイント以外の応答へ、corsAllowedOrigins の origin 向けに CORS ヘッダを付ける（既定: false。0.25.0 までは true）
+  final List<String> corsAllowedOrigins; // CORS ヘッダを返す origin の一覧（既定: []。'*' 単独で全 origin。addCorsHeaders: true で空なら起動を拒否）
+  final Set<String> forwardWebViewCookieNames; // 上流へ渡す WebView の Cookie 名（既定: {}。'*' 単独で秘密値以外の全件＝0.25.0 互換。RFC 6265 の token でない名前、accessTokenCookieName、'*' と他の混在は起動を拒否）
   final bool enableWebStorageInheritance; // WebStorage 引き継ぎ（既定: false）
   final String logLevel; // ログレベル（"debug", "info", "warn", "error"）
+  final bool includeQueryInEvents; // イベントの URL にクエリとフラグメントを残す（既定: false。0.25.0 までは常に残していた）
   final List<String> startupPaths; // warmupCache() で paths を省略した場合の既定パス（start() では自動取得しない）
   final int preferredPort; // 優先して利用するポート（0=指定なし）
   final String healthCheckPath; // ヘルスチェックパス（デフォルト: "/__offline_web_proxy/health"）
@@ -2716,7 +2968,7 @@ class ProxyConfig {
 }
 ```
 
-保持上限の 5 項目に負の値を指定すると、`start()` が `ProxyStartException` を送出します（【5】の「保持上限」）。`quarantineResponseBodyMaxBytes` が 0〜65536 の範囲外の場合と、`queueOwnerResolver` を指定したのに `authResumePaths` が空の場合も同じです。
+保持上限の 5 項目に負の値を指定すると、`start()` が `ProxyStartException` を送出します（【5】の「保持上限」）。`quarantineResponseBodyMaxBytes` が 0〜65536 の範囲外の場合と、`queueOwnerResolver` を指定したのに `authResumePaths` が空の場合も同じです。`forwardWebViewCookieNames` に RFC 6265 の token でない名前（空白、`=`、`;`、`,`、引用符などを含む名前や空文字）、`OfflineWebProxy.accessTokenCookieName`、または `'*'` と他の名前の混在がある場合も同じです（【14】の「Cookie ヘッダ」）。`host` がループバック（`127.0.0.0/8` の IPv4 アドレス、`::1`、`localhost`）でない場合も同じです（【2】の「待ち受けるホストの制限」）。`maxRequestBodyBytes`（1024〜268435456）、`queueMaxCount`（1〜100000）、`queueMaxBytes`（1 MiB〜1 GiB）が範囲外の場合も同じです（【5】の「キューと要求本文の上限」）。`addCorsHeaders` が `true` で `corsAllowedOrigins` が空の場合、`corsAllowedOrigins` に origin として解釈できない値がある場合、`'*'` と他の値が混在している場合（`addCorsHeaders` が `false` でも検証します）も同じです（【2】の「CORS ヘッダ」）。
 
 #### `DropPolicy`
 
@@ -2752,7 +3004,7 @@ class ProxyResponseConfig {
 ```dart
 class ProxyEvent {
   final ProxyEventType type; // イベントタイプ
-  final String url; // 関連するURL
+  final String url; // 関連するURL（既定ではクエリとフラグメントを除く。【18】の「イベントの URL」）
   final DateTime timestamp; // イベント発生日時
   final Map<String, dynamic> data; // 追加情報
 }
@@ -2763,7 +3015,7 @@ enum ProxyEventType {
   requestReceived, // リクエスト受信
   redirectHandled, // 上流 redirect を解決して処理
   cacheHit, // キャッシュヒット
-  cacheMiss, // キャッシュミス
+  cacheMiss, // 持ち主が違うためキャッシュから返さなかった（記録が無いだけのミスでは発行しない）
   cacheStaleUsed, // Staleキャッシュ使用
   cacheSkipped, // 保存対象に一致したが安全のため保存を見送った
   requestQueued, // リクエストキューイング
@@ -2787,14 +3039,16 @@ enum ProxyEventType {
 
 `cacheSkipped` の `data` には、保存を見送った理由が入ります。
 
-- `reason`: `set-cookie`、`vary`、`authorization` のいずれか（`forceCachePaths` の安全側の除外）。本文だけで `cacheMaxSize` を超えた場合は `cacheMaxSize`、起動の後に応答キャッシュを開いている間は `cacheOpening`（【8】の「開く時機」）
+- `reason`: `set-cookie`、`vary`、`authorization` のいずれか（`forceCachePaths` の安全側の除外）。本文だけで `cacheMaxSize` を超えた場合は `cacheMaxSize`、起動の後に応答キャッシュを開いている間は `cacheOpening`（【8】の「開く時機」）。`cacheUserScopedResponses: false` で利用者ごとの応答を保存しなかった場合は `userScoped`、取得の間にログインが始まったか持ち主が変わったため保存しなかった場合は `ownerChanged`（【8】の「利用者ごとの応答」）
+
+`cacheMiss` は、利用者ごとに保存した応答の持ち主が現在の持ち主と一致しない（持ち主のタグの付いた記録を、持ち主がまだ無い間に読んだ場合や、`none` のタグの記録を持ち主が決まった後に読んだ場合を含む）ため、キャッシュから返さなかった場合だけ発行します。`data` の `reason` は `ownerMismatch` です。記録が無いだけのミスでは発行しません（【8】の「利用者ごとの応答」）。
 
 `cacheEvicted` の `data` には、`reason`（`cacheMaxSize`）、`evictedCount`（件数）、`evictedBytes`（本文の大きさ）が入ります。`cacheCleared` は `clearCache()` で全件を削除したときだけ発行します。
 
 `queueResendAttempted` の `data` には、再送 1 件の結果が入ります。本文は含みません。
 
-- `url`、`method`: 再送したリクエスト
-- `statusCode`: 上流から返されたステータスコード。到達できなかった場合と、持ち主が違うため送らなかった場合（`owner_changed`）は `0`
+- `url`、`method`: 再送したリクエスト（`url` は既定でクエリとフラグメントを除く。【18】の「イベントの URL」）
+- `statusCode`: 上流から返されたステータスコード。到達できなかった場合と、持ち主が違うため送らなかった場合（`owner_changed`）、送信先の origin が変わったため送らなかった場合（`origin_changed`）は `0`
 - `success`: 上流が受け付けたかどうか
 - `idempotencyKey`: 付与したべき等性キー（無い場合は `null`）
 - `dropReason`: キューから取り除いた理由（成功時や再試行時は `null`）
@@ -2807,12 +3061,12 @@ enum ProxyEventType {
 
 - `quarantineId`: 隔離領域内での識別子（`retryQuarantinedRequest` などで指定）
 - `statusCode`: 上流から返されたステータスコード
-- `reason`: 隔離理由（`"4xx_error"`、`skipPausedRequest()` では `"authentication_required"`、持ち主が違うため送らなかった場合は `"owner_changed"`）
+- `reason`: 隔離理由（`"4xx_error"`、`skipPausedRequest()` では `"authentication_required"`、持ち主が違うため送らなかった場合は `"owner_changed"`、送信先の origin が変わったため送らなかった場合は `"origin_changed"`）
 
 `requestDropped` の `data` には、次のメタ情報が入ります。
 
-- `statusCode`: 上流から返されたステータスコード（隔離から移した場合は隔離時の値。`owner_changed` では `0`）
-- `dropReason`: 取り除いた理由（`"4xx_error"` など。隔離の保持上限では `quarantine_limit`、`quarantine_expired`、`quarantine_too_large`。`skipPausedRequest()` では `authentication_required`。持ち主が違うため送らなかった場合は `owner_changed`）
+- `statusCode`: 上流から返されたステータスコード（隔離から移した場合は隔離時の値。`owner_changed` と `origin_changed` では `0`）
+- `dropReason`: 取り除いた理由（`"4xx_error"` など。隔離の保持上限では `quarantine_limit`、`quarantine_expired`、`quarantine_too_large`。`skipPausedRequest()` では `authentication_required`。持ち主が違うため送らなかった場合は `owner_changed`、送信先の origin が変わったため送らなかった場合は `origin_changed`）
 - `quarantineId`: 件数・期間・合計バイト数の上限により隔離から移した場合の、隔離領域内での識別子
 
 `cookieStorageDiscarded` の `data` には、次のメタ情報が入ります。
@@ -2827,9 +3081,27 @@ enum ProxyEventType {
 
 応答キャッシュを開けなかったときに発行する `errorOccurred` の `data` には、`phase`（`cacheOpen`）と `error` が入ります（【8】の「開く時機」）。
 
+符号化などで隠した `.` と `..` を含む要求を拒否したときに発行する `errorOccurred` の `data` には、`phase`（`requestPath`）、`reason`（`dotSegment` か `malformedPercentEncoding`）、`method` が入ります（【2】の「パスの検証」）。
+
+応答をキャッシュへ保存できなかったときに発行する `errorOccurred` の `data` には、`phase`（`cacheResponse`）、`error`（例外の型名）、`reason`（`storageFailure`）が入ります。例外の文字列は含みません。
+
+キューの上限を超えるため要求を保存しなかったときに発行する `errorOccurred` の `data` には、`phase`（`queueLimit`）と `limit`（件数の上限は `count`、合計サイズの上限は `bytes`）が入ります。`ProxyEvent.url` は保存しなかった要求のパスです（既定ではクエリを除く。【18】の「イベントの URL」、【5】の「キューと要求本文の上限」）。
+
 べき等性キーの記録を作り直したときに発行する `errorOccurred` の `data` には、`phase`（`idempotencyStoreRecovery`）と `error` が入ります（【6】の「保持期間」）。
 
+Web ストレージのスナップショットの保存領域で発行する `errorOccurred` の `data` には、`phase` と `error`（例外の型名）が入ります。例外の文字列は含みません。`ProxyEvent.url` は空文字列です（【5】の「Web ストレージの受け渡し」）。
+
+- `webStorageRecovery`: 暗号化 Box を開けないか、保存しない形の値があり、作り直した
+- `webStorageEncryptionCleanup`: 鍵を作り直す場合か復旧 API が鍵を削除する場合に、暗号化 Box を削除できなかった
+- `webStorageMigration`: 0.25.0 以前の平文の Box を移せなかったか、無効な設定で削除できなかった。平文の Box は残り、次の起動で再試行する
+
 送信待ちの持ち主を判定できない場合と保存できない場合に発行する `errorOccurred` の `data` には、`phase`（判定は `queueOwnerResolve`、保存は `queueOwnerPersist`）と `error` が入ります。`error` は例外の型名（例外ではない失敗では短い理由）だけで、例外の文字列は含みません（【5】の「送信待ちの持ち主」）。
+
+起動時に持ち主の記録を信頼できず一時停止したときに発行する `errorOccurred` の `data` には、`phase`（`queueOwnerLoad`）と `reason`（タグが合わない場合は `tagMismatch`、持ち主を記録した要求があるのに記録が無い場合は `recordMissing`）が入ります。`ProxyEvent.url` は空文字列です（【5】の「持ち主の保存」）。
+
+保存領域を使えないか、キューへの投入のロックを取得できず要求を保存しなかったときに発行する `errorOccurred` の `data` には、`phase`（`queueSave`）と `reason`（`storageUnavailable` か `lockTimeout`）が入ります。`ProxyEvent.url` は保存しなかった要求のパスです（既定ではクエリを除く）。要求のヘッダと本文は載せません（【10】の「保存できなかった場合」）。
+
+上流の Cookie を保存しなかったときに発行する `errorOccurred` の `data` には、`operation`（`cookieSave`）と `reason` が入ります。受け入れ規則に外れた場合は、`reason` に拒否理由（`domainMismatch`、`ipDomain`、`singleLabelDomain`、`mirroredOriginDomain`、`insecureSecure`、`hostPrefix`、`securePrefix`、`secureOverwrite`。【4】の「上流の Set-Cookie の受け入れ規則」）、`cookieName` に Cookie 名が入ります。それ以外の失敗では、`reason` に `invalidSetCookie` か `storageFailure`（保存領域を使えない場合を含む）、`error` に例外の型名が入ります。`Set-Cookie` の値と例外の文字列は含みません（【18】の「イベントの URL」）。
 
 旧平文 Box の移行と保持上限の処理で発行する `errorOccurred` の `data` には、`operation`（移行は `legacyStorageDelete` か `legacyStorageMigration`、保持上限は `retentionLimit`）と `error` が入ります。`legacyStorageDelete` では、`box` に旧平文 Box の名前が入ります。
 
@@ -2854,7 +3126,7 @@ enum ProxyEventType {
 - `webResourceErrorCode`: WebView エラー起点の復旧の場合に渡されたエラーコード
 - `isMainFrame`: WebView エラー起点の復旧の場合にメインフレームの失敗だったか
 
-`requestReceived` の `data` には、次のメタ情報が入る場合があります。
+`requestReceived` の `data` には、次のメタ情報が入る場合があります。URL の項目は、既定ではクエリとフラグメントを除きます（【18】の「イベントの URL」）。
 
 - `proxyRequestUrl`: proxy が受けた絶対 URL
 - `resolvedUpstreamUrl`: URL 解決 API で復元した upstream URL
@@ -2865,7 +3137,7 @@ enum ProxyEventType {
 - `usedSourceUrl`: `sourceUrl` を使って相対 URL を解決したか
 - `isStaticResource`: proxy 内の静的リソースとして扱ったか
 
-`redirectHandled` の `data` には、次のメタ情報が入る場合があります。
+`redirectHandled` の `data` には、次のメタ情報が入る場合があります。URL の項目（`locationHeader` を含む）は、既定ではクエリとフラグメントを除きます。`externalUrl` だけは、アプリが起動先を知る唯一の値のため、設定によらずクエリを含む完全な URL です。アプリが実行するための値なので、ログへ出さないでください（【18】の「イベントの URL」）。
 
 - `proxyRequestUrl`: redirect 元になった proxy の絶対 URL
 - `sourceUpstreamUrl`: `Location` 解決に使った上流リクエスト URL
@@ -2875,7 +3147,7 @@ enum ProxyEventType {
 - `normalizedTargetUrl`: relative 解決後を含む正規化済み URL
 - `resolvedUpstreamUrl`: redirect 先 upstream URL
 - `resolvedProxyUrl`: rewrite 後に WebView が読む proxy URL
-- `externalUrl`: 外部起動候補として app 側へ渡す URL
+- `externalUrl`: 外部起動候補として app 側へ渡す URL（常にクエリを含む完全な URL。ログへ出さないこと）
 - `navigationDisposition`: `ProxyNavigationDisposition` の名前
 - `navigationReason`: `ProxyNavigationReason` の名前
 
@@ -3011,9 +3283,12 @@ enum StorageIntegrityFailure {
 enum StorageRecoveryRejection {
   proxyActive, // proxy が稼働中、または起動処理中
   temporarilyUnavailable, // 端末のロック中などで、鍵を一時的に読めない
-  startWillSucceed // 消す必要のある Box が無い。start() を再試行する（keyWriteFailed の場合を含む）
+  startWillSucceed, // 消す必要のある Box が無い。start() を再試行する（keyWriteFailed の場合を含む）
+  verificationTimedOut // 照合し直しが Box ごとの上限（2 分）を超えた。何も削除していない。時間をおいて再試行する（0.26.0 で追加）
 }
 ```
+
+- `verificationTimedOut` は 0.26.0 で追加した値です。`StorageRecoveryRejection` を網羅する `switch` は、この値の扱いを加える必要があります
 
 #### `EncryptedStorageRecoveryResult`
 

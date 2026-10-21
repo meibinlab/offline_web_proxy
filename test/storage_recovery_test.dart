@@ -276,17 +276,21 @@ void main() {
   /// [verificationTimeLimit] 照合の走査を打ち切る時間の上限。`null` は既定値。
   /// [deferredMigrationDelay] 鍵を生成したときに旧平文 Box の移行を遅らせる時間。
   ///   `null` は既定値。
+  /// [recoveryVerificationTimeLimit] 復旧 API が照合し直すときの時間の上限。
+  ///   `null` は既定値（2 分）。
   ///
   /// Returns: [keyStorage] を使い、待たずに鍵を読み直す proxy。
   OfflineWebProxy createProxy({
     Duration? verificationTimeLimit,
     Duration? deferredMigrationDelay,
+    Duration? recoveryVerificationTimeLimit,
   }) {
     return OfflineWebProxy.withStorageTestHooks(ProxyStorageTestHooks(
       keyStorage: keyStorage,
       keyRereadInterval: Duration.zero,
       verificationTimeLimit: verificationTimeLimit,
       deferredMigrationDelay: deferredMigrationDelay,
+      recoveryVerificationTimeLimit: recoveryVerificationTimeLimit,
     ));
   }
 
@@ -1164,6 +1168,63 @@ void main() {
       await startProxy();
       expect(await quarantineIds(),
           unorderedEquals([_storageKey(2), _storageKey(3)]));
+    });
+  });
+
+  group('復旧の照合し直しの時間の上限（doc/specs.ja.md 【4】）', () {
+    /// 照合し直しが時間の上限を超えた場合は、何も削除・作り直しせずに
+    /// verificationTimedOut を返すこと
+    test('rejects without deleting anything when re-verification times out',
+        () async {
+      storeKey(_key(1));
+      await writeEncryptedBox(
+          _quarantineBoxName, _key(2), _entries([0], _quarantineEntry));
+      await Hive.close();
+      proxy = createProxy(
+        verificationTimeLimit: Duration.zero,
+        recoveryVerificationTimeLimit: Duration.zero,
+      );
+      // 前提: 起動時の照合は打ち切りで失敗していること
+      final error = await startFailure();
+      expect(error.failure, StorageIntegrityFailure.verificationAborted);
+      final sizesBefore = fileSizes([_quarantineBoxName]);
+
+      final result = await proxy.recoverEncryptedStorage();
+
+      expect(result.performed, isFalse);
+      expect(result.rejection, StorageRecoveryRejection.verificationTimedOut);
+      expect(result.deletedBoxes, isEmpty);
+      expect(result.rebuiltBoxes, isEmpty);
+      expect(result.keyDeleted, isFalse);
+      // Box のファイルと鍵はそのまま残ること
+      expect(fileSizes([_quarantineBoxName]), sizesBefore);
+      expect(keyStorage.values[_keyName], base64Encode(_key(1)));
+
+      // 上限を戻せば、同じ Box を不一致として削除できること
+      proxy = createProxy(verificationTimeLimit: Duration.zero);
+      final retried = await proxy.recoverEncryptedStorage();
+      expect(retried.performed, isTrue);
+      expect(retried.deletedBoxes, {ProxyStorageBox.quarantine});
+    });
+
+    /// 先頭側が壊れた Box の照合し直しも、時間の上限を超えれば何もしないこと
+    test('does not rebuild a corrupted box when re-verification times out',
+        () async {
+      storeKey(_key(1));
+      await writeEncryptedBox(
+          _quarantineBoxName, _key(1), _entries([1, 2, 3], _quarantineEntry));
+      await Hive.close();
+      corruptFirstFrame(_quarantineBoxName);
+      proxy = createProxy(recoveryVerificationTimeLimit: Duration.zero);
+      // 前提: 起動時の照合（既定の上限）では破損と判定されること
+      final error = await startFailure();
+      expect(error.failure, StorageIntegrityFailure.corrupted);
+      final sizesBefore = fileSizes([_quarantineBoxName]);
+
+      final result = await proxy.recoverEncryptedStorage();
+
+      expect(result.rejection, StorageRecoveryRejection.verificationTimedOut);
+      expect(fileSizes([_quarantineBoxName]), sizesBefore);
     });
   });
 

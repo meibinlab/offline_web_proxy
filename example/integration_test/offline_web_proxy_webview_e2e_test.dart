@@ -8,6 +8,8 @@ import 'package:integration_test/integration_test.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import 'support/access_token.dart';
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -33,6 +35,8 @@ void main() {
         ),
       );
 
+      // 利用側の手順どおり、読み込む前に秘密値の Cookie を置く
+      await putAccessTokenCookieFor(initialUrl);
       await controller.loadRequest(initialUrl);
       await pageLoaded.future.timeout(const Duration(seconds: 30));
 
@@ -163,7 +167,7 @@ void main() {
           await upstream.close(force: true);
         }
 
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
         final origin = 'http://127.0.0.1:${upstream.port}';
         final proxyPort = await proxy.start(
           config: ProxyConfig(origin: origin),
@@ -266,7 +270,7 @@ void main() {
           }
         }());
 
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
         final origin = 'http://127.0.0.1:${upstream.port}';
         final proxyPort = await proxy.start(
           config: ProxyConfig(origin: origin),
@@ -385,7 +389,7 @@ return {status: r.status, body: t};
           }
         }());
 
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
         final origin = 'http://127.0.0.1:${upstream.port}';
         final proxyPort = await proxy.start(
           config: ProxyConfig(origin: origin),
@@ -516,7 +520,7 @@ return {status: r.status, len: b.byteLength, first: u[0], last: u[u.length-1]};
           }
         }());
 
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
         final origin = 'http://127.0.0.1:${upstream.port}';
         final proxyPort = await proxy.start(
           config: ProxyConfig(origin: origin),
@@ -737,7 +741,7 @@ return {
           }
         }());
 
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
         final origin = 'http://127.0.0.1:${upstream.port}';
         final proxyPort = await proxy.start(
           config: ProxyConfig(origin: origin),

@@ -53,6 +53,15 @@ const List<String> responseCacheBoxNames = [
   legacyEncryptedCacheBoxName,
 ];
 
+/// メタデータの Box に保存する、持ち主のタグの項目名です。
+///
+/// 利用者ごとの応答を、保存したときの持ち主（送信待ちの持ち主と同じ
+/// HMAC、正体の分からない持ち主の値、または持ち主がまだ無いことを表す
+/// 固定の値）と結び付けます。0.25.0 以前の記録と、利用者ごとでない応答の
+/// 記録と、判定関数を指定しない場合の記録には無く、その記録は従来どおり
+/// 誰にでも返します。
+const String cacheOwnerTagField = 'ownerTag';
+
 /// 本文の Box に保存する、ヘッダの項目名です。
 const String _headersField = 'headers';
 
@@ -81,16 +90,27 @@ typedef CacheMigrationErrorReporter = void Function(
 ///
 /// 値は、0.21.0 以前と同じ形の `Map`（`statusCode`、`headers`、`body`、
 /// `createdAt`、`expiresAt`、`contentType`、`sizeBytes`）で受け渡します。
+/// 利用者ごとの応答では、持ち主のタグ（[cacheOwnerTagField]）も加わります。
 /// メタデータの Box には `headers` と `body` 以外を、本文の Box には
 /// `headers` と `body` を保存します。
 class ResponseCacheStore {
-  ResponseCacheStore._(this._index, this._bodies);
+  ResponseCacheStore._(
+    this._index,
+    this._bodies, {
+    required bool compactAfterDelete,
+  }) : _compactAfterDelete = compactAfterDelete;
 
   /// 走査に使う小さな値を保存する Box。開いている間は全件がメモリにあります。
   final Box _index;
 
   /// ヘッダと本文を保存する LazyBox。値は読むたびにファイルから読みます。
   final LazyBox _bodies;
+
+  /// [compactIfPlain] で Box を圧縮するかどうか（平文の Box の場合は `true`）。
+  ///
+  /// 平文の Box では、削除した記録が論理削除のフレームとしてファイルに
+  /// 残るため、明示的な消去の後に圧縮して残る期間を短くします。
+  final bool _compactAfterDelete;
 
   /// 応答キャッシュを開き、古い形式や暗号化の設定を変える前の記録を移します。
   ///
@@ -162,7 +182,11 @@ class ResponseCacheStore {
       openedBoxes.add(bodies);
     }
 
-    final store = ResponseCacheStore._(index, bodies);
+    final store = ResponseCacheStore._(
+      index,
+      bodies,
+      compactAfterDelete: !encrypt,
+    );
     // 別のインスタンスが使っている組は、書き込みの途中を片割れと誤認しないよう触らない
     if (!indexWasOpen && !bodiesWereOpen) {
       await store._removeUnpairedRecords();
@@ -331,7 +355,8 @@ class ResponseCacheStore {
 
   /// 記録を削除します。
   ///
-  /// メタデータ → 本文の順に消します。
+  /// メタデータ → 本文の順に消します。圧縮はしません（必要な呼び出し側が
+  /// [compactIfPlain] を呼びます）。
   ///
   /// [keys] 削除する記録のキー。
   ///
@@ -356,11 +381,33 @@ class ResponseCacheStore {
 
   /// すべての記録を削除します。
   ///
+  /// 圧縮はしません（[deleteAll] と同じ）。
+  ///
   /// Throws:
   ///   * [HiveError] Box が閉じている場合。
   Future<void> clear() async {
     await _index.clear();
     await _bodies.clear();
+  }
+
+  /// 平文の Box（暗号化しない設定）の場合に、両方の Box を圧縮します。
+  ///
+  /// 明示的な消去（全削除、URL を指定した削除、期限切れの削除）の後に呼び、
+  /// 消した記録をファイルに残す期間を短くします。容量の上限による追い出しでは
+  /// 呼ばず、Hive の既定の自動圧縮に任せます。フラッシュ上の物理的な消去は
+  /// 保証しません。削除は済んでいるため、圧縮の失敗は送出せず、次の消去か
+  /// Hive の自動圧縮に任せます。暗号化した Box では何もしません。
+  Future<void> compactIfPlain() async {
+    if (!_compactAfterDelete) {
+      return;
+    }
+    for (final box in <BoxBase>[_index, _bodies]) {
+      try {
+        await box.compact();
+      } catch (_) {
+        // 削除は済んでいるため、圧縮は次の消去か自動圧縮に任せる
+      }
+    }
   }
 
   /// Box を閉じます。

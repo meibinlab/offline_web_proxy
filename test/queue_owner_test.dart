@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:offline_web_proxy/src/storage/encryption_key_storage.dart';
+
+import 'support/access_token_http.dart';
 
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = {
@@ -16,15 +19,6 @@ const Map<String, List<String>> _mockAssetManifest = {
 
 /// ログインのパス。
 const String _loginPath = '/api/login.json';
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
-}
 
 /// キューからの送信を受け取った記録。
 class _Replay {
@@ -55,6 +49,11 @@ class _MockUpstream {
           final account = request.method == 'GET'
               ? request.uri.queryParameters['account']!
               : (jsonDecode(body) as Map<String, dynamic>)['account'] as String;
+          final accountGate = loginGatesByAccount[account];
+          if (accountGate != null) {
+            loginsWaiting.add(account);
+            await accountGate.future;
+          }
           request.response
             ..statusCode =
                 request.method == 'GET' ? HttpStatus.found : HttpStatus.ok
@@ -68,6 +67,22 @@ class _MockUpstream {
         final isReplay = request.headers.value('x-offline-replay') == '1';
         if (isReplay) {
           replays.add(_Replay(body, request.headers.value('cookie')));
+        } else {
+          forwards++;
+          final gate = forwardGate;
+          if (gate != null) {
+            if (!forwardReceived.isCompleted) {
+              forwardReceived.complete();
+            }
+            await gate.future;
+          }
+          if (dropForwardConnection) {
+            // 応答を返さずに切断し、上流へ到達できなかった場合にする
+            final socket =
+                await request.response.detachSocket(writeHeaders: false);
+            socket.destroy();
+            return;
+          }
         }
         request.response.statusCode =
             isReplay ? replayStatusFor(body) : forwardStatusCode;
@@ -98,6 +113,25 @@ class _MockUpstream {
 
   /// ログインを受け取ったときに完了する。待つ前に作り直す。
   Completer<void> loginReceived = Completer<void>();
+
+  /// 利用者ごとに、ログインへの応答を完了するまで待たせる。
+  final Map<String, Completer<void>> loginGatesByAccount =
+      <String, Completer<void>>{};
+
+  /// [loginGatesByAccount] で待たせているログインの利用者。受信順に追加される。
+  final List<String> loginsWaiting = <String>[];
+
+  /// 指定した場合、キューからではない更新系への応答を完了するまで待たせる。
+  Completer<void>? forwardGate;
+
+  /// [forwardGate] で待たせる要求を受け取ったときに完了する。
+  Completer<void> forwardReceived = Completer<void>();
+
+  /// `true` の場合、キューからではない更新系へ応答せずに切断する。
+  bool dropForwardConnection = false;
+
+  /// キューからではない更新系を受け取った回数。
+  int forwards = 0;
 
   /// 上流サーバの origin。
   String get origin => 'http://127.0.0.1:${_server.port}';
@@ -135,6 +169,65 @@ Future<int> _send(
   } finally {
     client.close(force: true);
   }
+}
+
+/// 実 HttpClient で要求を実行し、ステータス、ヘッダ、本文を返す。
+///
+/// [method] HTTP メソッド。
+/// [uri] 送信先。
+/// [body] 本文。
+/// [idempotencyKey] 指定した場合に付けるべき等性キー。
+///
+/// Returns: 応答のステータスコード、ヘッダ、本文。
+Future<({int status, HttpHeaders headers, String body})> _sendFull(
+  String method,
+  Uri uri,
+  String body, {
+  String? idempotencyKey,
+}) async {
+  final client = HttpClient();
+  try {
+    final request = await client.openUrl(method, uri);
+    request.followRedirects = false;
+    request.headers.contentType = ContentType.json;
+    if (idempotencyKey != null) {
+      request.headers.set('Idempotency-Key', idempotencyKey);
+    }
+    request.write(body);
+    final response = await request.close();
+    final text = await utf8.decoder.bind(response).join();
+    return (
+      status: response.statusCode,
+      headers: response.headers,
+      body: text,
+    );
+  } finally {
+    client.close(force: true);
+  }
+}
+
+/// 持ち主の記録のタグを、保存領域の暗号化鍵から作り直す。
+///
+/// 記録の形式（`doc/specs.ja.md`【5】の「持ち主の保存」）に合わせて、
+/// 正しく保存された記録を作るために使う。
+///
+/// [record] タグ以外の項目をそろえた記録。
+///
+/// Returns: タグを付け直した記録。
+Future<Map<String, dynamic>> _retagOwnerRecord(
+    Map<String, dynamic> record) async {
+  final stored = await const FlutterSecureStorage().readAll();
+  expect(stored, hasLength(1));
+  final key = base64Decode(stored.values.single);
+  final tagKey = Hmac(sha256, key)
+      .convert(utf8.encode('offline_web_proxy.queue_owner_record_tag'))
+      .bytes;
+  final message = '${record['owner'] ?? ''}\n${record['keyId']}\n'
+      '${record['signInPending'] == true ? 1 : 0}';
+  return {
+    ...record,
+    'tag': Hmac(sha256, tagKey).convert(utf8.encode(message)).toString(),
+  };
 }
 
 /// [check] が真を返すまで待機する。
@@ -201,7 +294,7 @@ void main() {
         Directory.systemTemp.createTempSync('offline_web_proxy_owner').path;
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
-    proxy = OfflineWebProxy();
+    proxy = trackAccessToken(OfflineWebProxy());
     upstream = _MockUpstream(
       await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
     );
@@ -214,6 +307,15 @@ void main() {
     if (gate != null && !gate.isCompleted) {
       gate.complete();
     }
+    final forwardGate = upstream.forwardGate;
+    if (forwardGate != null && !forwardGate.isCompleted) {
+      forwardGate.complete();
+    }
+    for (final accountGate in upstream.loginGatesByAccount.values) {
+      if (!accountGate.isCompleted) {
+        accountGate.complete();
+      }
+    }
     await subscription?.cancel();
     if (proxy.isRunning) {
       await proxy.stop();
@@ -225,7 +327,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 
@@ -240,10 +342,15 @@ void main() {
     QueueOwnerResolver? resolver = _resolveAccount,
     DropPolicy dropPolicy = DropPolicy.quarantine,
     List<int> retryBackoffSeconds = const [60],
+    String? origin,
+    int upstreamFailureThreshold = 3,
+    List<String> mirroredOrigins = const [],
   }) {
     return proxy.start(
       config: ProxyConfig(
-        origin: upstream.origin,
+        origin: origin ?? upstream.origin,
+        mirroredOrigins: mirroredOrigins,
+        upstreamFailureThreshold: upstreamFailureThreshold,
         authRequiredStatusCodes: const {HttpStatus.unauthorized},
         authResumePaths: const [_loginPath],
         queueOwnerResolver: resolver,
@@ -264,6 +371,9 @@ void main() {
   }
 
   /// 上流の 5xx で、更新系を順にキューへ入れる。
+  ///
+  /// [port] proxy のポート番号。
+  /// [bodies] 入れる要求の本文。べき等性キーは `key-<本文>`。
   Future<void> enqueue(int port, List<String> bodies) async {
     for (final body in bodies) {
       await _send(
@@ -300,6 +410,24 @@ void main() {
     } finally {
       client.close(force: true);
     }
+  }
+
+  /// 持ち主が分からないため一時停止し、要求を送りも移しもしないことを確かめる。
+  ///
+  /// [replays] キューから上流へ届いているはずの件数。
+  /// [queued] キューに残っているはずの件数。
+  Future<void> expectPausedWithoutMoving({
+    required int replays,
+    required int queued,
+  }) async {
+    expect((await proxy.getStats()).queuePausedReason,
+        equals(QueuePauseReason.ownerUnresolved));
+    // 定期処理が回っても送らないこと
+    await Future<void>.delayed(const Duration(seconds: 6));
+    expect(upstream.replays, hasLength(replays));
+    expect(await proxy.getQueuedRequests(), hasLength(queued));
+    expect(await proxy.getQuarantinedRequests(), isEmpty);
+    expect(await proxy.getDroppedRequests(), isEmpty);
   }
 
   /// A がログインして 3 件をキューへ入れ、セッション切れで一時停止させる。
@@ -724,18 +852,23 @@ void main() {
         await queueForUserAAndPause();
         await proxy.stop();
 
-        // Cookie を保存した後、持ち主を保存する前に終了した状態を作る
+        // Cookie を保存した後、持ち主を保存する前に終了した状態を作る。
+        // 改ざんと区別されるよう、タグも正しく付け直す
         final preferences = await Hive.openBox('proxy_port_preferences');
         final stored =
             Map<String, dynamic>.from(preferences.get('queue_owner') as Map);
-        await preferences
-            .put('queue_owner', {...stored, 'signInPending': true});
+        await preferences.put('queue_owner',
+            await _retagOwnerRecord({...stored, 'signInPending': true}));
         await preferences.close();
 
         upstream.replayStatusFor = (_) => HttpStatus.ok;
-        await startProxy();
-        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        final port = await startProxy();
+        // 前の持ち主の要求は送らず、捨てもせずに止めること
+        await expectPausedWithoutMoving(replays: 1, queued: 3);
 
+        // 別の利用者がログインすれば、前の持ち主の要求として移すこと
+        await signIn(port, 'bob');
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
         expect(upstream.replays, hasLength(1));
         final quarantined = await proxy.getQuarantinedRequests();
         expect(quarantined, hasLength(3));
@@ -808,14 +941,14 @@ void main() {
                 event.data['phase'] == 'queueOwnerPersist'),
             isEmpty);
 
-        await startProxy();
+        final restartedPort = await startProxy();
+        await expectPausedWithoutMoving(replays: 1, queued: 3);
+
+        // 前の持ち主がログインし直せば、そのまま送ること
+        await signIn(restartedPort, 'alice');
         await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
-        expect(upstream.replays, hasLength(1));
-        final quarantined = await proxy.getQuarantinedRequests();
-        expect(quarantined, hasLength(3));
-        expect(
-            quarantined.every((request) => request.reason == 'owner_changed'),
-            isTrue);
+        expect(upstream.replays.last.cookie, contains('session=alice'));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
       });
     }, timeout: const Timeout(Duration(seconds: 120)));
 
@@ -824,7 +957,7 @@ void main() {
         () async {
       final reachedBody = Completer<void>();
       final releaseBody = Completer<void>();
-      proxy = OfflineWebProxy.withStorageTestHooks(
+      proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
         ProxyStorageTestHooks(
           beforeQueuedRequestSent: () async {
             if (!reachedBody.isCompleted) {
@@ -833,7 +966,7 @@ void main() {
             }
           },
         ),
-      );
+      ));
       await subscription?.cancel();
       subscription = proxy.events.listen(events.add);
 
@@ -858,6 +991,951 @@ void main() {
             proxy.recentResendResults
                 .where((result) => result.dropReason == null),
             isEmpty);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+  });
+
+  group('送信待ちの持ち主の強化（0.26.0）', () {
+    /// 上流が応答を待たせている間に別の利用者がログインしても、受け付けた
+    /// 時点の持ち主を記録すること
+    test('records the owner at the time the request was received', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+        await signIn(port, 'alice');
+
+        upstream.forwardGate = Completer<void>();
+        upstream.forwardReceived = Completer<void>();
+        final pending = _send(
+          'POST',
+          Uri.parse('http://127.0.0.1:$port/api/records'),
+          'photo',
+          idempotencyKey: 'key-photo',
+        );
+        await upstream.forwardReceived.future;
+
+        // A の要求への応答を待たせたまま B がログインする
+        await signIn(port, 'bob');
+        upstream.forwardGate!.complete();
+        upstream.forwardGate = null;
+        expect(await pending, equals(HttpStatus.internalServerError));
+
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        // B のセッションで送らず、A の要求として owner_changed で隔離すること
+        expect(upstream.replays, isEmpty);
+        expect((await proxy.getQuarantinedRequests()).single.reason,
+            equals('owner_changed'));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 並行したログインでは、応答が届いた順に Cookie と持ち主をそろえること
+    ///
+    /// [first] 先に応答する利用者。[last] 後に応答する利用者。
+    Future<void> runOrderedSignIns(String first, String last) async {
+      // A の要求を再試行の待ちにしてキューへ残す
+      upstream.replayStatusFor = (_) => HttpStatus.serviceUnavailable;
+      final port = await startProxy(retryBackoffSeconds: const [1]);
+      await signIn(port, 'alice');
+      await enqueue(port, ['photo']);
+      await _waitUntil(() => upstream.replays.isNotEmpty);
+
+      upstream.loginGatesByAccount['alice'] = Completer<void>();
+      upstream.loginGatesByAccount['bob'] = Completer<void>();
+      final signIns = {
+        'alice': signIn(port, 'alice'),
+        'bob': signIn(port, 'bob'),
+      };
+      await _waitUntil(() => upstream.loginsWaiting.length == 2);
+
+      upstream.replayStatusFor = (_) => HttpStatus.ok;
+      final replaysBefore = upstream.replays.length;
+      upstream.loginGatesByAccount[first]!.complete();
+      await signIns[first];
+      upstream.loginGatesByAccount[last]!.complete();
+      await signIns[last];
+
+      // Cookie Jar には後に応答した利用者のセッションが残ること
+      expect(await proxy.getCookieHeaderForUrl('${upstream.origin}/'),
+          contains('session=$last'));
+      await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+      if (last == 'alice') {
+        // 持ち主も A のため、A のセッションで送ること
+        expect(upstream.replays, hasLength(replaysBefore + 1));
+        expect(upstream.replays.last.cookie, contains('session=alice'));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+      } else {
+        // 持ち主も B のため、A の要求は送らずに隔離すること
+        expect(upstream.replays, hasLength(replaysBefore));
+        expect((await proxy.getQuarantinedRequests()).single.reason,
+            equals('owner_changed'));
+      }
+    }
+
+    /// B の応答が後に届いた場合は、Cookie も持ち主も B になること
+    test('settles concurrent sign-ins in response order (B last)', () async {
+      await withRealHttpClient(() => runOrderedSignIns('alice', 'bob'));
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// A の応答が後に届いた場合は、Cookie も持ち主も A になること
+    test('settles concurrent sign-ins in response order (A last)', () async {
+      await withRealHttpClient(() => runOrderedSignIns('bob', 'alice'));
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 応答がほぼ同時に届いても、Cookie Jar の利用者と持ち主が食い違わないこと
+    test('keeps the cookie jar and the owner consistent', () async {
+      await withRealHttpClient(() async {
+        upstream.replayStatusFor = (_) => HttpStatus.serviceUnavailable;
+        final port = await startProxy(retryBackoffSeconds: const [1]);
+        await signIn(port, 'alice');
+        await enqueue(port, ['photo']);
+        await _waitUntil(() => upstream.replays.isNotEmpty);
+
+        upstream.loginGatesByAccount['alice'] = Completer<void>();
+        upstream.loginGatesByAccount['bob'] = Completer<void>();
+        final signIns = [signIn(port, 'bob'), signIn(port, 'alice')];
+        await _waitUntil(() => upstream.loginsWaiting.length == 2);
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        final replaysBefore = upstream.replays.length;
+        upstream.loginGatesByAccount['bob']!.complete();
+        upstream.loginGatesByAccount['alice']!.complete();
+        await Future.wait(signIns);
+
+        final cookie =
+            await proxy.getCookieHeaderForUrl('${upstream.origin}/') ?? '';
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        if (cookie.contains('session=alice')) {
+          expect(upstream.replays, hasLength(replaysBefore + 1));
+          expect(upstream.replays.last.cookie, contains('session=alice'));
+        } else {
+          expect(cookie, contains('session=bob'));
+          expect(upstream.replays, hasLength(replaysBefore));
+          expect((await proxy.getQuarantinedRequests()).single.reason,
+              equals('owner_changed'));
+        }
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 別の利用者の ID で Cookie を復元すると、その利用者が持ち主になること
+    test('restoreCookies with another queueOwnerId changes the owner',
+        () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+
+        await proxy.restoreCookies(
+          const [
+            CookieRestoreEntry(
+                name: 'session', value: 'bob', domain: '127.0.0.1')
+          ],
+          queueOwnerId: 'bob',
+        );
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+
+        expect(upstream.replays, hasLength(1));
+        final quarantined = await proxy.getQuarantinedRequests();
+        expect(quarantined, hasLength(3));
+        expect(
+            quarantined.every((request) => request.reason == 'owner_changed'),
+            isTrue);
+        expect((await proxy.getStats()).queuePausedReason, isNull);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 同じ利用者の ID で Cookie を復元すると、復元したセッションで送ること
+    test('restoreCookies with the same queueOwnerId resumes the queue',
+        () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+
+        await proxy.restoreCookies(
+          const [
+            CookieRestoreEntry(
+                name: 'session', value: 'alice2', domain: '127.0.0.1')
+          ],
+          queueOwnerId: 'alice',
+        );
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+
+        expect(upstream.replays.map((replay) => replay.body),
+            equals(['photo', 'photo', 'vehicle', 'home']));
+        expect(upstream.replays.last.cookie, contains('session=alice2'));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// ID を渡さずに Cookie を復元すると、持ち主が分からないため止めること
+    test('restoreCookies without queueOwnerId pauses the queue', () async {
+      await withRealHttpClient(() async {
+        final port = await queueForUserAAndPause();
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+
+        await proxy.restoreCookies(const [
+          CookieRestoreEntry(name: 'session', value: 'bob', domain: '127.0.0.1')
+        ]);
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        await Future<void>.delayed(const Duration(seconds: 6));
+        expect(upstream.replays, hasLength(1));
+        // 前の持ち主の要求は捨てないこと
+        expect(await proxy.getQueuedRequests(), hasLength(3));
+
+        // 持ち主が決まるログインで再開し、A の要求として送ること
+        await signIn(port, 'alice');
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(upstream.replays.last.cookie, contains('session=alice'));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 判定関数を指定しない場合は、queueOwnerId を使わず 0.25.0 と同じく送ること
+    test('restoreCookies ignores queueOwnerId without a resolver', () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause(resolver: null);
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+
+        await proxy.restoreCookies(
+          const [
+            CookieRestoreEntry(
+                name: 'session', value: 'bob', domain: '127.0.0.1')
+          ],
+          queueOwnerId: 'bob',
+        );
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.authenticationRequired));
+        await proxy.clearCookies();
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.authenticationRequired));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// Cookie の復元中は、送り始めていた要求を本文を送る前に中断すること
+    test('cancels a resend while cookies are restored', () async {
+      final reachedBody = Completer<void>();
+      final releaseBody = Completer<void>();
+      proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(
+          beforeQueuedRequestSent: () async {
+            if (!reachedBody.isCompleted) {
+              reachedBody.complete();
+              await releaseBody.future;
+            }
+          },
+        ),
+      ));
+      await subscription?.cancel();
+      subscription = proxy.events.listen(events.add);
+
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+        await signIn(port, 'alice');
+        await enqueue(port, ['photo']);
+        await reachedBody.future;
+
+        // 送信の途中で、同じ利用者の新しいセッションへ差し替える
+        await proxy.restoreCookies(
+          const [
+            CookieRestoreEntry(
+                name: 'session', value: 'alice2', domain: '127.0.0.1')
+          ],
+          queueOwnerId: 'alice',
+        );
+        releaseBody.complete();
+
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        // 中断した送信は届かず、差し替えた後のセッションで 1 回だけ送ること
+        expect(upstream.replays, hasLength(1));
+        expect(upstream.replays.single.cookie, contains('session=alice2'));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// すべての Cookie を消すと、持ち主が分からないため止め、要求は残すこと
+    test('clearCookies() pauses the queue for an unknown owner', () async {
+      await withRealHttpClient(() async {
+        final port = await queueForUserAAndPause();
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+
+        await proxy.clearCookies();
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        expect(await proxy.getQueuedRequests(), hasLength(3));
+
+        // A がログインし直せば、A の要求として送ること
+        await signIn(port, 'alice');
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(upstream.replays.last.cookie, contains('session=alice'));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 設定済み origin のドメインを消す場合だけ止めること
+    test('clearCookies(domain:) pauses only for the configured origin',
+        () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+        await signIn(port, 'alice');
+
+        await proxy.clearCookies(domain: 'other.example');
+        expect((await proxy.getStats()).queuePausedReason, isNull);
+
+        await proxy.clearCookies(domain: '127.0.0.1');
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 画面が同じべき等性キーで別の内容や別の持ち主の要求を送ると 422 で断ること
+    test('rejects an idempotency key reused for another request', () async {
+      await withRealHttpClient(() async {
+        var shouldThrow = false;
+        String? resolver(QueueOwnerContext context) {
+          if (shouldThrow) {
+            throw StateError('broken resolver');
+          }
+          return _resolveAccount(context);
+        }
+
+        // 再送は失敗させてキューへ残す
+        upstream.replayStatusFor = (_) => HttpStatus.serviceUnavailable;
+        final port = await startProxy(
+          resolver: resolver,
+          upstreamFailureThreshold: 0,
+        );
+        await signIn(port, 'alice');
+        upstream.dropForwardConnection = true;
+        final uri = Uri.parse('http://127.0.0.1:$port/api/records');
+
+        final first =
+            await _sendFull('POST', uri, 'photo', idempotencyKey: 'shared');
+        expect(first.headers.value('x-offline-queued'), equals('1'));
+        final queueId = first.headers.value('x-offline-queue-id');
+        expect(queueId, isNotNull);
+
+        // 同じ持ち主の同じ内容は、既存のキュー ID を返すこと
+        final same =
+            await _sendFull('POST', uri, 'photo', idempotencyKey: 'shared');
+        expect(same.headers.value('x-offline-queue-id'), equals(queueId));
+
+        // 内容が違う場合は 422
+        final otherBody =
+            await _sendFull('POST', uri, 'vehicle', idempotencyKey: 'shared');
+        expect(otherBody.status, equals(HttpStatus.unprocessableEntity));
+        expect(jsonDecode(otherBody.body),
+            equals({'queued': false, 'error': 'idempotency_key_conflict'}));
+        expect(otherBody.headers.value('x-offline-queued'), equals('0'));
+        expect(otherBody.headers.value('x-offline-queue-id'), isNull);
+
+        // 持ち主が違う場合も 422。A の要求をキューへ残したまま持ち主を
+        // 変えるため、判定できないログインで一時停止させる
+        upstream.dropForwardConnection = false;
+        shouldThrow = true;
+        await signIn(port, 'bob');
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        upstream.dropForwardConnection = true;
+        final otherOwner =
+            await _sendFull('POST', uri, 'photo', idempotencyKey: 'shared');
+        expect(otherOwner.status, equals(HttpStatus.unprocessableEntity));
+
+        expect(await proxy.getQueuedRequests(), hasLength(1));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// origin の設定を変えた後は、前の送信先へ送らず origin_changed で取り除くこと
+    test('does not resend to an origin that is no longer configured', () async {
+      final other = _MockUpstream(
+        await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+      );
+      try {
+        await withRealHttpClient(() async {
+          await queueForUserAAndPause();
+          await proxy.stop();
+
+          upstream.replayStatusFor = (_) => HttpStatus.ok;
+          await startProxy(origin: other.origin);
+          await _waitUntil(
+              () async => (await proxy.getQueuedRequests()).isEmpty);
+
+          expect(upstream.replays, hasLength(1));
+          expect(other.replays, isEmpty);
+          final quarantined = await proxy.getQuarantinedRequests();
+          expect(quarantined, hasLength(3));
+          for (final request in quarantined) {
+            expect(request.reason, equals('origin_changed'));
+            expect(request.statusCode, equals(0));
+            expect(request.errorMessage, equals('Queue origin changed'));
+          }
+          expect(
+              proxy.recentResendResults
+                  .where((result) => result.dropReason == 'origin_changed'),
+              hasLength(3));
+        });
+      } finally {
+        await other.close();
+      }
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 持ち主の記録を書き換えられた場合は、起動時に止めること
+    test('pauses the queue when the owner record was altered', () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        await proxy.stop();
+
+        final preferences = await Hive.openBox('proxy_port_preferences');
+        final stored =
+            Map<String, dynamic>.from(preferences.get('queue_owner') as Map);
+        await preferences.put('queue_owner', {...stored, 'owner': 'f' * 64});
+        await preferences.close();
+
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        await startProxy();
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        final error = events.singleWhere((event) =>
+            event.type == ProxyEventType.errorOccurred &&
+            event.data['phase'] == 'queueOwnerLoad');
+        expect(error.data['reason'], equals('tagMismatch'));
+        await Future<void>.delayed(const Duration(seconds: 6));
+        expect(upstream.replays, hasLength(1));
+        expect(await proxy.getQueuedRequests(), hasLength(3));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 持ち主のある要求が残っているのに記録を消された場合も、起動時に止めること
+    test('pauses the queue when the owner record was removed', () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        await proxy.stop();
+
+        final preferences = await Hive.openBox('proxy_port_preferences');
+        await preferences.delete('queue_owner');
+        await preferences.close();
+
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        await startProxy();
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        final error = events.singleWhere((event) =>
+            event.type == ProxyEventType.errorOccurred &&
+            event.data['phase'] == 'queueOwnerLoad');
+        expect(error.data['reason'], equals('recordMissing'));
+        await Future<void>.delayed(const Duration(seconds: 6));
+        expect(upstream.replays, hasLength(1));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 0.25.0 のタグの無い記録は 1 回だけ受け入れ、タグを付けて保存し直すこと
+    test('migrates a 0.25.0 owner record only once', () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        await proxy.stop();
+
+        // 0.25.0 が保存した形（タグも、タグを付けた印も無い）にする
+        var preferences = await Hive.openBox('proxy_port_preferences');
+        final stored =
+            Map<String, dynamic>.from(preferences.get('queue_owner') as Map);
+        final legacy = Map<String, dynamic>.from(stored)..remove('tag');
+        await preferences.put('queue_owner', legacy);
+        await preferences.delete('queue_owner_tagged');
+        await preferences.close();
+
+        // 持ち主は A のまま引き継ぎ、A の要求を送ること
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        await startProxy();
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+        expect(
+            events.where((event) =>
+                event.type == ProxyEventType.errorOccurred &&
+                event.data['phase'] == 'queueOwnerLoad'),
+            isEmpty);
+        await proxy.stop();
+
+        preferences = await Hive.openBox('proxy_port_preferences');
+        final migrated =
+            Map<String, dynamic>.from(preferences.get('queue_owner') as Map);
+        expect(migrated['owner'], equals(stored['owner']));
+        expect(migrated['tag'], matches(RegExp(r'^[0-9a-f]{64}$')));
+        expect(preferences.get('queue_owner_tagged'), isTrue);
+
+        // 2 回目のタグの無い記録は、書き換えられたものとして止めること
+        await preferences.put('queue_owner', legacy);
+        await preferences.close();
+        await startProxy();
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        final error = events.singleWhere((event) =>
+            event.type == ProxyEventType.errorOccurred &&
+            event.data['phase'] == 'queueOwnerLoad');
+        expect(error.data['reason'], equals('tagMismatch'));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// キューへ保存できなかった場合は、理由を errorOccurred で知らせること
+    test('reports a queue that could not be saved', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(upstreamFailureThreshold: 0);
+        await Hive.box('proxy_queue_secure').close();
+        upstream.dropForwardConnection = true;
+
+        final response = await _sendFull(
+          'POST',
+          Uri.parse('http://127.0.0.1:$port/api/records'),
+          'photo',
+        );
+        expect(response.status, equals(HttpStatus.serviceUnavailable));
+        expect(jsonDecode(response.body), equals({'queued': false}));
+        final error = events.singleWhere((event) =>
+            event.type == ProxyEventType.errorOccurred &&
+            event.data['phase'] == 'queueSave');
+        expect(error.data,
+            equals({'phase': 'queueSave', 'reason': 'storageUnavailable'}));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+  });
+
+  group('送信待ちの持ち主の強化（差し戻し対応）', () {
+    /// テスト用の窓口を持つ proxy に差し替え、イベントを受け取り直す。
+    Future<void> useProxy(OfflineWebProxy replacement) async {
+      proxy = trackAccessToken(replacement);
+      await subscription?.cancel();
+      subscription = proxy.events.listen(events.add);
+    }
+
+    /// キューの暗号化 Box へ、旧版の形の要求を直接書き込む。
+    Future<void> putLegacyQueuedRequest(
+      String key, {
+      required String url,
+      required String body,
+      required String idempotencyKey,
+      required DateTime nextRetryAt,
+    }) async {
+      final now = DateTime.now().toIso8601String();
+      await Hive.box('proxy_queue_secure').put(key, {
+        'url': url,
+        'method': 'POST',
+        'headers': <String, String>{'content-type': 'application/json'},
+        'body': utf8.encode(body),
+        'queuedAt': now,
+        'acceptedAt': now,
+        'retryCount': 0,
+        'nextRetryAt': nextRetryAt.toIso8601String(),
+        'idempotencyKey': idempotencyKey,
+      });
+    }
+
+    /// Cookie をすべて消して終了した後も、前の持ち主の要求を移さないこと
+    test(
+        'keeps requests of the previous owner across a restart after '
+        'clearCookies()', () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        await proxy.clearCookies();
+        await proxy.stop();
+
+        final port = await startProxy();
+        await expectPausedWithoutMoving(replays: 1, queued: 3);
+
+        // A がログインし直せば、A の要求として送ること
+        await signIn(port, 'alice');
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(upstream.replays.last.cookie, contains('session=alice'));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// ID なしで復元して終了した後も止め、別の利用者のログインで移すこと
+    test(
+        'keeps requests of the previous owner across a restart after '
+        'restoreCookies() without queueOwnerId', () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        await proxy.restoreCookies(const [
+          CookieRestoreEntry(name: 'session', value: 'bob', domain: '127.0.0.1')
+        ]);
+        await proxy.stop();
+
+        final port = await startProxy();
+        await expectPausedWithoutMoving(replays: 1, queued: 3);
+
+        await signIn(port, 'bob');
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(upstream.replays, hasLength(1));
+        expect(
+            (await proxy.getQuarantinedRequests())
+                .every((request) => request.reason == 'owner_changed'),
+            isTrue);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// mirroredOrigins に入れた旧 origin への要求も origin_changed で取り除くこと
+    test('does not resend to an old origin listed in mirroredOrigins',
+        () async {
+      final other = _MockUpstream(
+        await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+      );
+      try {
+        await withRealHttpClient(() async {
+          await queueForUserAAndPause();
+          await proxy.stop();
+
+          upstream.replayStatusFor = (_) => HttpStatus.ok;
+          await startProxy(
+            origin: other.origin,
+            mirroredOrigins: [upstream.origin],
+          );
+          await _waitUntil(
+              () async => (await proxy.getQueuedRequests()).isEmpty);
+
+          expect(upstream.replays, hasLength(1));
+          final quarantined = await proxy.getQuarantinedRequests();
+          expect(quarantined, hasLength(3));
+          expect(
+              quarantined
+                  .every((request) => request.reason == 'origin_changed'),
+              isTrue);
+        });
+      } finally {
+        await other.close();
+      }
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 相対 URL で保存した旧データは、現在の origin を補って送ること
+    test('sends a legacy request stored with a relative URL', () async {
+      await withRealHttpClient(() async {
+        await startProxy(resolver: null);
+        await putLegacyQueuedRequest(
+          'legacy-relative',
+          url: '/api/records',
+          body: 'legacy',
+          idempotencyKey: 'legacy-relative',
+          nextRetryAt: DateTime.now(),
+        );
+
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(upstream.replays.single.body, equals('legacy'));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 判定関数が無い間は、キューにある要求の持ち主を比べずに既存の ID を返すこと
+    test('ignores the recorded owner without a resolver', () async {
+      await withRealHttpClient(() async {
+        upstream.replayStatusFor = (_) => HttpStatus.serviceUnavailable;
+        var port = await startProxy(upstreamFailureThreshold: 0);
+        await signIn(port, 'alice');
+        upstream.dropForwardConnection = true;
+        final first = await _sendFull(
+          'POST',
+          Uri.parse('http://127.0.0.1:$port/api/records'),
+          'photo',
+          idempotencyKey: 'shared',
+        );
+        final queueId = first.headers.value('x-offline-queue-id');
+        expect(queueId, isNotNull);
+        await proxy.stop();
+
+        port = await startProxy(resolver: null, upstreamFailureThreshold: 0);
+        final again = await _sendFull(
+          'POST',
+          Uri.parse('http://127.0.0.1:$port/api/records'),
+          'photo',
+          idempotencyKey: 'shared',
+        );
+        expect(again.status, isNot(equals(HttpStatus.unprocessableEntity)));
+        expect(again.headers.value('x-offline-queue-id'), equals(queueId));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 指紋の無い旧データは、メソッドと URL で同じ要求かを比べること
+    test('compares a legacy request without a fingerprint by method and URL',
+        () async {
+      await withRealHttpClient(() async {
+        final port =
+            await startProxy(resolver: null, upstreamFailureThreshold: 0);
+        await putLegacyQueuedRequest(
+          'legacy-entry',
+          url: '${upstream.origin}/api/records',
+          body: 'legacy',
+          idempotencyKey: 'legacy-key',
+          nextRetryAt: DateTime.now().add(const Duration(hours: 1)),
+        );
+        upstream.dropForwardConnection = true;
+
+        // 本文が違っても、メソッドと URL が同じなら既存の ID を返す
+        final same = await _sendFull(
+          'POST',
+          Uri.parse('http://127.0.0.1:$port/api/records'),
+          'other body',
+          idempotencyKey: 'legacy-key',
+        );
+        expect(
+            same.headers.value('x-offline-queue-id'), equals('legacy-entry'));
+
+        // URL が違えば 422
+        final otherUrl = await _sendFull(
+          'POST',
+          Uri.parse('http://127.0.0.1:$port/api/other'),
+          'legacy',
+          idempotencyKey: 'legacy-key',
+        );
+        expect(otherUrl.status, equals(HttpStatus.unprocessableEntity));
+        expect(await proxy.getQueuedRequests(), hasLength(1));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 上流が 5xx を返した経路で衝突した場合は、上流の応答をそのまま返すこと
+    test('returns the upstream answer on a conflict after an upstream 5xx',
+        () async {
+      await withRealHttpClient(() async {
+        upstream.replayStatusFor = (_) => HttpStatus.serviceUnavailable;
+        final port = await startProxy(resolver: null);
+        final uri = Uri.parse('http://127.0.0.1:$port/api/records');
+
+        final first =
+            await _sendFull('POST', uri, 'photo', idempotencyKey: 'shared');
+        expect(first.status, equals(HttpStatus.internalServerError));
+        expect(first.headers.value('x-offline-queue-id'), isNotNull);
+
+        final conflict =
+            await _sendFull('POST', uri, 'vehicle', idempotencyKey: 'shared');
+        expect(conflict.status, equals(HttpStatus.internalServerError));
+        expect(conflict.body, equals('upstream'));
+        expect(conflict.headers.value('x-offline-queue-id'), isNull);
+        expect(await proxy.getQueuedRequests(), hasLength(1));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 上流へ届かずキューへ入れる経路でも、受け付けた時点の持ち主を使うこと
+    test('records the owner at reception when the upstream is unreachable',
+        () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(upstreamFailureThreshold: 0);
+        await signIn(port, 'alice');
+
+        upstream.forwardGate = Completer<void>();
+        upstream.forwardReceived = Completer<void>();
+        upstream.dropForwardConnection = true;
+        final pending = _send(
+          'POST',
+          Uri.parse('http://127.0.0.1:$port/api/records'),
+          'photo',
+          idempotencyKey: 'key-photo',
+        );
+        await upstream.forwardReceived.future;
+        upstream.dropForwardConnection = false;
+        await signIn(port, 'bob');
+        upstream.dropForwardConnection = true;
+        upstream.forwardGate!.complete();
+        upstream.forwardGate = null;
+        expect(await pending, equals(HttpStatus.accepted));
+
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(upstream.replays, isEmpty);
+        expect((await proxy.getQuarantinedRequests()).single.reason,
+            equals('owner_changed'));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 一度も起動していない間の restoreCookies() は、持ち主を変えないこと
+    test('restoreCookies before the first start keeps the owner', () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        await proxy.stop();
+
+        // 一度も起動していないインスタンスで、別の利用者の ID を渡して復元する
+        await useProxy(OfflineWebProxy());
+        await proxy.restoreCookies(
+          const [
+            CookieRestoreEntry(
+                name: 'session', value: 'alice2', domain: '127.0.0.1')
+          ],
+          queueOwnerId: 'bob',
+        );
+
+        // 持ち主は A のままのため、A の要求として送ること
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        await startProxy();
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(upstream.replays.last.cookie, contains('session=alice2'));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// キューの投入の排他を取得できない場合は、lockTimeout を知らせること
+    test('reports a queue save that timed out waiting for the lock', () async {
+      final reachedSave = Completer<void>();
+      final releaseSave = Completer<void>();
+      await useProxy(OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(
+          storageLockTimeout: const Duration(milliseconds: 500),
+          beforeQueueEntrySaved: () async {
+            if (!reachedSave.isCompleted) {
+              reachedSave.complete();
+              await releaseSave.future;
+            }
+          },
+        ),
+      ));
+
+      await withRealHttpClient(() async {
+        final port =
+            await startProxy(resolver: null, upstreamFailureThreshold: 0);
+        upstream.dropForwardConnection = true;
+        final uri = Uri.parse('http://127.0.0.1:$port/api/records');
+
+        final first = _sendFull('POST', uri, 'photo');
+        await reachedSave.future;
+        final second = await _sendFull('POST', uri, 'vehicle');
+        expect(second.status, equals(HttpStatus.serviceUnavailable));
+        expect(jsonDecode(second.body), equals({'queued': false}));
+        final error = events.singleWhere((event) =>
+            event.type == ProxyEventType.errorOccurred &&
+            event.data['phase'] == 'queueSave');
+        expect(error.data,
+            equals({'phase': 'queueSave', 'reason': 'lockTimeout'}));
+
+        releaseSave.complete();
+        expect((await first).status, equals(HttpStatus.accepted));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 順番待ちを取れずにロックの外で Cookie が書かれた場合、ロックを持つ
+    /// ログインは持ち主を決めずに止めること
+    test('does not settle the owner after cookies were written out of turn',
+        () async {
+      var holdOwnerDecision = false;
+      final reachedDecision = Completer<void>();
+      final releaseDecision = Completer<void>();
+      await useProxy(OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(
+          storageLockTimeout: const Duration(milliseconds: 500),
+          beforeQueueOwnerDecided: () async {
+            if (holdOwnerDecision && !reachedDecision.isCompleted) {
+              reachedDecision.complete();
+              await releaseDecision.future;
+            }
+          },
+        ),
+      ));
+
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+        await signIn(port, 'alice');
+
+        // B のログインが順番待ちを持ったまま、持ち主を決める直前で止まる
+        holdOwnerDecision = true;
+        final signInB = signIn(port, 'bob');
+        await reachedDecision.future;
+
+        // その間に C の Cookie を復元すると、順番待ちを取れずに外で書く
+        await proxy.restoreCookies(
+          const [
+            CookieRestoreEntry(
+                name: 'session', value: 'carol', domain: '127.0.0.1')
+          ],
+          queueOwnerId: 'carol',
+        );
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+
+        releaseDecision.complete();
+        await signInB;
+
+        // B を持ち主にして再開せず、止めたままにすること
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        expect(await proxy.getCookieHeaderForUrl('${upstream.origin}/'),
+            contains('session=carol'));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 正体の分からない持ち主の要求しか無ければ、起動時に止めずに送ること
+    test('sends requests of the unknown owner itself after a restart',
+        () async {
+      await withRealHttpClient(() async {
+        upstream.replayStatusFor = (_) => HttpStatus.serviceUnavailable;
+        var port = await startProxy();
+        await signIn(port, 'alice');
+        await proxy.clearCookies();
+        // 正体の分からない持ち主のまま要求を入れる
+        await enqueue(port, ['photo']);
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        await proxy.stop();
+
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        port = await startProxy();
+        expect((await proxy.getStats()).queuePausedReason, isNull);
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(
+            upstream.replays.map((replay) => replay.body), equals(['photo']));
+        expect(await proxy.getQuarantinedRequests(), isEmpty);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 起動時に止めた後に resumeQueue() すると、前の持ち主の要求を移すこと
+    test('moves requests of the previous owner after resumeQueue()', () async {
+      await withRealHttpClient(() async {
+        await queueForUserAAndPause();
+        upstream.replayStatusFor = (_) => HttpStatus.ok;
+        await proxy.clearCookies();
+        await proxy.stop();
+
+        await startProxy();
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+        await proxy.resumeQueue();
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        expect(upstream.replays, hasLength(1));
+        final quarantined = await proxy.getQuarantinedRequests();
+        expect(quarantined, hasLength(3));
+        expect(
+            quarantined.every((request) => request.reason == 'owner_changed'),
+            isTrue);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// Cookie の復元や削除に失敗した場合も、持ち主が分からないため止めること
+    test('pauses the queue when restoring or clearing cookies fails', () async {
+      var failCookieStore = false;
+      await useProxy(OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(
+          beforeCookieStoreChanged: () async {
+            if (failCookieStore) {
+              throw StateError('cookie store failed');
+            }
+          },
+        ),
+      ));
+
+      await withRealHttpClient(() async {
+        final port = await startProxy();
+        await signIn(port, 'alice');
+        failCookieStore = true;
+
+        await expectLater(
+          proxy.restoreCookies(
+            const [
+              CookieRestoreEntry(
+                  name: 'session', value: 'alice2', domain: '127.0.0.1')
+            ],
+            queueOwnerId: 'alice',
+          ),
+          throwsA(isA<CookieOperationException>()),
+        );
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
+
+        await proxy.resumeQueue();
+        expect((await proxy.getStats()).queuePausedReason, isNull);
+        await expectLater(
+          proxy.clearCookies(),
+          throwsA(isA<CookieOperationException>()),
+        );
+        expect((await proxy.getStats()).queuePausedReason,
+            equals(QueuePauseReason.ownerUnresolved));
       });
     }, timeout: const Timeout(Duration(seconds: 120)));
   });
