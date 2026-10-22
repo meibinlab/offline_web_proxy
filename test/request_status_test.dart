@@ -328,8 +328,10 @@ void main() {
             (await proxy.getQueuedRequests()).single.acceptedAt.toUtc();
 
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getQuarantinedRequests()).isNotEmpty);
+        // 隔離へ書き込んでからキューから消し、キューにある間は queued を返すため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getQuarantinedRequests()).isNotEmpty &&
+            (await proxy.getQueuedRequests()).isEmpty);
 
         final status = (await proxy.getRequestStatuses(['key-1'])).single;
         expect(status.state, equals(RequestState.quarantined));
@@ -387,8 +389,10 @@ void main() {
             (await proxy.getQueuedRequests()).single.acceptedAt.toUtc();
 
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getDroppedRequests()).isNotEmpty);
+        // 履歴へ記録してからキューから消し、キューにある間は queued を返すため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getDroppedRequests()).isNotEmpty &&
+            (await proxy.getQueuedRequests()).isEmpty);
 
         final dropped = (await proxy.getDroppedRequests()).single;
         expect(dropped.idempotencyKey, equals('key-1'));
@@ -414,8 +418,10 @@ void main() {
         await enqueueOffline(port, 'key-1');
 
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getDroppedRequests()).isNotEmpty);
+        // 履歴へ記録してからキューから消し、キューにある間は queued を返すため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getDroppedRequests()).isNotEmpty &&
+            (await proxy.getQueuedRequests()).isEmpty);
 
         final dropped = (await proxy.getDroppedRequests()).single;
         expect(dropped.dropReason, equals('quarantine_too_large'));
@@ -442,8 +448,10 @@ void main() {
 
         await enqueueOffline(port, 'key-2');
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getDroppedRequests()).isNotEmpty);
+        // 追い出しは履歴へ記録してから隔離から消すため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getDroppedRequests()).isNotEmpty &&
+            (await proxy.getQuarantinedRequests()).length == 1);
 
         final dropped = (await proxy.getDroppedRequests()).single;
         expect(dropped.dropReason, equals('quarantine_limit'));
@@ -471,8 +479,11 @@ void main() {
         );
         await enqueueOffline(port, 'key-1');
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getQuarantinedRequests()).isNotEmpty);
+        // 隔離へ書き込んでからキューから消す。キューに残っている間に同じキーを
+        // 送ると二重に積まれず、そのまま消えるため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getQuarantinedRequests()).isNotEmpty &&
+            (await proxy.getQueuedRequests()).isEmpty);
 
         // 同じキーの要求が別に届き、最初の転送の 5xx の後、再送で受け付けられる
         upstream!
@@ -500,8 +511,11 @@ void main() {
         );
         await enqueueOffline(port, 'key-1');
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getQuarantinedRequests()).isNotEmpty);
+        // 隔離へ書き込んでからキューから消す。キューに残っている間に同じキーを
+        // 送ると二重に積まれず、そのまま消えるため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getQuarantinedRequests()).isNotEmpty &&
+            (await proxy.getQueuedRequests()).isEmpty);
 
         await enqueueOffline(port, 'key-1');
 
@@ -666,8 +680,10 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 1100));
         await enqueueOffline(port, 'key-2');
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getDroppedRequests()).isNotEmpty);
+        // 追い出しは履歴へ記録してから隔離から消すため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getDroppedRequests()).isNotEmpty &&
+            (await proxy.getQuarantinedRequests()).length == 1);
 
         final dropped = (await proxy.getDroppedRequests()).single;
         expect(dropped.dropReason, equals('quarantine_expired'));
@@ -693,8 +709,11 @@ void main() {
         );
         await enqueueOffline(port, 'key-1');
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getDroppedRequests()).isNotEmpty);
+        // 履歴へ記録してからキューから消す。キューに残っている間に同じキーを
+        // 送ると二重に積まれず、そのまま消えるため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getDroppedRequests()).isNotEmpty &&
+            (await proxy.getQueuedRequests()).isEmpty);
 
         await enqueueOffline(port, 'key-1');
 

@@ -1137,8 +1137,10 @@ void main() {
 
         // 再送を起こす。通常の項目は 400 で履歴へ移り、そのとき保持上限の処理が走る
         await _triggerQueueDrain();
-        await _waitUntil(
-            () async => (await proxy.getDroppedRequests()).length >= 2);
+        // 履歴へ記録してからキューから消すため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getDroppedRequests()).length >= 2 &&
+            (await proxy.getQueuedRequests()).length == 1);
 
         // 残骸は再送の対象にならず、通常の項目だけが送られたこと
         expect(upstream!.receivedBodies, ['encrypted']);
