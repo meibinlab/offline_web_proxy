@@ -1179,6 +1179,10 @@ void main() {
 
         // キューから取り除かれるのを待つ
         await waitForEmptyQueue();
+        // requestDropped はキューから消した後に発行するため、届くまで待つ
+        final droppedNotified =
+            await _waitUntil(() async => droppedEvents.isNotEmpty);
+        expect(droppedNotified, isTrue, reason: 'ドロップの通知が時間内に届きませんでした');
         await pumpEventQueue();
 
         // 前提: 上流へ送り、4xx で拒否されている

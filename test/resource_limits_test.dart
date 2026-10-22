@@ -836,8 +836,11 @@ void main() {
           ProxyConfig(origin: upstream.origin, queueMaxCount: 1),
         );
         await _emitConnectivity(['wifi']);
-        await _waitUntil(
-            () async => (await proxy.getQuarantinedRequests()).isNotEmpty);
+        // 隔離へ書き込んでからキューから消す。キューに残っている間は件数の
+        // 上限で次の投入を断るため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getQuarantinedRequests()).isNotEmpty &&
+            (await proxy.getQueuedRequests()).isEmpty);
 
         await _emitConnectivity(['none']);
         final queued =

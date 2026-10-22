@@ -812,8 +812,11 @@ void main() {
           upstreamStatus = HttpStatus.badRequest;
 
           // 消化タイマーは 5 秒間隔のため、負荷時でも間に合う猶予を取る
+          // 履歴へ記録してからキューから消すため、両方を待つ
           await _waitUntil(
-            () async => (await proxy.getDroppedRequests()).isNotEmpty,
+            () async =>
+                (await proxy.getDroppedRequests()).isNotEmpty &&
+                (await proxy.getQueuedRequests()).isEmpty,
             timeout: const Duration(seconds: 30),
           );
           expect(await proxy.getQueuedRequests(), isEmpty);

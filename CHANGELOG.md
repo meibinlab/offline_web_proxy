@@ -1,3 +1,9 @@
+## Unreleased
+
+### テスト
+
+- 隔離・ドロップ履歴やキューが空になることの一方だけを待ち、直後にキューが空であることや状態の照会・ドロップの通知などを確かめていたテストで、キューからの削除や隔離からの追い出しより先に判定して失敗することがあったため、両方の条件がそろうまで待つようにしました（`test/quarantine_response_preview_test.dart`、`test/request_status_test.dart`、`test/resource_limits_test.dart`、`test/retention_limits_test.dart`、`test/encrypted_storage_migration_test.dart`、`test/integration_test.dart`）
+
 ## 0.26.0
 
 ### 破壊的変更の注意

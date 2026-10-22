@@ -380,8 +380,10 @@ void main() {
         );
         await postRecords(port, 3);
 
-        await _waitUntil(
-            () async => (await proxy.getQuarantinedRequests()).length == 3);
+        // 隔離へ書き込んでからキューから消すため、両方を待つ
+        await _waitUntil(() async =>
+            (await proxy.getQuarantinedRequests()).length == 3 &&
+            (await proxy.getQueuedRequests()).isEmpty);
         final quarantined = await proxy.getQuarantinedRequests();
         expect(quarantined, hasLength(3));
         expect(quarantined.every((r) => r.responseBodyPreview == 'y' * 10),
