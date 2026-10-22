@@ -8,6 +8,8 @@ import 'package:integration_test/integration_test.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import 'support/access_token.dart';
+
 /// 上流サーバが返すページ本文の目印。
 const String _upstreamMarker = 'hello-from-upstream';
 
@@ -164,6 +166,8 @@ class _WebViewHarness {
   Future<void> loadAndWait(Uri uri) async {
     final pageFinished = Completer<void>();
     _pageFinished = pageFinished;
+    // 利用側の手順どおり、読み込む前に秘密値の Cookie を置く
+    await putAccessTokenCookieFor(uri);
     await controller.loadRequest(uri);
     await pageFinished.future.timeout(const Duration(seconds: 30));
   }
@@ -258,9 +262,9 @@ class _WebViewHarness {
 Future<Map<String, dynamic>> _readStatus(int port) async {
   final client = HttpClient();
   try {
-    final request = await client.getUrl(
-      Uri.parse('http://127.0.0.1:$port/__offline_web_proxy/status'),
-    );
+    final uri = Uri.parse('http://127.0.0.1:$port/__offline_web_proxy/status');
+    final request = await client.getUrl(uri);
+    accessTokenHeadersFor(uri).forEach(request.headers.set);
     final response = await request.close();
     final body = await response.transform(utf8.decoder).join();
     return jsonDecode(body) as Map<String, dynamic>;
@@ -278,6 +282,7 @@ Future<int> _requestThroughProxy(Uri uri, {String method = 'GET'}) async {
   final client = HttpClient();
   try {
     final request = await client.openUrl(method, uri);
+    accessTokenHeadersFor(uri).forEach(request.headers.set);
     if (method != 'GET') {
       request.write('{"total":1000}');
     }
@@ -372,7 +377,7 @@ void main() {
       'reloads the offline fallback page once the upstream comes back',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await proxy.start(
@@ -407,7 +412,7 @@ void main() {
       'does not count successful recoveries toward the reload limit',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await proxy.start(
@@ -445,7 +450,7 @@ void main() {
       'keeps the offline fallback page while the status cannot be read',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await proxy.start(
@@ -480,7 +485,7 @@ void main() {
       'shows the gateway timeout page as html with a retry button',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await proxy.start(
@@ -543,7 +548,7 @@ void main() {
       'continues from a gateway timeout page reached by an automatic reload',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await startForContinuation(proxy, upstream);
@@ -580,7 +585,7 @@ void main() {
       'continues even when the response takes longer than the marker window',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           // 応答待ちを目印の判定時間（10 秒）より長くし、判定が遷移を始めた時刻
@@ -620,7 +625,7 @@ void main() {
       'stops after three automatic reloads and does not count a manual retry',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await startForContinuation(proxy, upstream);
@@ -666,7 +671,7 @@ void main() {
       'does not continue when continuation is disabled',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await startForContinuation(
@@ -702,7 +707,7 @@ void main() {
       'reloads the gateway timeout page after the upstream turns unreachable',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await proxy.start(
@@ -747,7 +752,7 @@ void main() {
       'reloads after the queue wait timeout when the queue stays non-empty',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await proxy.start(
@@ -791,7 +796,7 @@ void main() {
       'does not reload when the status cannot be read while waiting',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await proxy.start(
@@ -841,7 +846,7 @@ void main() {
       'recovers a fallback page whose url contains brackets and a tilde',
       (tester) async {
         final upstream = await _ControllableUpstream.start();
-        final proxy = OfflineWebProxy();
+        final proxy = trackAccessToken(OfflineWebProxy());
 
         try {
           final port = await proxy.start(

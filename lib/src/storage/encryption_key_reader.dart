@@ -16,8 +16,10 @@ enum EncryptionKeyState {
   /// 鍵が保存されていない状態です（読み取りの結果が `null`）。
   missing,
 
-  /// 保存された値が鍵の形式ではない状態です（空文字、Base64 として読めない、
-  /// または 32 バイトでない）。
+  /// 保存された値が鍵の形式ではない状態です（ASCII の空白を除くと空文字、
+  /// Base64 として読めない、または 32 バイトでない）。
+  ///
+  /// このときの [EncryptionKeyRead.error] は鍵の文字列を含みません。
   invalid,
 
   /// 鍵を読めた状態です。
@@ -49,6 +51,10 @@ class EncryptionKeyRead {
 class EncryptionKeyReader {
   /// 暗号化鍵のバイト数（AES-256）です。
   static const int keyLength = 32;
+
+  /// 鍵の文字列から取り除く ASCII の空白（空白、タブ、改行、復帰、改ページ、
+  /// 垂直タブ）です。
+  static final RegExp _asciiWhitespace = RegExp('[ \t\n\r\f\v]');
 
   /// 鍵の読み書きに使う窓口です。
   final EncryptionKeyStorage storage;
@@ -115,6 +121,10 @@ class EncryptionKeyReader {
 
   /// 鍵を 1 回だけ読み取り、状態を区分します。
   ///
+  /// 保存された値は、ASCII の空白（末尾の改行を含む）を除いてから Base64 と
+  /// して読みます。形式が不正な場合のエラーには、鍵の文字列や位置を含め
+  /// ません。
+  ///
   /// Returns: 読み取り結果。
   Future<EncryptionKeyRead> readOnce() async {
     if (await _isProtectedDataUnavailable()) {
@@ -146,9 +156,16 @@ class EncryptionKeyReader {
 
     final List<int> decodedKey;
     try {
-      decodedKey = base64Decode(storedKey);
-    } on FormatException catch (error) {
-      return EncryptionKeyRead(EncryptionKeyState.invalid, error: error);
+      // 手作業での登録や他の実装との共有で、末尾の改行や空白が混ざることが
+      // あるため、ASCII の空白を除いてから読む
+      decodedKey = base64Decode(storedKey.replaceAll(_asciiWhitespace, ''));
+    } on FormatException {
+      // base64Decode の例外は source と位置を持ち、toString() に鍵の文字列が
+      // 出るため、位置も値も持たない例外に置き換える
+      return EncryptionKeyRead(
+        EncryptionKeyState.invalid,
+        error: const FormatException('Invalid encryption key encoding'),
+      );
     }
 
     if (decodedKey.length != keyLength) {

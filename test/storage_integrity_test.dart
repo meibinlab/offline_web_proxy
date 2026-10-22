@@ -380,6 +380,48 @@ void main() {
       expect(keyStorage.values, isEmpty);
     });
 
+    /// 末尾に改行や空白の付いた鍵も、空白を除いて一致する鍵として読み、記録を使えること
+    test('reads a key with trailing whitespace as present', () async {
+      await writeEncryptedBox(_queueBoxName, _key(1), {
+        '0001757000000000000-000000': {
+          ..._queueEntry(1),
+          'nextRetryAt': DateTime(2099).toIso8601String(),
+        },
+      });
+      await Hive.close();
+      final storedValue = '${base64Encode(_key(1))} \r\n';
+      keyStorage.values[_keyName] = storedValue;
+
+      await proxy.start(config: const ProxyConfig(origin: _origin));
+
+      expect(proxy.isRunning, isTrue);
+      final queued = await proxy.getQueuedRequests();
+      expect(queued.map((request) => request.url), ['$_origin/api/sales/1']);
+      // 鍵を作り直さないこと
+      expect(keyStorage.values[_keyName], storedValue);
+    });
+
+    /// 形式不正の鍵で起動失敗にするとき、例外とその文字列表現に鍵の文字列を含めないこと
+    test('does not expose an invalid key in the exception', () async {
+      await writeEncryptedBox(_queueBoxName, _key(1), {
+        '0001757000000000000-000000': _queueEntry(1),
+      });
+      await Hive.close();
+      const storedValue = 'SECRET-KEY-MATERIAL*not-base64';
+      keyStorage.values[_keyName] = storedValue;
+
+      final error = await startFailure();
+
+      expect(error.failure, StorageIntegrityFailure.keyInvalid);
+      expect(error.toString(), isNot(contains('SECRET-KEY-MATERIAL')));
+      expect(error.error, isA<FormatException>());
+      expect(error.error.toString(), isNot(contains('SECRET-KEY-MATERIAL')));
+      expect(error.cause, isA<FormatException>());
+      expect(error.cause.toString(), isNot(contains('SECRET-KEY-MATERIAL')));
+      // 鍵を作り直さないこと
+      expect(keyStorage.values[_keyName], storedValue);
+    });
+
     /// 先頭の記録が書きかけの業務データの Box でも、鍵が無ければ作り直さないこと
     test('does not regenerate the key for a partially written business box',
         () async {

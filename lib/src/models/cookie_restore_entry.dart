@@ -62,6 +62,11 @@ class CookieRestoreEntry {
 
   /// `Set-Cookie` ヘッダ文字列から Cookie 復元エントリを生成します。
   ///
+  /// アプリが渡す値として扱い、上流の応答に適用する受け入れ規則
+  /// （`Domain` や `Secure` と [requestUrl] の照合など）は適用しません。
+  /// `Expires`、`Max-Age`、`Path` の解釈と有効期限の上限（400 日）は、
+  /// 上流の応答と同じです（`CookieRecord.fromSetCookieHeader`）。
+  ///
   /// [setCookieHeader] は `Set-Cookie` の 1 行分です。
   /// [requestUrl] は Cookie を受信した絶対 URL です。
   /// [receivedAt] は Cookie の受信日時です。省略時は現在時刻が使用されます。

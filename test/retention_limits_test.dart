@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:offline_web_proxy/src/storage/encryption_key_storage.dart';
+
+import 'support/access_token_http.dart';
 
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = {
@@ -330,13 +333,14 @@ void main() {
     Duration? deferredMigrationDelay,
     Future<void> Function(ProxyStorageBox kind)? beforeLegacyBoxCleared,
   }) {
-    return OfflineWebProxy.withStorageTestHooks(ProxyStorageTestHooks(
+    return trackAccessToken(
+        OfflineWebProxy.withStorageTestHooks(ProxyStorageTestHooks(
       keyStorage: keyStorage,
       keyRereadInterval: Duration.zero,
       storageLockTimeout: storageLockTimeout,
       deferredMigrationDelay: deferredMigrationDelay,
       beforeLegacyBoxCleared: beforeLegacyBoxCleared,
-    ));
+    )));
   }
 
   setUp(() async {
@@ -411,7 +415,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 
@@ -1004,9 +1008,17 @@ void main() {
         expect(await proxy.getQueuedRequests(), hasLength(1));
         expect(droppedEvents, isEmpty);
 
-        // 上流が 4xx を返し、キューの項目が隔離に加わるのを待つ
+        // 上流が 4xx を返し、キューの項目が隔離に加わるのを待つ。隔離への
+        // 書き込みとキューからの削除の後に追い出しが続くため、キューが空に
+        // なっただけでは足りず、隔離が期待どおりになるまで待つ
         await waitForEmptyQueue();
-        await pumpEventQueue();
+        final evictionDone = await _waitUntil(() async {
+          final urls =
+              (await proxy.getQuarantinedRequests()).map((r) => r.url).toList();
+          return listEquals(urls, ['$origin/api/newer', '$origin/api/new']) &&
+              droppedEvents.length == 1;
+        });
+        expect(evictionDone, isTrue, reason: '隔離の追い出しが時間内に終わりませんでした');
 
         final quarantined = await proxy.getQuarantinedRequests();
         // 追加した隔離は残り、既存の最も古いものだけが隔離から消える
@@ -1090,8 +1102,16 @@ void main() {
         expect(await proxy.getQuarantinedRequests(), hasLength(2));
         expect(droppedEvents, isEmpty);
 
+        // 隔離への書き込みとキューからの削除の後に追い出しが続くため、
+        // 隔離が期待どおりになるまで待つ
         await waitForEmptyQueue();
-        await pumpEventQueue();
+        final evictionDone = await _waitUntil(() async {
+          final urls =
+              (await proxy.getQuarantinedRequests()).map((r) => r.url).toList();
+          return listEquals(urls, ['$origin/api/new']) &&
+              droppedEvents.length == 2;
+        });
+        expect(evictionDone, isTrue, reason: '隔離の追い出しが時間内に終わりませんでした');
 
         // 上限ちょうどの 1 件は大きすぎる扱いにせず、隔離に入れる
         final quarantined = await proxy.getQuarantinedRequests();
@@ -1697,8 +1717,3 @@ void main() {
     }, timeout: const Timeout(Duration(seconds: 90)));
   });
 }
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-///
-/// [HttpOverrides] の既定の実装は dart:io の HttpClient を作るため、何も上書きしない。
-class _RealHttpOverrides extends HttpOverrides {}

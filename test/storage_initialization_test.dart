@@ -367,11 +367,11 @@ void main() {
         throwsA(isA<ProxyStartException>()),
       );
       // 応答キャッシュは段階 2 では開かないため、段階 2 の Box を閉じる
-      await Hive.box('proxy_web_storage').close();
+      await Hive.box('proxy_idempotency').close();
 
       await proxy.start(config: const ProxyConfig(origin: _origin));
 
-      expect(Hive.isBoxOpen('proxy_web_storage'), isTrue);
+      expect(Hive.isBoxOpen('proxy_idempotency'), isTrue);
     });
 
     /// 段階 2 の失敗時は、この呼び出しで開いた Box だけを閉じ、他の処理が
@@ -392,6 +392,8 @@ void main() {
             config: const ProxyConfig(
               origin: _origin,
               encryptResponseCache: false,
+              // べき等性キーの Box より先に開く Box を用意する
+              enableWebStorageInheritance: true,
             ),
           );
         } catch (error) {
@@ -410,12 +412,13 @@ void main() {
       expect(uncaughtErrors, everyElement(isA<FileSystemException>()));
       // 閉じたことを確かめる Box を、この呼び出しが実際に開いていたこと
       expect(
-        File('$hiveTestDirectory${Platform.pathSeparator}proxy_web_storage.hive')
+        File('$hiveTestDirectory${Platform.pathSeparator}'
+                'proxy_web_storage_secure.hive')
             .existsSync(),
         isTrue,
       );
       // 失敗より前に段階 2 が開いた Box は閉じていること
-      expect(Hive.isBoxOpen('proxy_web_storage'), isFalse);
+      expect(Hive.isBoxOpen('proxy_web_storage_secure'), isFalse);
       // テストが先に開いていた Box は閉じていないこと
       expect(Hive.isBoxOpen('proxy_cache_index'), isTrue);
       // 段階 2 が新たに開いた本文の LazyBox は閉じていること

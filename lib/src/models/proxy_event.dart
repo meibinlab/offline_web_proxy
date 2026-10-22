@@ -43,6 +43,11 @@ enum ProxyEventType {
   cacheHit,
 
   /// キャッシュミス
+  ///
+  /// 現在は、利用者ごとに保存した応答の持ち主が現在の持ち主と一致しない
+  /// （持ち主がまだ無い間の印を含めて等値で比べる）ため、キャッシュから
+  /// 返さなかった場合だけ発行します。`data['reason']` は `ownerMismatch`
+  /// です。記録が無いだけのミスでは発行しません。
   cacheMiss,
 
   /// Staleキャッシュ使用
@@ -53,7 +58,11 @@ enum ProxyEventType {
   /// `data['reason']` に理由が入ります。`forceCachePaths` の安全側の除外
   /// （`set-cookie`・`vary`・`authorization`）と、本文だけで
   /// `ProxyConfig.cacheMaxSize` を超えた場合（`cacheMaxSize`）と、起動の後に
-  /// 応答キャッシュを開いている間（`cacheOpening`）です。
+  /// 応答キャッシュを開いている間（`cacheOpening`）と、
+  /// `ProxyConfig.cacheUserScopedResponses` が `false` で利用者ごとの応答を
+  /// 保存しなかった場合（`userScoped`）と、取得している間にログインが
+  /// 始まったか持ち主が変わったため、利用者ごとの応答を保存しなかった場合
+  /// （`ownerChanged`）です。
   cacheSkipped,
 
   /// リクエストキューイング

@@ -9,12 +9,18 @@
 /// * `*`: `/` を含まない 1 セグメント内の任意文字列に一致します
 /// * `**`: `/` を含む任意文字列に一致します
 /// * メタ文字を含まない場合は完全一致です
+/// * 末尾の `/*` と `/**` は、その手前のパスそのもの（`/js/*` に対する
+///   `/js`）にも一致します。末尾の `/` は取り除いて比較するため、`/js/` は
+///   `/js` と同じものとして扱います
 ///
 /// ## 照合規則
 ///
 /// * 照合対象はパスだけです。クエリ文字列とフラグメントは含みません
 /// * 大文字と小文字は区別します
-/// * パターンとパスの双方について、先頭に `/` が無い場合は補って比較します
+/// * パターンとパスの双方を [normalizePath] で同じ形にそろえてから
+///   比較します。同じ資源を指す書き方の違い（`;jsessionid=...` の付加、
+///   `%6C` のような不要な符号化、`//` の重複、末尾の `/`）で照合を
+///   すり抜けないようにするためです
 ///
 /// ## 使用例
 ///
@@ -24,6 +30,8 @@
 /// PathPattern('/js/**').matches('/js/vendor/haori.js'); // true
 /// PathPattern('/js/*').matches('/js/vendor/haori.js');  // false
 /// PathPattern('/js/*').matches('/js/haori.js');         // true
+/// PathPattern('/login').matches('/login;jsessionid=1'); // true
+/// PathPattern('/login').matches('/%6Cogin/');           // true
 /// ```
 class PathPattern {
   /// 設定に記述されたままのパターン文字列です。
@@ -68,15 +76,95 @@ class PathPattern {
 
   /// パス文字列を照合用に正規化します。
   ///
-  /// [path] は正規化するパスです。
+  /// 次の順に整えます。
   ///
-  /// Returns: 先頭に `/` を持つパス。
+  /// 1. 前後の空白を除き、先頭に `/` が無ければ補う
+  /// 2. 各セグメントの `;` 以降（パスパラメータ）を取り除く
+  /// 3. 非予約文字（`A-Z a-z 0-9 - . _ ~`）を表す `%XX` だけを復号する。
+  ///    それ以外の `%XX` は 16 進を大文字にそろえ、符号化したまま残す
+  ///    （`%2F` を `/` にすると、セグメントの区切りが変わるため）
+  /// 4. 空のセグメント（`//` の重複）を 1 つにまとめる
+  /// 5. 末尾の `/` を取り除く（ルート `/` を除く）
+  ///
+  /// [path] は正規化するパスです。クエリ文字列は含めないでください。
+  ///
+  /// Returns: 先頭に `/` を持ち、末尾に `/` を持たない（ルートを除く）パス。
   static String normalizePath(String path) {
     final trimmedPath = path.trim();
-    if (trimmedPath.isEmpty) {
-      return '/';
+    final segments = <String>[];
+    for (final rawSegment in trimmedPath.split('/')) {
+      final parameterIndex = rawSegment.indexOf(';');
+      final segment = _decodeUnreserved(
+        parameterIndex < 0
+            ? rawSegment
+            : rawSegment.substring(0, parameterIndex),
+      );
+      if (segment.isNotEmpty) {
+        segments.add(segment);
+      }
     }
-    return trimmedPath.startsWith('/') ? trimmedPath : '/$trimmedPath';
+    return '/${segments.join('/')}';
+  }
+
+  /// 非予約文字を表す `%XX` だけを復号します。
+  ///
+  /// 16 進数 2 桁が続かない `%` は、そのまま残します。
+  ///
+  /// [segment] 1 セグメント分の文字列。
+  ///
+  /// Returns: 非予約文字を復号し、残した `%XX` の 16 進を大文字にした文字列。
+  static String _decodeUnreserved(String segment) {
+    if (!segment.contains('%')) {
+      return segment;
+    }
+
+    final buffer = StringBuffer();
+    var index = 0;
+    while (index < segment.length) {
+      final character = segment[index];
+      if (character == '%' && index + 2 < segment.length) {
+        final hex = segment.substring(index + 1, index + 3);
+        final value = int.tryParse(hex, radix: 16);
+        if (value != null && _isHexDigits(hex)) {
+          if (_isUnreserved(value)) {
+            buffer.writeCharCode(value);
+          } else {
+            buffer.write('%${hex.toUpperCase()}');
+          }
+          index += 3;
+          continue;
+        }
+      }
+      buffer.write(character);
+      index++;
+    }
+    return buffer.toString();
+  }
+
+  /// 文字列が 16 進数字だけでできているかどうかを返します。
+  ///
+  /// `int.tryParse` は符号（`+` / `-`）も受け付けるため、別に確かめます。
+  ///
+  /// [value] 判定する文字列。
+  ///
+  /// Returns: 全ての文字が `0-9 A-F a-f` の場合は `true`。
+  static bool _isHexDigits(String value) {
+    return RegExp(r'^[0-9A-Fa-f]+$').hasMatch(value);
+  }
+
+  /// RFC 3986 の非予約文字かどうかを返します。
+  ///
+  /// [codeUnit] 判定する文字コード。
+  ///
+  /// Returns: `A-Z a-z 0-9 - . _ ~` のいずれかの場合は `true`。
+  static bool _isUnreserved(int codeUnit) {
+    return (codeUnit >= 0x41 && codeUnit <= 0x5A) ||
+        (codeUnit >= 0x61 && codeUnit <= 0x7A) ||
+        (codeUnit >= 0x30 && codeUnit <= 0x39) ||
+        codeUnit == 0x2D ||
+        codeUnit == 0x2E ||
+        codeUnit == 0x5F ||
+        codeUnit == 0x7E;
   }
 
   /// glob パターンを正規表現の断片へ変換します。
@@ -85,6 +173,18 @@ class PathPattern {
   ///
   /// Returns: 正規表現のソース文字列。
   static String _toRegExpSource(String pattern) {
+    // 末尾の `/` を取り除いて比較するため、`/js/` は `/js` になる。
+    // 0.25.0 まで `/js/*` と `/js/**` が `/js/` に一致していた挙動を保つよう、
+    // 末尾のワイルドカードのセグメントは省略可能にする
+    if (pattern.endsWith('/**')) {
+      return '${_toRegExpSource(pattern.substring(0, pattern.length - 3))}'
+          '(?:/.*)?';
+    }
+    if (pattern.endsWith('/*') && pattern != '/*') {
+      return '${_toRegExpSource(pattern.substring(0, pattern.length - 2))}'
+          '(?:/[^/]*)?';
+    }
+
     final buffer = StringBuffer();
     var index = 0;
 
@@ -113,6 +213,7 @@ class PathPattern {
   /// パスがこのパターンに一致するかどうかを返します。
   ///
   /// [path] は照合するパスです。クエリ文字列は含めないでください。
+  /// 照合の前に [normalizePath] で正規化します。
   ///
   /// Returns: 一致する場合は `true`。
   bool matches(String path) {

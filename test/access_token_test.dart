@@ -281,16 +281,21 @@ void main() {
   ///
   /// 引数はいずれも同じ名前の [ProxyConfig] の項目へ渡します。
   /// [healthCheckPath] を省略した場合は既定のパスを使います。
+  /// 応答ヘッダの扱いを CORS ヘッダ込みで確かめるため、CORS は既定と
+  /// 異なり全 origin（`'*'`）へ付ける設定で起動します。
   ///
   /// Returns: proxy のポート番号。
   Future<int> startProxy({
     bool requireAccessToken = true,
     bool addCorsHeaders = true,
+    List<String> corsAllowedOrigins = const <String>['*'],
     bool enableAdminApi = false,
     bool enableWebStorageInheritance = false,
     List<String> mirroredOrigins = const <String>[],
     String healthCheckPath = '/__offline_web_proxy/health',
     int port = 0,
+    // 秘密値以外の Cookie が上流へ届くことを確かめるため、既定で許可する
+    Set<String> forwardWebViewCookieNames = const <String>{'app'},
   }) async {
     upstream ??= _MockUpstream(
       await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
@@ -300,11 +305,13 @@ void main() {
         origin: upstream!.origin,
         requireAccessToken: requireAccessToken,
         addCorsHeaders: addCorsHeaders,
+        corsAllowedOrigins: corsAllowedOrigins,
         enableAdminApi: enableAdminApi,
         enableWebStorageInheritance: enableWebStorageInheritance,
         mirroredOrigins: mirroredOrigins,
         healthCheckPath: healthCheckPath,
         port: port,
+        forwardWebViewCookieNames: forwardWebViewCookieNames,
       ),
     );
   }
@@ -401,8 +408,8 @@ void main() {
   });
 
   group('秘密値による到達の制限（doc/specs.ja.md 【2】到達の制限）', () {
-    /// 既定では秘密値の無い要求も従来どおり転送すること
-    test('forwards a request without the token by default', () async {
+    /// 既定で秘密値の無い要求を拒否し、稼働確認だけは通すこと
+    test('refuses a request without the token by default', () async {
       await withRealHttpClient(() async {
         upstream = _MockUpstream(
           await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
@@ -410,6 +417,30 @@ void main() {
         final port = await proxy.start(
           config: ProxyConfig(origin: upstream!.origin),
         );
+
+        final page =
+            await _performRequest(Uri.parse('http://127.0.0.1:$port/page'));
+        final health = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/__offline_web_proxy/health'),
+        );
+        final withToken = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/page'),
+          headers: tokenCookie(),
+        );
+
+        expect(page.statusCode, equals(HttpStatus.forbidden));
+        expect(page.headers.value('cache-control'), equals('no-store'));
+        expect(health.statusCode, equals(HttpStatus.noContent));
+        expect(await proxy.probe(), isTrue);
+        expect(withToken.statusCode, equals(HttpStatus.ok));
+        expect(upstream!.receivedPaths, equals(['/page']));
+      });
+    });
+
+    /// 明示的に無効にすると秘密値の無い要求も転送すること
+    test('forwards a request without the token when disabled', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(requireAccessToken: false);
 
         final response =
             await _performRequest(Uri.parse('http://127.0.0.1:$port/page'));
@@ -793,20 +824,241 @@ void main() {
   });
 
   group('CORS ヘッダ（doc/specs.ja.md 【2】CORS ヘッダ）', () {
-    /// 既定では転送経路の応答へ CORS ヘッダを付けること
-    test('adds CORS headers by default', () async {
+    /// 既定では転送経路の応答へ CORS ヘッダを付けないこと
+    test('does not add CORS headers by default', () async {
       await withRealHttpClient(() async {
-        final port = await startProxy(requireAccessToken: false);
+        upstream = _MockUpstream(
+          await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+        );
+        final port = await proxy.start(
+          config: ProxyConfig(origin: upstream!.origin),
+        );
 
         final response = await _performRequest(
           Uri.parse('http://127.0.0.1:$port/page'),
           headers: {
+            ...tokenCookie(),
             'origin': ['https://evil.example'],
           },
         );
 
+        expect(response.statusCode, equals(HttpStatus.ok));
+        expect(response.headers.value('access-control-allow-origin'), isNull);
+        expect(response.headers.value('access-control-allow-methods'), isNull);
+        expect(response.headers.value('access-control-allow-headers'), isNull);
+        expect(response.headers.value('vary'), isNull);
+      });
+    });
+
+    /// 許可した origin にだけ、その origin と Vary: Origin を返すこと
+    test('allows only the listed origins', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(
+          requireAccessToken: false,
+          corsAllowedOrigins: const [
+            'https://App.Example.com',
+            'http://localhost:8080',
+          ],
+        );
+        final uri = Uri.parse('http://127.0.0.1:$port/page');
+
+        final allowed = await _performRequest(uri, headers: {
+          'origin': ['https://app.example.com'],
+        });
+        // 既定ポートの有無と大小文字の違いは同じ origin として扱うこと
+        final allowedWithDefaultPort = await _performRequest(uri, headers: {
+          'origin': ['https://APP.example.com:443'],
+        });
+        final otherPort = await _performRequest(uri, headers: {
+          'origin': ['http://localhost:8081'],
+        });
+        final other = await _performRequest(uri, headers: {
+          'origin': ['https://evil.example'],
+        });
+        final opaque = await _performRequest(uri, headers: {
+          'origin': ['null'],
+        });
+        final noOrigin = await _performRequest(uri);
+
+        expect(allowed.statusCode, equals(HttpStatus.ok));
+        expect(allowed.headers.value('access-control-allow-origin'),
+            equals('https://app.example.com'));
         expect(
-            response.headers.value('access-control-allow-origin'), equals('*'));
+            allowed.headers.value('access-control-allow-methods'), isNotNull);
+        expect(
+            allowed.headers.value('access-control-allow-headers'), isNotNull);
+        expect(
+            allowed.headers.value('access-control-allow-credentials'), isNull);
+        expect(allowed.headers.value('vary'), equals('Origin'));
+        expect(
+          allowedWithDefaultPort.headers.value('access-control-allow-origin'),
+          equals('https://APP.example.com:443'),
+        );
+        for (final refused in [otherPort, other, opaque, noOrigin]) {
+          expect(refused.statusCode, equals(HttpStatus.ok));
+          expect(refused.headers.value('access-control-allow-origin'), isNull);
+          expect(refused.headers.value('access-control-allow-methods'), isNull);
+          // 許可 origin 向けの応答と取り違えないよう Vary は付けること
+          expect(refused.headers.value('vary'), equals('Origin'));
+        }
+      });
+    });
+
+    /// 上流の Vary を残したまま Origin を加えること
+    test('appends Origin to the upstream Vary', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(
+          requireAccessToken: false,
+          corsAllowedOrigins: const ['https://app.example.com'],
+        );
+        upstream!.routes['/encoded'] = (
+          statusCode: HttpStatus.ok,
+          contentType: 'text/plain; charset=utf-8',
+          body: 'encoded',
+          headers: const {'vary': 'Accept-Encoding'},
+        );
+        upstream!.routes['/origin'] = (
+          statusCode: HttpStatus.ok,
+          contentType: 'text/plain; charset=utf-8',
+          body: 'origin',
+          headers: const {'vary': 'origin'},
+        );
+
+        final encoded = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/encoded'),
+          headers: {
+            'origin': ['https://app.example.com'],
+          },
+        );
+        final origin = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/origin'),
+          headers: {
+            'origin': ['https://app.example.com'],
+          },
+        );
+
+        expect(
+            encoded.headers.value('vary'), equals('Accept-Encoding, Origin'));
+        expect(origin.headers.value('vary'), equals('origin'));
+      });
+    });
+
+    /// '*' を指定した場合だけ全 origin へ * を返すこと
+    test('answers * only when every origin is allowed', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(requireAccessToken: false);
+        final uri = Uri.parse('http://127.0.0.1:$port/page');
+
+        final withOrigin = await _performRequest(uri, headers: {
+          'origin': ['https://evil.example'],
+        });
+        final noOrigin = await _performRequest(uri);
+
+        for (final response in [withOrigin, noOrigin]) {
+          expect(response.headers.value('access-control-allow-origin'),
+              equals('*'));
+          expect(response.headers.value('access-control-allow-credentials'),
+              isNull);
+          expect(response.headers.value('vary'), isNull);
+        }
+      });
+    });
+
+    /// 内部エンドポイントには許可 origin でも CORS ヘッダを付けないこと
+    test('keeps internal endpoints closed to listed origins', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(
+          requireAccessToken: false,
+          corsAllowedOrigins: const ['https://app.example.com'],
+        );
+
+        final status = await _performRequest(
+          Uri.parse('http://127.0.0.1:$port/__offline_web_proxy/status'),
+          headers: {
+            'origin': ['https://app.example.com'],
+          },
+        );
+
+        expect(status.headers.value('access-control-allow-origin'), isNull);
+      });
+    });
+
+    /// 一覧が空のまま有効にすると起動を拒否すること
+    test('refuses to start with addCorsHeaders and no origins', () async {
+      await withRealHttpClient(() async {
+        await expectLater(
+          startProxy(corsAllowedOrigins: const <String>[]),
+          throwsA(isA<ProxyStartException>().having(
+            (error) => error.message,
+            'message',
+            contains('corsAllowedOrigins'),
+          )),
+        );
+        expect(proxy.isRunning, isFalse);
+      });
+    });
+
+    /// 形式の正しくない origin を指定すると、無効でも起動を拒否すること
+    for (final invalid in const <List<String>>[
+      ['https://app.example.com/path'],
+      ['https://app.example.com?x=1'],
+      ['https://user@app.example.com'],
+      ['ftp://app.example.com'],
+      ['app.example.com'],
+      [''],
+      ['*', 'https://app.example.com'],
+    ]) {
+      test('refuses to start with corsAllowedOrigins $invalid', () async {
+        await withRealHttpClient(() async {
+          for (final addCorsHeaders in [true, false]) {
+            await expectLater(
+              startProxy(
+                addCorsHeaders: addCorsHeaders,
+                corsAllowedOrigins: invalid,
+              ),
+              throwsA(isA<ProxyStartException>()),
+            );
+            expect(proxy.isRunning, isFalse);
+          }
+        });
+      });
+    }
+
+    /// 秘密値が必須の間も、秘密値付きの要求には許可 origin へ ACAO を返し、
+    /// 秘密値の無い要求（preflight を含む）の 403 には CORS ヘッダを付けないこと
+    test('applies CORS only to requests that pass the token check', () async {
+      await withRealHttpClient(() async {
+        final port = await startProxy(
+          corsAllowedOrigins: const ['https://app.example.com'],
+        );
+        final uri = Uri.parse('http://127.0.0.1:$port/page');
+        const origin = {
+          'origin': ['https://app.example.com'],
+        };
+
+        final withToken =
+            await _performRequest(uri, headers: {...tokenCookie(), ...origin});
+        final withoutToken = await _performRequest(uri, headers: origin);
+        final preflight = await _performRequest(
+          uri,
+          method: 'OPTIONS',
+          headers: {
+            ...origin,
+            'access-control-request-method': ['POST'],
+          },
+        );
+
+        expect(withToken.statusCode, equals(HttpStatus.ok));
+        expect(withToken.headers.value('access-control-allow-origin'),
+            equals('https://app.example.com'));
+        expect(withToken.headers.value('vary'), equals('Origin'));
+        for (final refused in [withoutToken, preflight]) {
+          expect(refused.statusCode, equals(HttpStatus.forbidden));
+          expect(refused.headers.value('access-control-allow-origin'), isNull);
+          expect(refused.headers.value('access-control-allow-methods'), isNull);
+          expect(refused.headers.value('vary'), isNull);
+        }
+        expect(upstream!.receivedPaths, equals(['/page']));
       });
     });
 

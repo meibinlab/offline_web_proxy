@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 
+import 'support/access_token_http.dart';
+
 const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
   'assets/static/app.css': ['assets/static/app.css'],
@@ -17,14 +19,6 @@ const Map<String, List<String>> _mockAssetManifest = {
     'packages/offline_web_proxy/assets/static/pkg/package.css',
   ],
 };
-
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
-}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -60,7 +54,7 @@ void main() {
           Directory.systemTemp.createTempSync('offline_web_proxy_test').path;
       FlutterSecureStorage.setMockInitialValues(<String, String>{});
       await Hive.close();
-      proxy = OfflineWebProxy();
+      proxy = trackAccessToken(OfflineWebProxy());
     });
 
     tearDown(() async {
@@ -337,7 +331,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// requestTimeout 超過時だけ cached fallback を返すこと
@@ -403,7 +397,7 @@ void main() {
           await subscription.cancel();
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// upstream 4xx/5xx では cached fallback へ切り替えないこと
@@ -488,7 +482,7 @@ void main() {
           await subscription.cancel();
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// キューされたリクエストが FIFO 順で再送されること
@@ -549,7 +543,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// ブラウザ由来ヘッダを含む POST がキュー再送で消化されること
@@ -587,6 +581,8 @@ void main() {
           final proxyPort = await proxy.start(
             config: ProxyConfig(
               origin: 'http://127.0.0.1:${upstreamServer.port}',
+              // WebView の Cookie を保存して再送することを確かめるため許可する
+              forwardWebViewCookieNames: const {'SESSION'},
             ),
           );
 
@@ -624,7 +620,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// キュー状態が再起動後も保持され再送を再開できること
@@ -673,7 +669,7 @@ void main() {
           );
 
           await proxy.stop();
-          proxy = OfflineWebProxy();
+          proxy = trackAccessToken(OfflineWebProxy());
 
           await proxy.start(
             config: ProxyConfig(origin: origin),
@@ -694,7 +690,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// バックオフに応じて retryCount と nextRetryAt が進むこと
@@ -772,7 +768,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
 
     /// 4xx 再送時にドロップ履歴へ記録されること
@@ -848,7 +844,7 @@ void main() {
         } finally {
           await upstreamServer.close(force: true);
         }
-      }, createHttpClient: _RealHttpOverrides().createHttpClient);
+      }, createHttpClient: AccessTokenHttpOverrides().createHttpClient);
     });
   });
 
@@ -988,6 +984,12 @@ Future<void> _sendRawProxyRequest(
       ..writeln('Host: 127.0.0.1:$proxyPort')
       ..writeln('Content-Type: text/plain; charset=utf-8')
       ..writeln('Content-Length: ${utf8.encode(body).length}');
+
+    // 生のソケットは HttpClient の補助を通らないため、秘密値を直接書く
+    final token = accessTokenFor(Uri.parse('http://127.0.0.1:$proxyPort/'));
+    if (token != null) {
+      buffer.writeln('${OfflineWebProxy.accessTokenHeaderName}: $token');
+    }
 
     headers.forEach((key, value) {
       buffer.writeln('$key: $value');

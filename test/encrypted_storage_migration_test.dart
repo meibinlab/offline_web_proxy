@@ -10,6 +10,8 @@ import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:offline_web_proxy/src/models/cookie_record.dart';
 import 'package:offline_web_proxy/src/storage/encryption_key_storage.dart';
 
+import 'support/access_token_http.dart';
+
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
@@ -220,15 +222,6 @@ class _FakeKeyStorage implements EncryptionKeyStorage {
   Future<bool?> isProtectedDataAvailable() async => null;
 }
 
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
-}
-
 /// 受信した本文を記録し、特定の本文への応答を止められる上流サーバのモック。
 class _MockUpstream {
   _MockUpstream(this._server) {
@@ -377,9 +370,9 @@ void main() {
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
     keyStorage = _FakeKeyStorage();
-    proxy = OfflineWebProxy.withStorageTestHooks(
+    proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
       ProxyStorageTestHooks(keyStorage: keyStorage),
-    );
+    ));
   });
 
   tearDown(() async {
@@ -401,12 +394,13 @@ void main() {
     Duration deferredMigrationDelay = _longMigrationDelay,
     Future<void> Function(ProxyStorageBox kind)? beforeLegacyBoxCleared,
   }) {
-    return OfflineWebProxy.withStorageTestHooks(ProxyStorageTestHooks(
+    return trackAccessToken(
+        OfflineWebProxy.withStorageTestHooks(ProxyStorageTestHooks(
       keyStorage: keyStorage,
       keyRereadInterval: Duration.zero,
       deferredMigrationDelay: deferredMigrationDelay,
       beforeLegacyBoxCleared: beforeLegacyBoxCleared,
-    ));
+    )));
   }
 
   /// 実通信を伴うテスト本体を、実 HttpClient が使えるゾーンで実行する。
@@ -417,7 +411,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 

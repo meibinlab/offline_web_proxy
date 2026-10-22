@@ -425,6 +425,22 @@ void main() {
   });
 
   group('ProxyConfig Edge Cases', () {
+    /// 到達の制限と CORS の既定値が安全側であること（0.26.0 で変更）
+    test('should default to requiring the token and no CORS headers', () {
+      const config = ProxyConfig(origin: 'https://example.com');
+
+      expect(config.requireAccessToken, isTrue);
+      expect(config.addCorsHeaders, isFalse);
+      expect(config.corsAllowedOrigins, isEmpty);
+    });
+
+    /// 利用者ごとの応答は既定で保存すること（0.26.0 で追加）
+    test('should default to caching user-scoped responses', () {
+      const config = ProxyConfig(origin: 'https://example.com');
+
+      expect(config.cacheUserScopedResponses, isTrue);
+    });
+
     /// ProxyConfig が極端な設定値を保持できること
     test('should handle extreme configuration values', () {
       final config = ProxyConfig(

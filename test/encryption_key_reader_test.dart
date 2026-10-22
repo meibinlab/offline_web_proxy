@@ -130,6 +130,51 @@ void main() {
 
       expect(result.state, EncryptionKeyState.present);
     });
+
+    /// 末尾の改行や途中の空白を含む鍵も、ASCII の空白を除いて読めること
+    test('reads a key surrounded by ASCII whitespace', () async {
+      final expected = base64Decode(_validKey);
+      final halfway = _validKey.length ~/ 2;
+      final values = <String>[
+        '$_validKey\n',
+        '$_validKey\r\n',
+        '  $_validKey \t',
+        '${_validKey.substring(0, halfway)}\r\n'
+            '${_validKey.substring(halfway)}',
+      ];
+
+      for (final value in values) {
+        final result = await _reader(_ScriptedKeyStorage([value])).readOnce();
+
+        expect(result.state, EncryptionKeyState.present,
+            reason: jsonEncode(value));
+        expect(result.key, equals(expected), reason: jsonEncode(value));
+      }
+    });
+
+    /// 空白だけの値は空文字と同じく形式不正とすること
+    test('treats a whitespace-only value as invalid', () async {
+      final result = await _reader(_ScriptedKeyStorage([' \r\n\t'])).readOnce();
+
+      expect(result.state, EncryptionKeyState.invalid);
+    });
+
+    /// 形式不正のエラーに鍵の文字列や位置を含めないこと
+    test('does not expose the stored value in the error', () async {
+      const storedValue = 'SECRET-KEY-MATERIAL*not-base64';
+
+      final result =
+          await _reader(_ScriptedKeyStorage([storedValue])).readOnce();
+
+      expect(result.state, EncryptionKeyState.invalid);
+      final error = result.error;
+      expect(error, isA<FormatException>());
+      error as FormatException;
+      expect(error.message, equals('Invalid encryption key encoding'));
+      expect(error.source, isNull);
+      expect(error.offset, isNull);
+      expect(error.toString(), isNot(contains('SECRET-KEY-MATERIAL')));
+    });
   });
 
   group('EncryptionKeyReader の読み直し', () {

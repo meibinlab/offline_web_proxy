@@ -9,6 +9,8 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:offline_web_proxy/offline_web_proxy.dart';
 import 'package:offline_web_proxy/src/pages/offline_recovery_page.dart';
 
+import 'support/access_token_http.dart';
+
 /// `AssetManifest.json` のモック内容。静的リソース一覧の初期化を安定させるために使用する。
 const Map<String, List<String>> _mockAssetManifest = {
   'assets/static/app.js': ['assets/static/app.js'],
@@ -26,15 +28,6 @@ const String _retryButton =
 
 /// 監視スクリプトの `<script>` 要素の開始タグ。
 const String _scriptOpenTag = '<script data-offline-web-proxy="recovery">';
-
-/// flutter_test の既定 HttpClient はモックのため、実通信用に dart:io の実装を使う。
-class _RealHttpOverrides extends HttpOverrides {
-  @override
-  // ignore: unnecessary_overrides
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context);
-  }
-}
 
 /// HTTP 応答の検証に必要な要素だけを保持する型。
 typedef _HttpResult = ({
@@ -144,10 +137,13 @@ Future<_HttpResult> _performRequest(
 Future<_HttpResult> _performRawNavigation(int port, String target) async {
   final socket = await Socket.connect(InternetAddress.loopbackIPv4, port);
   final lineBreak = String.fromCharCodes(const [13, 10]);
+  // 生のソケットは HttpClient の補助を通らないため、秘密値を直接書く
+  final token = accessTokenFor(Uri.parse('http://127.0.0.1:$port/'));
   try {
     socket.write(
       'GET $target HTTP/1.1$lineBreak'
       'Host: 127.0.0.1:$port$lineBreak'
+      '${OfflineWebProxy.accessTokenHeaderName}: $token$lineBreak'
       'Sec-Fetch-Mode: navigate$lineBreak'
       'Accept: text/html$lineBreak'
       'Connection: close$lineBreak$lineBreak',
@@ -220,7 +216,7 @@ void main() {
         .path;
     FlutterSecureStorage.setMockInitialValues(<String, String>{});
     await Hive.close();
-    proxy = OfflineWebProxy();
+    proxy = trackAccessToken(OfflineWebProxy());
   });
 
   tearDown(() async {
@@ -235,7 +231,7 @@ void main() {
   Future<void> withRealHttpClient(Future<void> Function() body) {
     return HttpOverrides.runZoned<Future<void>>(
       body,
-      createHttpClient: _RealHttpOverrides().createHttpClient,
+      createHttpClient: AccessTokenHttpOverrides().createHttpClient,
     );
   }
 
