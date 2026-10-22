@@ -70,7 +70,7 @@
       
 <section class="desc markdown">
   <p><a href="../../offline_web_proxy/OfflineWebProxy/accessToken.html">accessToken</a> を WebView から受け取る Cookie の名前。</p>
-<p><a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">ProxyConfig.requireAccessToken</a> を有効にした場合、利用側はネイティブの
+<p><a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">ProxyConfig.requireAccessToken</a> が有効な場合（既定）、利用側はネイティブの
 Cookie 管理（Android の <code>CookieManager</code> など）で、この名前の HttpOnly
 Cookie を proxy の origin（<a href="../../offline_web_proxy/OfflineWebProxy/baseUri.html">baseUri</a>）へ置きます。proxy が予約している
 名前のため、上流へは転送しません。</p>

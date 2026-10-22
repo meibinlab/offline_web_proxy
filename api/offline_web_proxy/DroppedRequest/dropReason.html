@@ -75,7 +75,9 @@
 1 件で隔離の合計バイト数の上限を超えた場合は <code>"quarantine_too_large"</code>、
 キューを一時停止させた要求を <code>skipPausedRequest()</code> で取り除いた場合は
 <code>"authentication_required"</code>、ログインし直した利用者が要求の持ち主と
-違うため送らなかった場合は <code>"owner_changed"</code>（状態コードは <code>0</code>）です。</p>
+違うため送らなかった場合は <code>"owner_changed"</code>（状態コードは <code>0</code>）、
+保存した送信先の origin が現在の設定と違うため送らなかった場合は
+<code>"origin_changed"</code>（状態コードは <code>0</code>）です。</p>
 </section>
 
       

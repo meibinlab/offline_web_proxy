@@ -64,8 +64,9 @@
       
 
 <span class="returntype"><a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
-<span class="name ">restoreCookies</span>(<wbr><ol class="parameter-list single-line"> <li><span class="parameter" id="restoreCookies-param-entries"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Iterable-class.html">Iterable</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/CookieRestoreEntry-class.html">CookieRestoreEntry</a></span>&gt;</span></span> <span class="parameter-name">entries</span></span></li>
-</ol>)
+<span class="name ">restoreCookies</span>(<wbr><ol class="parameter-list"> <li><span class="parameter" id="restoreCookies-param-entries"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Iterable-class.html">Iterable</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../../offline_web_proxy/CookieRestoreEntry-class.html">CookieRestoreEntry</a></span>&gt;</span></span> <span class="parameter-name">entries</span>, {</span></li>
+<li><span class="parameter" id="restoreCookies-param-queueOwnerId"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">queueOwnerId</span>, </span></li>
+</ol>})
 
       
 
@@ -73,8 +74,32 @@
     
 <section class="desc markdown">
   <p>外部から取得した Cookie を復元します。</p>
-<p><code>entries</code> は復元対象の Cookie 一覧です。
-start 前でも呼び出せ、復元済み Cookie は起動後の上流リクエストに利用されます。</p>
+<p>start 前でも呼び出せ、復元済み Cookie は起動後の上流リクエストに利用されます。</p>
+<p><a href="../../offline_web_proxy/ProxyConfig/queueOwnerResolver.html">ProxyConfig.queueOwnerResolver</a> を指定して起動している場合（停止した
+後を含む）は、Cookie を差し替えるとセッションの利用者が変わり得るため、
+ログインと同じく扱います（doc/specs.ja.md【5】の「送信待ちの持ち主」）。</p>
+<ul>
+<li>Cookie を保存し終えて持ち主を決めるまで、キューから新しく送りません。
+既に送り始めていた要求は、本文を送る直前に中断し、後で送り直します。</li>
+<li><code>queueOwnerId</code> を指定した場合は、その利用者を現在の持ち主にし、
+一時停止していたキューを再開します。</li>
+<li><code>queueOwnerId</code> を指定しない場合（<code>null</code> か空文字列）は、正体の分からない
+利用者に変わったものとして、キューを <a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.ownerUnresolved</a>
+で一時停止します。前の持ち主の要求は捨てません。</li>
+<li>Cookie の保存に失敗した場合も、一部が保存された可能性があるため、
+<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.ownerUnresolved</a> で一時停止します。</li>
+<li>並行したログインとの順番待ちを上限時間内に取得できない場合は、
+Cookie だけを保存し、持ち主を決めずに
+<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.ownerUnresolved</a> で一時停止します。</li>
+</ul>
+<p><a href="../../offline_web_proxy/ProxyConfig/queueOwnerResolver.html">ProxyConfig.queueOwnerResolver</a> を指定していない場合と、一度も起動して
+いない間（判定関数の有無が分からない間）は、0.25.0 と同じく Cookie を
+保存するだけで、<code>queueOwnerId</code> は使いません。持ち主を使う場合は、
+<a href="../../offline_web_proxy/OfflineWebProxy/start.html">start</a> の後に呼び出してください。</p>
+<p><code>entries</code> 復元対象の Cookie 一覧。
+<code>queueOwnerId</code> 復元するセッションの利用者の識別子。
+  <a href="../../offline_web_proxy/ProxyConfig/queueOwnerResolver.html">ProxyConfig.queueOwnerResolver</a> が返す値と同じ形にしてください。
+  そのままは保存せず、HMAC-SHA256 だけを保存します。</p>
 <p>Throws:</p>
 <ul>
 <li><a href="../../offline_web_proxy/CookieOperationException-class.html">CookieOperationException</a> Cookie の復元に失敗した場合。暗号化した
@@ -86,22 +111,81 @@ start 前でも呼び出せ、復元済み Cookie は起動後の上流リクエ
     
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
-  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; restoreCookies(Iterable&lt;CookieRestoreEntry&gt; entries) async {
+  <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; restoreCookies(
+  Iterable&lt;CookieRestoreEntry&gt; entries, {
+  String? queueOwnerId,
+}) async {
+  if (_config?.queueOwnerResolver == null) {
+    try {
+      await _ensureCookieStorageInitialized();
+      await _persistRestoredCookies(entries);
+    } catch (e) {
+      throw _restoreCookiesFailure(e);
+    }
+    return;
+  }
+
   try {
     await _ensureCookieStorageInitialized();
-
-    final restoredAt = DateTime.now();
-    final cookieRecords = entries
-        .map((entry) =&gt; entry.toCookieRecord(restoredAt: restoredAt))
-        .toList(growable: false);
-
-    await _persistCookieRecords(cookieRecords, now: restoredAt.toUtc());
   } catch (e) {
-    throw CookieOperationException(
-      &#39;restore&#39;,
-      &#39;Cookie の復元に失敗しました: $e&#39;,
-      e is Exception ? e : null,
-    );
+    throw _restoreCookiesFailure(e);
+  }
+
+  &#47;&#47; ログインと同じく、持ち主を決めるまでキューから送らない
+  _queueOwnerGateCount++;
+  _queueOwnerGateGeneration++;
+  try {
+    &#47;&#47; Cookie を保存してから持ち主を保存するまでに終了した場合に備える
+    await _persistQueueOwner();
+    try {
+      await _queueOwnerLock.synchronized(() async {
+        &#47;&#47; ロックの外で Cookie が書かれた場合は、持ち主を決めない
+        final cookieWriteGeneration = _outOfLockCookieWriteGeneration;
+        try {
+          await _persistRestoredCookies(entries);
+        } catch (e) {
+          &#47;&#47; 一部の Cookie だけが新しい利用者に変わった可能性がある
+          await _pauseQueueForUnresolvedOwner();
+          throw _restoreCookiesFailure(e);
+        }
+
+        final key = _storageEncryptionKey;
+        if (queueOwnerId == null || queueOwnerId.isEmpty || key == null) {
+          await _pauseQueueForUnresolvedOwner();
+          return;
+        }
+        await _storageTestHooks?.beforeQueueOwnerDecided?.call();
+        if (_outOfLockCookieWriteGeneration != cookieWriteGeneration) {
+          await _pauseQueueForUnresolvedOwner();
+          return;
+        }
+        _currentQueueOwner = _queueOwnerDigest(queueOwnerId, key);
+        if (!await _persistQueueOwner()) {
+          &#47;&#47; 保存できないと、起動し直した後に前の持ち主として送ってしまう
+          await _pauseQueueForUnresolvedOwner();
+          return;
+        }
+        if (_outOfLockCookieWriteGeneration != cookieWriteGeneration) {
+          await _pauseQueueForUnresolvedOwner();
+          return;
+        }
+        _resumeQueueAfterAuthentication();
+      }, timeout: _storageLockTimeout);
+    } on TimeoutException {
+      &#47;&#47; 他のログインと順序をそろえられないため、Cookie は保存するが、
+      &#47;&#47; 持ち主は決めずに一時停止する。ロックを持っている側が、この Cookie
+      &#47;&#47; と食い違う持ち主を決めないよう、書く前に知らせる
+      _outOfLockCookieWriteGeneration++;
+      try {
+        await _persistRestoredCookies(entries);
+      } catch (e) {
+        await _pauseQueueForUnresolvedOwner();
+        throw _restoreCookiesFailure(e);
+      }
+      await _pauseQueueForUnresolvedOwner();
+    }
+  } finally {
+    await _leaveQueueOwnerGate();
   }
 }</code></pre>
 </section>

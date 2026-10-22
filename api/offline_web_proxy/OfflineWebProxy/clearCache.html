@@ -73,7 +73,9 @@
 <section class="desc markdown">
   <p>全キャッシュを即座に削除します。</p>
 <p>起動の後に応答キャッシュを開いている間は、開き終わるのを待ってから
-削除します（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。</p>
+削除します（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。<a href="../../offline_web_proxy/ProxyConfig/encryptResponseCache.html">ProxyConfig.encryptResponseCache</a> が
+<code>false</code> の場合は、削除の後に Box を圧縮します（フラッシュ上の物理的な
+消去は保証しません）。</p>
 <p>Throws:</p>
 <ul>
 <li><a href="../../offline_web_proxy/CacheOperationException-class.html">CacheOperationException</a> キャッシュ削除に失敗した場合。</li>
@@ -89,6 +91,8 @@
     await _waitForCacheStore();
     await _cacheWriteLock.synchronized(() async {
       await _cacheStore?.clear();
+      &#47;&#47; 明示的な消去のため、平文の場合は消した記録をファイルに残さない
+      await _cacheStore?.compactIfPlain();
       _cacheTotalBytes = null;
     });
     _emitEvent(ProxyEventType.cacheCleared, &#39;&#39;, {});

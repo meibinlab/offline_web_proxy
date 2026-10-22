@@ -76,9 +76,10 @@
 <section class="desc markdown">
   <p>proxy へ到達できる要求を WebView に限るための秘密値を取得します。</p>
 <p><a href="../../offline_web_proxy/OfflineWebProxy/start.html">start</a> のたびに新しい値を生成し、自動復旧による再バインドでは
-変えません。HTTP では返しません。<a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">ProxyConfig.requireAccessToken</a> を
-有効にした場合は、WebView の読み込み前に <a href="../../offline_web_proxy/OfflineWebProxy/accessTokenCookieName-constant.html">accessTokenCookieName</a> の
-Cookie として proxy の origin へ置いてください。</p>
+変えません。HTTP では返しません。<a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">ProxyConfig.requireAccessToken</a> が
+有効な場合（既定）は、WebView の読み込み前に <a href="../../offline_web_proxy/OfflineWebProxy/accessTokenCookieName-constant.html">accessTokenCookieName</a> の
+Cookie として proxy の origin へ置いてください。置かないと、稼働確認を
+除く全ての要求が <code>403</code> になります。</p>
 <p>Returns: 稼働中は秘密値（<a href="../../offline_web_proxy/OfflineWebProxy/start.html">start</a> がサーバを待ち受ける前から値が
 入ります）。停止中と、起動に失敗した後は <code>null</code>。</p>
 </section>

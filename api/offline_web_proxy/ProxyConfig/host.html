@@ -72,6 +72,14 @@
   <p>The host address to bind the proxy server to.</p>
 <p>For security reasons, defaults to <code>'127.0.0.1'</code> (localhost only).
 This prevents external devices from accessing your proxy server.</p>
+<p>Only loopback is accepted: <code>'localhost'</code> (case-insensitive), an IPv4
+address in <code>127.0.0.0/8</code> such as <code>'127.0.0.2'</code>, or the IPv6 <code>'::1'</code>.
+Any other value (<code>'0.0.0.0'</code>, <code>'::'</code>, a device address, another host
+name, or <code>'localhost.'</code> with a trailing dot) makes <code>start()</code> throw
+<code>ProxyStartException</code>. There is no way to lift this restriction.</p>
+<p>Requests must name the proxy in their <code>Host</code> header: one of this
+value, <code>127.0.0.1</code>, <code>localhost</code> or <code>[::1]</code>, with the port in use.
+Other requests are refused with <code>403</code>, the health check included.</p>
 <p><strong>Default</strong>: <code>'127.0.0.1'</code></p>
 </section>
 

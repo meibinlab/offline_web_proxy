@@ -178,6 +178,10 @@
 </dt>
 <dd>
   <p>キャッシュミス</p>
+<p>現在は、利用者ごとに保存した応答の持ち主が現在の持ち主と一致しない
+（持ち主がまだ無い間の印を含めて等値で比べる）ため、キャッシュから
+返さなかった場合だけ発行します。<code>data['reason']</code> は <code>ownerMismatch</code>
+です。記録が無いだけのミスでは発行しません。</p>
   
 
 </dd>
@@ -205,7 +209,11 @@
 <p><code>data['reason']</code> に理由が入ります。<code>forceCachePaths</code> の安全側の除外
 （<code>set-cookie</code>・<code>vary</code>・<code>authorization</code>）と、本文だけで
 <code>ProxyConfig.cacheMaxSize</code> を超えた場合（<code>cacheMaxSize</code>）と、起動の後に
-応答キャッシュを開いている間（<code>cacheOpening</code>）です。</p>
+応答キャッシュを開いている間（<code>cacheOpening</code>）と、
+<code>ProxyConfig.cacheUserScopedResponses</code> が <code>false</code> で利用者ごとの応答を
+保存しなかった場合（<code>userScoped</code>）と、取得している間にログインが
+始まったか持ち主が変わったため、利用者ごとの応答を保存しなかった場合
+（<code>ownerChanged</code>）です。</p>
   
 
 </dd>

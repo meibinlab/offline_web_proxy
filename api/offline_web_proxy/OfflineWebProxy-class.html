@@ -83,6 +83,16 @@ final config = ProxyConfig(
 // サーバを起動
 final port = await proxy.start(config: config);
 
+// requireAccessToken は既定で有効のため、WebView がページを読み込む前に
+// 起動ごとの秘密値を proxy の origin へ Cookie として置く（webview_flutter）
+await WebViewCookieManager().setCookie(
+  WebViewCookie(
+    name: OfflineWebProxy.accessTokenCookieName,
+    value: proxy.accessToken!,
+    domain: proxy.baseUri!.host,
+  ),
+);
+
 // WebViewで使用
 webViewController.loadUrl('http://127.0.0.1:$port');
 
@@ -105,9 +115,14 @@ await proxy.stop();
 mutexロックを使用してシリアライズされ、データの一貫性が保証されます。</p>
 <h2 id="-3">セキュリティ</h2>
 <ul>
-<li>サーバは <code>127.0.0.1</code> のみにバインド（外部アクセス不可）</li>
-<li>端末内の別アプリからの要求は、<a href="../offline_web_proxy/ProxyConfig/requireAccessToken.html">ProxyConfig.requireAccessToken</a> と
-<a href="../offline_web_proxy/OfflineWebProxy/accessToken.html">accessToken</a> で拒否できる</li>
+<li>サーバはループバックのみにバインド（<a href="../offline_web_proxy/ProxyConfig/host.html">ProxyConfig.host</a> はループバック
+アドレスか <code>localhost</code> に制限。外部アクセス不可）</li>
+<li><code>Host</code> ヘッダが proxy 自身（ホスト名と稼働中のポート）を指さない要求は
+<code>403</code> で拒否する（DNS rebinding 対策）</li>
+<li>端末内の別アプリからの要求は、<a href="../offline_web_proxy/OfflineWebProxy/accessToken.html">accessToken</a> を持たないものを既定で
+拒否する（<a href="../offline_web_proxy/ProxyConfig/requireAccessToken.html">ProxyConfig.requireAccessToken</a>）</li>
+<li>CORS ヘッダは既定で付けず、付ける場合も
+<a href="../offline_web_proxy/ProxyConfig/corsAllowedOrigins.html">ProxyConfig.corsAllowedOrigins</a> の origin だけに返す</li>
 <li>Cookieは永続化前にAES-256で暗号化</li>
 <li>機密ヘッダはログ内でマスク</li>
 <li>静的アセットに対するパストラバーサル攻撃を防止</li>
@@ -350,6 +365,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 </dt>
 <dd>
   隔離されたリクエストを全て破棄します。
+  
+
+</dd>
+
+        <dt id="clearWebStorageSnapshot" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/clearWebStorageSnapshot.html">clearWebStorageSnapshot</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
+  </span>
+  
+
+</dt>
+<dd>
+  保存している WebStorage の写しを削除します。
   
 
 </dd>
@@ -601,6 +629,19 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 
 </dd>
 
+        <dt id="requestLoggingMiddlewareForTesting" class="callable">
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/requestLoggingMiddlewareForTesting.html">requestLoggingMiddlewareForTesting</a></span><span class="signature">(<wbr>)
+    <span class="returntype parameter">&#8594; <a href="https://pub.dev/documentation/shelf/1.4.1/shelf/Middleware.html">Middleware</a></span>
+  </span>
+  
+
+</dt>
+<dd>
+  要求ログを出力するミドルウェアを返します。
+  
+
+</dd>
+
         <dt id="resolveNavigationTarget" class="callable">
   <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/resolveNavigationTarget.html">resolveNavigationTarget</a></span><span class="signature">(<wbr>{<span class="parameter" id="resolveNavigationTarget-param-targetUrl"><span>required</span> <span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a></span> <span class="parameter-name">targetUrl</span>, </span><span class="parameter" id="resolveNavigationTarget-param-sourceUrl"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">sourceUrl</span></span>})
     <span class="returntype parameter">&#8594; <a href="../offline_web_proxy/ProxyNavigationResolution-class.html">ProxyNavigationResolution</a></span>
@@ -628,7 +669,7 @@ mutexロックを使用してシリアライズされ、データの一貫性が
 </dd>
 
         <dt id="restoreCookies" class="callable">
-  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/restoreCookies.html">restoreCookies</a></span><span class="signature">(<wbr><span class="parameter" id="restoreCookies-param-entries"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Iterable-class.html">Iterable</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/CookieRestoreEntry-class.html">CookieRestoreEntry</a></span>&gt;</span></span> <span class="parameter-name">entries</span></span>)
+  <span class="name"><a href="../offline_web_proxy/OfflineWebProxy/restoreCookies.html">restoreCookies</a></span><span class="signature">(<wbr><span class="parameter" id="restoreCookies-param-entries"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/Iterable-class.html">Iterable</a><span class="signature">&lt;<wbr><span class="type-parameter"><a href="../offline_web_proxy/CookieRestoreEntry-class.html">CookieRestoreEntry</a></span>&gt;</span></span> <span class="parameter-name">entries</span>, {</span><span class="parameter" id="restoreCookies-param-queueOwnerId"><span class="type-annotation"><a href="https://api.flutter.dev/flutter/dart-core/String-class.html">String</a>?</span> <span class="parameter-name">queueOwnerId</span></span>})
     <span class="returntype parameter">&#8594; <a href="https://api.flutter.dev/flutter/dart-async/Future-class.html">Future</a><span class="signature">&lt;<wbr><span class="type-parameter">void</span>&gt;</span></span>
   </span>
   

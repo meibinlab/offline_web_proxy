@@ -69,15 +69,33 @@
       </section>
       
 <section class="desc markdown">
-  <p>Add <code>Access-Control-Allow-*</code> headers to responses other than the internal
-endpoints.</p>
-<p>When <code>true</code>, the proxy adds <code>Access-Control-Allow-Origin: *</code> to every
-response except the internal endpoints, which lets a page on another
-origin read the response. Pages in the WebView are served from the proxy
-origin and do not need these headers, so set this to <code>false</code> unless a
-page on another origin must read the proxy. Headers returned by the
-upstream itself are passed through either way.</p>
-<p><strong>Default</strong>: <code>true</code></p>
+  <p>Add <code>Access-Control-Allow-*</code> headers for the origins in
+<a href="../../offline_web_proxy/ProxyConfig/corsAllowedOrigins.html">corsAllowedOrigins</a> to responses other than the internal endpoints.</p>
+<p>Pages in the WebView are served from the proxy origin and do not need
+these headers, so leave this <code>false</code> unless a page on another origin must
+read the proxy. When <code>true</code>, <a href="../../offline_web_proxy/ProxyConfig/corsAllowedOrigins.html">corsAllowedOrigins</a> must not be empty;
+<code>start()</code> rejects an empty list with a <code>ProxyStartException</code>.</p>
+<p>When enabled, a response to a request whose <code>Origin</code> header matches an
+entry of <a href="../../offline_web_proxy/ProxyConfig/corsAllowedOrigins.html">corsAllowedOrigins</a> gets <code>Access-Control-Allow-Origin</code> set to
+that <code>Origin</code> value, plus <code>Access-Control-Allow-Methods</code> and
+<code>Access-Control-Allow-Headers</code>. A request from any other origin, or
+without <code>Origin</code>, gets none of them. Because the answer depends on
+<code>Origin</code>, every such response also carries <code>Vary: Origin</code>. Only when
+<a href="../../offline_web_proxy/ProxyConfig/corsAllowedOrigins.html">corsAllowedOrigins</a> is <code>['*']</code> does the proxy answer
+<code>Access-Control-Allow-Origin: *</code>, to every request, without <code>Vary</code>.
+<code>Access-Control-Allow-Credentials</code> is never added. Headers returned by
+the upstream itself are passed through either way.</p>
+<p>While <a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">requireAccessToken</a> is enabled (the default), a page on another
+origin normally cannot send the access token (except when, in the same
+WebView, it can send the token cookie with <code>credentials: 'include'</code>): it
+is refused with <code>403</code>, and so is a CORS preflight, which carries no
+cookies. Those refusals carry no CORS
+headers, <code>Access-Control-Allow-Headers</code> does not list
+<a href="../../offline_web_proxy/OfflineWebProxy/accessTokenHeaderName-constant.html">OfflineWebProxy.accessTokenHeaderName</a>, and
+<code>Access-Control-Allow-Credentials</code> is never sent. CORS headers therefore
+only take effect with <code>requireAccessToken: false</code>; see
+<a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">requireAccessToken</a> for the risk of disabling it.</p>
+<p><strong>Default</strong>: <code>false</code> (changed from <code>true</code> in 0.26.0)</p>
 </section>
 
       

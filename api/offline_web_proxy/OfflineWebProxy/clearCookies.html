@@ -73,6 +73,12 @@
     
 <section class="desc markdown">
   <p>保存されているCookieを削除します。</p>
+<p><a href="../../offline_web_proxy/ProxyConfig/queueOwnerResolver.html">ProxyConfig.queueOwnerResolver</a> を指定して起動している場合（停止した
+後を含む）、すべてを削除するか、設定済み origin のホストに送られる
+ドメインを削除すると、セッションの利用者が分からなくなるため、キューを
+<a href="../../offline_web_proxy/QueuePauseReason.html">QueuePauseReason.ownerUnresolved</a> で一時停止します。前の持ち主の要求は
+捨てません（doc/specs.ja.md【5】の「送信待ちの持ち主」）。削除に失敗
+した場合も、一部を削除した可能性があるため一時停止します。</p>
 <p><code>domain</code> 特定ドメインのCookieのみを削除したい場合に指定。省略時は全Cookieを削除。</p>
 <p>Throws:</p>
 <ul>
@@ -86,30 +92,15 @@
 <section class="summary source-code" id="source">
   <h2><span>Implementation</span></h2>
   <pre class="language-dart"><code class="language-dart">Future&lt;void&gt; clearCookies({String? domain}) async {
+  &#47;&#47; 設定済み origin のセッションが変わる場合は、送信待ちの持ち主が分からなくなる
+  final changesOriginSession = _config?.queueOwnerResolver != null &amp;&amp;
+      (domain == null || _isCookieDomainForConfiguredOrigin(domain));
   try {
-    await _ensureCookieStorageInitialized();
-    if (_cookieBox != null) {
-      if (domain == null) {
-        &#47;&#47; 全Cookieを削除
-        await _cookieBox!.clear();
-      } else {
-        &#47;&#47; 特定ドメインのCookieを削除
-        final keysToDelete = &lt;String&gt;[];
-        for (final key in _cookieBox!.keys) {
-          final data = _cookieBox!.get(key) as Map?;
-          if (data != null &amp;&amp; data[&#39;domain&#39;] == domain) {
-            keysToDelete.add(key as String);
-          }
-        }
-
-        for (final key in keysToDelete) {
-          await _cookieBox!.delete(key);
-        }
-      }
+    await _clearCookieRecords(domain);
+  } finally {
+    if (changesOriginSession) {
+      await _pauseQueueForUnresolvedOwner();
     }
-  } catch (e) {
-    throw CookieOperationException(
-        &#39;clear&#39;, &#39;Cookieの削除に失敗しました: $e&#39;, e is Exception ? e : null);
   }
 }</code></pre>
 </section>

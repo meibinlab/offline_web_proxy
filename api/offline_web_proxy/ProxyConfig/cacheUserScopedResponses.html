@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=no">
+  <meta name="description" content="API docs for the cacheUserScopedResponses property from the ProxyConfig class, for the Dart programming language.">
+  <title>cacheUserScopedResponses property - ProxyConfig class - offline_web_proxy library - Dart API</title>
+
+
+  
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+  
+  <link rel="stylesheet" href="../../static-assets/github.css?v1">
+  <link rel="stylesheet" href="../../static-assets/styles.css?v1">
+  <link rel="icon" href="../../static-assets/favicon.png?v1">
+
+  
+</head>
+
+
+<body data-base-href="../../" data-using-base-href="false" class="light-theme">
+
+<div id="overlay-under-drawer"></div>
+
+<header id="title">
+  <span id="sidenav-left-toggle" class="material-symbols-outlined" role="button" tabindex="0">menu</span>
+  <ol class="breadcrumbs gt-separated dark hidden-xs">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy.dart</a></li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">cacheUserScopedResponses property</li>
+  </ol>
+  <div class="self-name">cacheUserScopedResponses</div>
+  <form class="search navbar-right" role="search">
+    <input type="text" id="search-box" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+  <div class="toggle" id="theme-button" title="Toggle brightness">
+    <label for="theme">
+      <input type="checkbox" id="theme" value="light-theme">
+      <span id="dark-theme-button" class="material-symbols-outlined">
+        dark_mode
+      </span>
+      <span id="light-theme-button" class="material-symbols-outlined">
+        light_mode
+      </span>
+    </label>
+  </div>
+</header>
+<main>
+
+<div
+    id="dartdoc-main-content"
+    class="main-content"
+    data-above-sidebar="offline_web_proxy&#47;ProxyConfig-class-sidebar.html"
+    data-below-sidebar="">
+    <div>
+<h1><span class="kind-property">cacheUserScopedResponses</span> property 
+</h1></div>
+
+      <section class="multi-line-signature">
+        
+        <a href="https://api.flutter.dev/flutter/dart-core/bool-class.html">bool</a>
+        <span class="name ">cacheUserScopedResponses</span>
+        <div class="features"><span class="feature">final</span></div>
+
+      </section>
+      
+<section class="desc markdown">
+  <p>Whether responses that belong to one user are kept in the response
+cache.</p>
+<p>A response always counts as belonging to one user when it carries
+<code>Set-Cookie</code> or <code>Set-Cookie2</code>, or <code>Cache-Control: private</code> (including
+<code>private="..."</code>). Otherwise it counts as belonging to one user when
+either of these holds:</p>
+<ul>
+<li>the proxy sent <code>Authorization</code> upstream (it is never sent to a
+mirrored origin)</li>
+<li>the proxy sent a <code>Cookie</code> header upstream (cookies from the cookie
+jar and the WebView cookies allowed by <a href="../../offline_web_proxy/ProxyConfig/forwardWebViewCookieNames.html">forwardWebViewCookieNames</a>;
+the proxy's own access token cookie is never sent and does not count)</li>
+</ul>
+<p>unless its <code>Cache-Control</code> says <code>public</code>, by which the upstream allows
+sharing it, and its <code>Vary</code> names none of <code>Cookie</code>, <code>Authorization</code> and
+<code>*</code>. Following RFC 9111 section 3.5, only <code>public</code> counts: <code>s-maxage</code>
+and <code>must-revalidate</code> allow sharing on the premise of revalidation,
+which the proxy does not do when it serves from the cache offline.</p>
+<p><strong>Note</strong>: When the session is a cookie, the cookie jar is sent with
+almost every request once a cookie exists, so nearly every response,
+static resources included, counts as belonging to one user unless the
+upstream marks it <code>public</code>. With <code>false</code>, the cache then stays
+practically empty after sign-in. With an owner, such static resources
+are also fetched again after the user changes, before they can be
+served offline to the new user.</p>
+<p>When <code>false</code>, such a response is not stored, and
+<code>ProxyEventType.cacheSkipped</code> is raised with <code>reason</code> <code>userScoped</code>.</p>
+<p>When <code>true</code> and <a href="../../offline_web_proxy/ProxyConfig/queueOwnerResolver.html">queueOwnerResolver</a> is set, such a response is stored
+with the current owner (the HMAC the queue uses, never the identifier
+as given) and is served from the cache only while the same owner is
+current. Another owner, or a changed owner, gets a miss and
+<code>ProxyEventType.cacheMiss</code> with <code>reason</code> <code>ownerMismatch</code>. An owner left
+unresolved (<code>QueuePauseReason.ownerUnresolved</code>) is treated as an owner
+of its own: what it stored is served only until the owner changes. A
+response is not stored (<code>cacheSkipped</code>, <code>reason</code> <code>ownerChanged</code>) when a
+sign-in started or the owner changed while it was being fetched. Before
+anyone has signed in there is no owner yet: such a response is stored
+with a mark for "no owner" and served only until an owner is set or the
+owner becomes unresolved.</p>
+<p>Without <a href="../../offline_web_proxy/ProxyConfig/queueOwnerResolver.html">queueOwnerResolver</a>, such a response is stored and served to
+whoever asks, as in 0.25.0. Either way, <code>Set-Cookie</code> and <code>Set-Cookie2</code>
+are removed from the stored headers; the response returned upstream
+keeps them. Entries stored by 0.25.0 are not rewritten: their
+<code>Set-Cookie</code> stays on the device until they expire or <code>clearCache()</code>
+removes them, but it is never returned from the cache.</p>
+<p><strong>Default</strong>: <code>true</code></p>
+</section>
+
+      
+<section class="summary source-code" id="source">
+  <h2><span>Implementation</span></h2>
+  <pre class="language-dart"><code class="language-dart">final bool cacheUserScopedResponses;</code></pre>
+</section>
+
+
+</div> <!-- /.main-content -->
+
+<div id="dartdoc-sidebar-left" class="sidebar sidebar-offcanvas-left">
+  <!-- The search input and breadcrumbs below are only responsively visible at low resolutions. -->
+<header id="header-search-sidebar" class="hidden-l">
+  <form class="search-sidebar" role="search">
+    <input type="text" id="search-sidebar" autocomplete="off" disabled class="form-control typeahead" placeholder="Loading search...">
+  </form>
+</header>
+
+<ol class="breadcrumbs gt-separated dark hidden-l" id="sidebar-nav">
+    <li><a href="../../index.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/offline_web_proxy-library.html">offline_web_proxy</a></li>
+    <li><a href="../../offline_web_proxy/ProxyConfig-class.html">ProxyConfig</a></li>
+    <li class="self-crumb">cacheUserScopedResponses property</li>
+</ol>
+
+
+  <h5>ProxyConfig class</h5>
+  <div id="dartdoc-sidebar-left-content"></div>
+</div><!--/.sidebar-offcanvas-->
+
+<div id="dartdoc-sidebar-right" class="sidebar sidebar-offcanvas-right">
+</div><!--/.sidebar-offcanvas-->
+
+</main>
+
+<footer>
+  <span class="no-break">
+    offline_web_proxy
+      0.25.0
+  </span>
+
+  
+</footer>
+
+
+
+<script src="../../static-assets/highlight.pack.js?v1"></script>
+<script src="../../static-assets/docs.dart.js"></script>
+
+
+
+</body>
+
+</html>
+

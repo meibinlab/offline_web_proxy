@@ -71,6 +71,10 @@
     
 <section class="desc markdown">
   <p><code>Set-Cookie</code> ヘッダ文字列から Cookie 復元エントリを生成します。</p>
+<p>アプリが渡す値として扱い、上流の応答に適用する受け入れ規則
+（<code>Domain</code> や <code>Secure</code> と <code>requestUrl</code> の照合など）は適用しません。
+<code>Expires</code>、<code>Max-Age</code>、<code>Path</code> の解釈と有効期限の上限（400 日）は、
+上流の応答と同じです（<code>CookieRecord.fromSetCookieHeader</code>）。</p>
 <p><code>setCookieHeader</code> は <code>Set-Cookie</code> の 1 行分です。
 <code>requestUrl</code> は Cookie を受信した絶対 URL です。
 <code>receivedAt</code> は Cookie の受信日時です。省略時は現在時刻が使用されます。

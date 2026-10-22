@@ -88,16 +88,21 @@
 <li>鍵があり、問題のある Box がある場合は、鍵を残して Box ごとに扱います。
 鍵と一致しない Box は削除します。先頭側が壊れた Box は、鍵と一致する
 最初の記録から後ろを残して作り直します（失われる先頭側の記録の件数は
-分かりません）。照合が時間の上限を超えた Box は、Box を閉じた後に
-時間の上限を設けずに照合し直し、その結果で扱います（鍵と一致しなければ
-削除、先頭側が壊れていれば作り直し）。先頭の記録が書きかけで鍵と一致する
-記録も無ければ、0 バイトに切り詰めます（開いたときに Hive も同じく
-切り詰めるため、失うものはありません）。問題の無い Box は残します。</li>
+分かりません）。照合が時間の上限を超えた Box と先頭側が壊れた Box は、
+Box を閉じた後に Box ごとに 2 分を上限として照合し直し、その結果で
+扱います（鍵と一致しなければ削除、先頭側が壊れていれば作り直し）。
+先頭の記録が書きかけで鍵と一致する記録も無ければ、0 バイトに切り詰めます
+（開いたときに Hive も同じく切り詰めるため、失うものはありません）。
+問題の無い Box は残します。照合し直しがどれかの Box で 2 分を超えた
+場合は、何も削除・作り直しせずに返します
+（<a href="../../offline_web_proxy/StorageRecoveryRejection.html">StorageRecoveryRejection.verificationTimedOut</a>）。</li>
 <li>鍵の形式が正しくない場合、または鍵なし・読み取り不能の場合（中身のある
 暗号化 Box があれば、読み直しても続く場合）は、次のとおりです。
 キュー・隔離・ドロップ履歴の Box のどれかに中身があれば、暗号化 Box
 （Cookie・キュー・隔離・ドロップ履歴）をすべて削除してから鍵を削除します。
-Cookie も消えるため、再ログインが必要になります。どれにも中身が無ければ
+結果の一覧には含めませんが、同じ鍵で暗号化した応答キャッシュと
+WebStorage の写しも削除します。Cookie も消えるため、再ログインが
+必要になります。どれにも中身が無ければ
 何も消しません（<a href="../../offline_web_proxy/StorageRecoveryRejection.html">StorageRecoveryRejection.startWillSucceed</a>）。</li>
 </ul>
 <p>鍵を書き込めずに起動に失敗した場合（<a href="../../offline_web_proxy/StorageIntegrityFailure.html">StorageIntegrityFailure.keyWriteFailed</a>）は、

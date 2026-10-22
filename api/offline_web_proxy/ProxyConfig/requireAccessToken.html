@@ -75,9 +75,9 @@ came from. Without this, another app on the device, or a page in a
 browser, can send requests that the proxy forwards upstream with the
 sessions held in its Cookie Jar, and can reach the status and admin
 endpoints.</p>
-<p>When enabled, the proxy answers <code>403</code> to any request that has neither a
-cookie named <a href="../../offline_web_proxy/OfflineWebProxy/accessTokenCookieName-constant.html">OfflineWebProxy.accessTokenCookieName</a> nor a header named
-<a href="../../offline_web_proxy/OfflineWebProxy/accessTokenHeaderName-constant.html">OfflineWebProxy.accessTokenHeaderName</a> whose value equals
+<p>Enabled by default. The proxy answers <code>403</code> to any request that has
+neither a cookie named <a href="../../offline_web_proxy/OfflineWebProxy/accessTokenCookieName-constant.html">OfflineWebProxy.accessTokenCookieName</a> nor a
+header named <a href="../../offline_web_proxy/OfflineWebProxy/accessTokenHeaderName-constant.html">OfflineWebProxy.accessTokenHeaderName</a> whose value equals
 <a href="../../offline_web_proxy/OfflineWebProxy/accessToken.html">OfflineWebProxy.accessToken</a>. The check covers forwarded requests,
 bundled static assets, the mirrored-origin path, the WebStorage bridge
 and the status and admin endpoints. Only <code>GET</code> / <code>HEAD</code> on
@@ -103,7 +103,12 @@ the WebView also sends the token to any other server on the same host.</p>
 header before forwarding a request or storing it in the queue, and drops
 a <code>Set-Cookie</code> of the same name from responses so that the upstream
 cannot overwrite the token in the WebView.</p>
-<p><strong>Default</strong>: <code>false</code></p>
+<p><code>webview_flutter</code> sets cookies with <code>WebViewCookieManager.setCookie</code>,
+which cannot mark a cookie HttpOnly, so a script on the page can read the
+token. Use a cookie manager that supports HttpOnly when that matters.</p>
+<p>Set this to <code>false</code> only when no other app or page on the device can
+reach the loopback port, for example in tests.</p>
+<p><strong>Default</strong>: <code>true</code> (changed from <code>false</code> in 0.26.0)</p>
 </section>
 
       

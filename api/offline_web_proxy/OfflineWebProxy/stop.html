@@ -167,6 +167,8 @@
     _authResumePatterns = const [];
     _queueExcludeRules = const [];
     _mirroredOrigins = const [];
+    _corsAllowedOrigins = const {};
+    _corsAllowsAnyOrigin = false;
   } catch (e) {
     failure = e;
   } finally {
@@ -191,6 +193,8 @@
     _legacyQuarantineBox = null;
     _legacyDroppedRequestBox = null;
     _pendingLegacyKeys.clear();
+    &#47;&#47; キューの大きさの控えは、次の起動で開いた Box から数え直す
+    _clearQueueEntryBytes();
     &#47;&#47; 停止後の getStats() が前回の件数を返さないよう、未確認件数のキャッシュを捨てる
     _unacknowledgedDroppedCount = null;
     &#47;&#47; 途中で失敗して閉じていない場合も、開く処理が終わってから復旧 API を

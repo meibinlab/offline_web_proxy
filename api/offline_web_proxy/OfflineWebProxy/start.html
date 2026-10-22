@@ -117,11 +117,14 @@
 
     &#47;&#47; 設定を読み込み
     _config = config ?? await _loadDefaultConfig();
+    _validateHost();
     _validateHealthCheckPath();
     _validateStatusPath();
     _validateAutoReloadSettings();
     _validateRetentionSettings();
     _validateMirroredOrigins();
+    _validateCorsSettings();
+    _validateForwardWebViewCookieNames();
     _validateAuthRequiredStatusCodes();
     _validateQueueOwnerResolver();
     _compileConfiguredPatterns();
@@ -131,6 +134,10 @@
 
     &#47;&#47; ストレージを初期化
     await _initializeStorage();
+
+    &#47;&#47; 持ち主の記録が書き換えられた場合や消された場合は、誰の要求か
+    &#47;&#47; 分からないまま送らないよう一時停止する
+    await _pauseQueueIfOwnerRecordUntrusted();
 
     &#47;&#47; 隔離とドロップ履歴の保持上限を判定する（ロックを取れない場合は定期処理へ回す）
     await _enforceRetentionLimits();
@@ -165,7 +172,11 @@
         .addMiddleware(_errorHandlingMiddleware)
         .addMiddleware(_leadingSlashNormalizationMiddleware)
         .addMiddleware(_requestLoggingMiddleware())
+        .addMiddleware(_hostValidationMiddleware)
+        &#47;&#47; 秘密値を持たない要求は、パスを検査する前に 403 で断る。秘密値を
+        &#47;&#47; 持たない別アプリが、拒否のイベントを大量に出させられないようにする
         .addMiddleware(_accessTokenMiddleware)
+        .addMiddleware(_requestPathValidationMiddleware)
         .addMiddleware(_corsMiddleware)
         .addMiddleware(_statisticsMiddleware)
         .addHandler(router.call);

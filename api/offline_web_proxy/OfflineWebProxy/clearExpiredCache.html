@@ -73,7 +73,9 @@
 <section class="desc markdown">
   <p>期限切れキャッシュのみを削除します。</p>
 <p>Expired状態のキャッシュエントリのみが削除対象となります。
-応答キャッシュを開いている間は、開き終わるのを待ちます（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。</p>
+応答キャッシュを開いている間は、開き終わるのを待ちます（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。
+1 時間ごとの定期処理からも呼びます。<a href="../../offline_web_proxy/ProxyConfig/encryptResponseCache.html">ProxyConfig.encryptResponseCache</a> が
+<code>false</code> の場合は、削除した後に Box を圧縮します。</p>
 <p>Throws:</p>
 <ul>
 <li><a href="../../offline_web_proxy/CacheOperationException-class.html">CacheOperationException</a> キャッシュ削除に失敗した場合。</li>
@@ -119,6 +121,9 @@
                 _determineStatus(entry) == CacheStatus.expired;
           }).toList(growable: false);
           await store.deleteAll(expiredKeys);
+          if (expiredKeys.isNotEmpty) {
+            await store.compactIfPlain();
+          }
           _cacheTotalBytes = null;
         });
       }

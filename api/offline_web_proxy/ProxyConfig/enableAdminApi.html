@@ -107,8 +107,8 @@ party such as a CDN. Requests carrying an <code>Origin</code> other than the pro
 own are refused, and the server binds to loopback only, but neither
 protects against a script already running on the page.</p>
 <p>A request without an <code>Origin</code> header is allowed, so another app or
-process on the same device can reach the endpoints over loopback. Enable
-<a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">requireAccessToken</a> together with this to refuse such requests.</p>
+process on the same device can reach the endpoints over loopback. Keep
+<a href="../../offline_web_proxy/ProxyConfig/requireAccessToken.html">requireAccessToken</a> enabled (the default) to refuse such requests.</p>
 <p><strong>Default</strong>: <code>false</code> (production safe)</p>
 </section>
 

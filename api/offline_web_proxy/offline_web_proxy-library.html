@@ -95,6 +95,16 @@ final config = ProxyConfig(
 final port = await proxy.start(config: config);
 print('Proxy running on http://127.0.0.1:$port');
 
+// requireAccessToken は既定で有効のため、WebView がページを読み込む前に
+// 起動ごとの秘密値を proxy の origin へ Cookie として置く（webview_flutter）
+await WebViewCookieManager().setCookie(
+  WebViewCookie(
+    name: OfflineWebProxy.accessTokenCookieName,
+    value: proxy.accessToken!,
+    domain: proxy.baseUri!.host,
+  ),
+);
+
 // WebViewで使用
 webViewController.loadUrl('http://127.0.0.1:$port/your-app-path');
 </code></pre>

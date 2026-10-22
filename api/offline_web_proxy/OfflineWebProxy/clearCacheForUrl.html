@@ -73,7 +73,9 @@
     
 <section class="desc markdown">
   <p>特定URLのキャッシュを削除します。</p>
-<p>応答キャッシュを開いている間は、開き終わるのを待ちます（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。</p>
+<p>応答キャッシュを開いている間は、開き終わるのを待ちます（<a href="../../offline_web_proxy/OfflineWebProxy/cacheReady.html">cacheReady</a>）。
+<a href="../../offline_web_proxy/ProxyConfig/encryptResponseCache.html">ProxyConfig.encryptResponseCache</a> が <code>false</code> の場合は、削除の後に Box を
+圧縮します。</p>
 <p><code>url</code> 削除対象のURL。正規化されてからハッシュ化されます。</p>
 <p>Throws:</p>
 <ul>
@@ -97,6 +99,7 @@
     await _waitForCacheStore();
     await _cacheWriteLock.synchronized(() async {
       await _cacheStore?.delete(cacheKey);
+      await _cacheStore?.compactIfPlain();
       _cacheTotalBytes = null;
     });
   } catch (e) {

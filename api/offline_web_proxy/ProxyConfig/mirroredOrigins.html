@@ -100,7 +100,9 @@ root-relative URL such as <code>/img/x.png</code>. A path-relative URL such as
 <li>The client's <code>Cookie</code>, <code>Authorization</code>, <code>Origin</code> and <code>Referer</code> headers
 are not relayed to a listed origin, so credentials held for the upstream
 origin never reach a third party. Cookies a listed origin sets are kept
-in the jar under its own domain</li>
+in the jar under its own domain, and its <code>Set-Cookie</code> headers are not
+returned to the WebView, which would otherwise store them under the
+proxy origin and send them back with requests to <a href="../../offline_web_proxy/ProxyConfig/origin.html">origin</a></li>
 </ul>
 <p><strong>Content-Security-Policy</strong>: a rewritten URL becomes same-origin with the
 proxy, so a page that restricts <code>script-src</code> or <code>style-src</code> has to allow

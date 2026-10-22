@@ -73,6 +73,14 @@
 <p>When enabled, the proxy can inject a small script into HTML responses and
 expose snapshot endpoints so the app can transfer localStorage and
 IndexedDB data across origin changes.</p>
+<p>From 0.26.0 the snapshot is stored in the encrypted box
+<code>proxy_web_storage_secure</code>; the plain box of 0.25.0 and earlier is moved
+into it and deleted at startup. The bridge accepts only pages of the
+proxy's own origin (<code>POST</code> requires <code>Origin</code>; a cross-site
+<code>Sec-Fetch-Site</code> is refused) and answers with <code>Cache-Control: no-store</code>.
+When disabled, the plain box is deleted without opening any box, and the
+bridge path answers <code>404</code> without being forwarded upstream. Use
+<code>OfflineWebProxy.clearWebStorageSnapshot()</code> to delete the snapshot.</p>
 <p><strong>Default</strong>: <code>false</code></p>
 </section>
 

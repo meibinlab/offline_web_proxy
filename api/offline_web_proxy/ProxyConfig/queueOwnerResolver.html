@@ -102,14 +102,34 @@ new, unknown owner and pauses the queue with
 function returns <code>null</code> does not end that pause. When the app ends while
 a sign-in is being forwarded, the next start also treats the signed-in
 user as a new, unknown owner, because the new session cookie may already
-be stored. If the proxy cannot save that a sign-in is in progress, it
+be stored. Whenever a start finds the current owner unknown while
+requests of another owner are queued, it pauses the queue with
+<code>QueuePauseReason.ownerUnresolved</code> again instead of moving them out. If the proxy cannot save that a sign-in is in progress, it
 still forwards the sign-in and raises <code>ProxyEventType.errorOccurred</code>
 with <code>phase</code> <code>queueOwnerPersist</code>; an app that ends during that sign-in
 then starts with the previous owner.</p>
+<p>Each request keeps the owner that was current when the proxy received
+it, even when another user signs in while the upstream is still
+answering. Concurrent sign-ins are settled one at a time in the order
+their responses arrive, so the stored session cookie and the current
+owner always belong to the same user.</p>
+<p>Replacing the session outside a sign-in also changes who the queue
+belongs to. <code>OfflineWebProxy.restoreCookies()</code> takes the user of the
+restored session as <code>queueOwnerId</code>: with it, that user becomes the
+current owner; without it, the queue is paused with
+<code>QueuePauseReason.ownerUnresolved</code>. <code>OfflineWebProxy.clearCookies()</code>
+also pauses the queue that way when it removes every cookie or a domain
+sent to the configured origin. Requests of the previous owner are kept
+in either case.</p>
 <p>The owner is never stored as given: the proxy keeps an HMAC-SHA256 of
 it, keyed with a key derived from the storage encryption key, and never
 puts it in events or the status endpoint. The current owner survives a
-restart.</p>
+restart. Its record carries an HMAC tag; when the tag does not match, or
+the record is missing while queued requests have an owner, the next
+start raises <code>ProxyEventType.errorOccurred</code> with <code>phase</code>
+<code>queueOwnerLoad</code> and pauses the queue with
+<code>QueuePauseReason.ownerUnresolved</code>. A record saved by 0.25.0, which has
+no tag, is accepted once and saved again with a tag.</p>
 <p><strong>Note</strong>: Requests queued with a session that was signed in before this
 setting was introduced have no owner, so they are protected only after
 the next sign-in. Keep the upstream's own checks as well.</p>

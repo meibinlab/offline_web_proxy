@@ -73,8 +73,10 @@
 <p>上流が 4xx で拒否した場合は <code>"4xx_error"</code>、キューを一時停止させた要求を
 <code>skipPausedRequest()</code> で取り除いた場合は <code>"authentication_required"</code>、
 <code>ProxyConfig.queueOwnerResolver</code> を指定していて、ログインし直した
-利用者が要求の持ち主と違うため送らなかった場合は <code>"owner_changed"</code>
-です。</p>
+利用者が要求の持ち主と違うため送らなかった場合は <code>"owner_changed"</code>、
+保存した送信先の origin（scheme・host・ポート）が現在の
+<code>ProxyConfig.origin</code> と違うため送らなかった場合は <code>"origin_changed"</code>
+です（<code>ProxyConfig.mirroredOrigins</code> に含まれていても同じ）。</p>
 </section>
 
       
