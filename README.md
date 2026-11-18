@@ -38,7 +38,7 @@ Add the package to your app:
 
 ```yaml
 dependencies:
-  offline_web_proxy: ^0.26.0
+  offline_web_proxy: ^0.26.1
   # Example app and CI currently use this WebView version range.
   webview_flutter: ^4.8.0
 ```
