@@ -581,7 +581,7 @@ RFC 6265 に沿って Cookie を評価します。
 
 #### 上流の Set-Cookie の受け入れ規則
 
-上流の応答（設定済み origin、`mirroredOrigins` の中継先、ウォームアップ）の `Set-Cookie` は、Cookie Jar へ保存する前に次の規則（RFC 6265、RFC 6265bis）で確かめ、外れたものは保存しません。WebView へ返す応答の `Set-Cookie` は、この規則の影響を受けません。
+上流の応答（設定済み origin、`mirroredOrigins` の中継先、ウォームアップ、キューから送った要求）の `Set-Cookie` は、Cookie Jar へ保存する前に次の規則（RFC 6265、RFC 6265bis）で確かめ、外れたものは保存しません。WebView へ返す応答の `Set-Cookie` は、この規則の影響を受けません。
 
 | `reason` | 保存しない条件 |
 | --- | --- |
@@ -598,6 +598,7 @@ RFC 6265 に沿って Cookie を評価します。
 - 公開サフィックスリストは使わない簡易判定です。`co.jp` のような複数ラベルの公開サフィックスを `Domain` に指定した Cookie も、要求先ホストが domain-match すれば受け入れます
 - 保存しなかった Cookie は、`errorOccurred`（`operation: cookieSave`）の `reason` に上表の値、`cookieName` に Cookie 名を入れて知らせます。Cookie の値は載せません
 - `Set-Cookie` を解釈できない場合（`reason: invalidSetCookie`）と、保存領域を使えない場合（`reason: storageFailure`）も保存せず、`errorOccurred`（`operation: cookieSave`）の `error` に例外の型名を入れて知らせます。どの場合も要求の処理は続け、上流の応答を WebView へ返します
+- キューから送った要求の応答は、待つ間に Cookie Jar が作り直された場合なども保存しません（【5】の「キューの応答の Set-Cookie」）
 - `restoreCookies()` に渡す Cookie はアプリが渡す値のため、この規則の対象外です。`CookieRestoreEntry.fromSetCookieHeader()` も属性をそのまま取り込みます
 
 ### 管理メソッド
@@ -615,7 +616,7 @@ Cookie 管理のためのメソッドを提供します。詳細は【20】API �
 - **保存順の維持**: 保存日時の昇順で再送し、リクエストの順序を保持
 - **キーの一意性**: マイクロ秒精度のタイムスタンプと同一マイクロ秒内の連番でキーを採番し、同時に保存したリクエストが上書きで失われないようにする
 - **永続化**: Hive の暗号化 Box（`proxy_queue_secure`）でキュー状態を保存。アプリ再起動後も再送を継続（「保存領域の暗号化」）
-- **保存するヘッダの Cookie**: WebView が送った `Cookie` のうち、`ProxyConfig.forwardWebViewCookieNames` に含まれる名前だけを保存します。残る Cookie が無い場合は `Cookie` ヘッダごと保存しません。再送でも送る時点で同じ設定で絞るため、0.25.0 以前に WebView の Cookie をすべて保存した要求からも、許可しない Cookie は送りません。再送の Cookie は、送る時点の Cookie Jar を優先します（【14】の「Cookie ヘッダ」）
+- **保存するヘッダの Cookie**: WebView が送った `Cookie` のうち、`ProxyConfig.forwardWebViewCookieNames` に含まれる名前だけを保存します。残る Cookie が無い場合は `Cookie` ヘッダごと保存しません。再送でも送る時点で同じ設定で絞るため、0.25.0 以前に WebView の Cookie をすべて保存した要求からも、許可しない Cookie は送りません。再送の Cookie は、送る時点の Cookie Jar を優先します（【14】の「Cookie ヘッダ」）。再送の応答の `Set-Cookie` は Cookie Jar へ保存します（「キューの応答の Set-Cookie」）
 - **再試行待ちの扱い**: バックオフ待機中のリクエストは今回の送信対象から外し、待機時間を過ぎた後続のリクエストを先に送信する。ただし 429 で送信を控えている間と、認証待ちで一時停止している間は、後続も送らない（「再試行戦略」「認証が必要な応答での一時停止」）
 - **接続の解放**: 再送では上流の応答本文を必ず読み切り、接続を解放してから次の要求へ進む。件数が同時接続数の上限を超えても最後まで送り切れるようにする
 - **隔離できない場合**: 隔離領域へ退避できない状況では、キューから取り除かずバックオフを適用して再試行する（1 件で `quarantineMaxBytes` を超える場合を除く。「保持上限」）
@@ -690,7 +691,7 @@ Cookie のセッションで認証する上流では、端末がオフライン�
 - **状態**: `ProxyStats.queuePausedReason` と状態通知の `queuePausedReason` が `authenticationRequired` になります。キーで照会した状態は `queued` のままです
 - **再開の契機**:
   - `resumeQueue()` を呼んだとき
-  - `ProxyConfig.authResumePaths` に一致する要求が proxy を通り、上流が 2xx か 3xx を返したとき。メソッドは問いません。`mirroredOrigins` へ中継するパスは照合しません。フォームのログインは成功後にリダイレクトすることが多いため、3xx も含めます。応答の `Set-Cookie` は Cookie Jar へ保存した後に再開するため、キューの要求は新しいセッションで送られます（再送の Cookie は、送る時点の Cookie Jar を優先します）。記法は【1】の「設定のパスパターン記法」に従います
+  - `ProxyConfig.authResumePaths` に一致する要求が proxy を通り、上流が 2xx か 3xx を返したとき。メソッドは問いません。`mirroredOrigins` へ中継するパスは照合しません。フォームのログインは成功後にリダイレクトすることが多いため、3xx も含めます。応答の `Set-Cookie` は Cookie Jar へ保存した後に再開するため、キューの要求は新しいセッションで送られます（再送の Cookie は、送る時点の Cookie Jar を優先します。再送の応答の `Set-Cookie` の扱いは「キューの応答の Set-Cookie」）。記法は【1】の「設定のパスパターン記法」に従います
   - どちらも、次の定期処理を待たずに送信を始めます。別の処理がキューを扱っている間は、その後の定期処理（5 秒ごと）で送ります
 - **再び一時停止**: 再開後に同じ要求がまた指定の状態コードを返した場合は、再び一時停止します。自動では送り直しません。本文にエラーを入れて 2xx を返すログインの失敗でも再開しますが、同じ理由で再び一時停止します
 - **送信中のログイン**: 要求を送り始めた後に再開の契機が起きた場合、その要求の応答は古いセッションで送ったものとみなし、指定の状態コードでも一時停止しません。要求はキューに残り、次の定期処理で新しいセッションで送ります。バックオフ待ちの要求と同じく、同じ周回の後続の要求はこの要求より先に送ります
@@ -768,6 +769,25 @@ Cookie Jar のセッションは、ログインの要求のほかに `restoreCoo
 - この設定を使う前にログインしたセッションで溜まった送信待ちは、持ち主が無いため、次のログインまでは保護されません
 - 判定はログインの要求と応答から関数が返した識別子に依存します。上流側の本人確認も残してください
 - 持ち主とログインの転送中の扱いは、`OfflineWebProxy` のインスタンスごとに持ちます。Cookie はインスタンス間で共有するため、複数のインスタンスを同時に動かすと、別のインスタンスのキューは前の持ち主の要求を新しいセッションで送ることがあり、保護されません（【17】の「インスタンスと isolate」）
+
+### キューの応答の Set-Cookie
+
+キューから送った要求の応答の `Set-Cookie` も、通常の転送と同じく Cookie Jar へ保存します。上流が再送の応答でセッションを作り直した場合に、後続の要求で新しい Cookie を送るためです。
+
+- **対象**: 状態コードを問いません（2xx、303、取り除く 4xx、認証待ちで一時停止する応答、再試行する応答のすべて）。送信先は設定済み origin に限るため（「送信待ちの持ち主」の `origin_changed`）、受け入れ規則は設定済み origin の応答として適用します（【4】の「上流の Set-Cookie の受け入れ規則」）。WebView へは返しません
+- **保存しない場合**: 送信を始めた時点のセッションの Cookie で、その後の Cookie Jar を書き換えないため、次の場合は保存しません。どれも `errorOccurred`（`operation: cookieSave`）の `reason` に下表の値、`cookieName` に Cookie 名を入れて、`Set-Cookie` ごとに知らせます。上から順に判定します
+
+| `reason` | 保存しない条件 |
+| --- | --- |
+| `cookieJarReset` | 送信を始めた後に `clearCookies()` か `restoreCookies()` を呼んだか、それらの実行中に送信を始めた。`queueOwnerResolver` の有無を問わない |
+| `signInInProgress` | `queueOwnerResolver` を設定していて、送信を始めた後にログイン（`authResumePaths`）の転送が始まったか、まだ終わっていない。ログインの Cookie の保存と持ち主の決定との順番待ちを、保存領域の排他と同じ上限時間内に取得できない場合も含む |
+| `queueOwnerChanged` | `queueOwnerResolver` を設定していて、要求の持ち主が応答を受け取った時点の持ち主と違う |
+
+- **順序**: `queueOwnerResolver` を設定している場合は、ログインの応答の Cookie の保存と持ち主の決定（「送信待ちの持ち主」）と同じ順番待ちの中で判定して保存します。ログインの Cookie と持ち主の間に、前のセッションの Cookie が割り込まないためです
+- **判定関数が無い場合のログイン**: `queueOwnerResolver` を設定していない場合は、応答を待つ間にログインしても保存します。通常の転送の応答と同じ扱いです。前のセッションの Cookie で上書きされないようにするには、`queueOwnerResolver` を設定してください
+- **成功の記録**: べき等性キーを付けた要求が 2xx か 303 を返した場合は、キーの記録を Cookie の保存より先に行います。保存を待つ間に停止しても、次の起動で送り直さないためです。キーの無い要求（`enableIdempotencyKey: false`）は、従来どおり次の起動で送り直すことがあります
+- **停止中**: 送信を始めた後に `stop()` を呼んだ場合は、起動し直した後も含めて保存しません。保存の途中で停止が始まった場合は、残りを保存しません。どちらも知らせません。要求の扱いは「キュー管理」と同じです
+- 0.26.0 までは、キューの応答の `Set-Cookie` を保存していませんでした
 
 ### キューへ入れない更新系（queueExcludePaths）
 
@@ -1845,7 +1865,7 @@ final port = await proxy.start(
 - `redirectHandled` の `externalUrl` は、設定によらずクエリを含む完全な URL を載せる。外部起動（`redirectAction: launchExternal`）では proxy が WebView へ `204` だけを返すため、アプリが起動先（地図の検索語、`mailto:` の `?subject=`、`geo:` の `?q=` など）を知る唯一の値になる。**`externalUrl` はアプリが実行するための値でクエリを含むため、ログへ出さないこと**
 - 管理エンドポイントの隔離の一覧（`enableAdminApi`、既定無効）は、要求を見分けるため完全な URL を返す
 - 上流への転送、WebView へ返す `Location`、Dart API の `recentResendResults` は影響を受けない。状態通知の `recentResendResults` は設定によらずクエリを除く（【5】の「状態通知エンドポイント」）
-- Cookie を保存しなかった場合の `errorOccurred`（`operation: cookieSave`）は、受け入れ規則に外れた場合は `reason` に拒否理由（【4】の「上流の Set-Cookie の受け入れ規則」）と `cookieName` に Cookie 名を、それ以外の失敗は `error` に例外の型名と `reason` に `invalidSetCookie`（`Set-Cookie` を解釈できない）か `storageFailure`（保存領域を使えない場合を含む）を載せる。`Set-Cookie` の値（セッション識別子など）は載せない
+- Cookie を保存しなかった場合の `errorOccurred`（`operation: cookieSave`）は、受け入れ規則に外れた場合は `reason` に拒否理由（【4】の「上流の Set-Cookie の受け入れ規則」）と `cookieName` に Cookie 名を、キューの応答を保存しなかった場合は `reason` に `cookieJarReset` / `signInInProgress` / `queueOwnerChanged`（【5】の「キューの応答の Set-Cookie」）と `cookieName` を、それ以外の失敗は `error` に例外の型名と `reason` に `invalidSetCookie`（`Set-Cookie` を解釈できない）か `storageFailure`（保存領域を使えない場合を含む）を載せる。`Set-Cookie` の値（セッション識別子など）は載せない
 - パスの検証で拒否した場合の `errorOccurred`（`phase: requestPath`）の `ProxyEvent.url` も、上の規則でクエリとフラグメントを除く
 - 利用者ごとの応答の `cacheSkipped`（`reason: userScoped`、`ownerChanged`）と `cacheMiss`（`reason: ownerMismatch`）は、`data` に `reason` だけを載せる。持ち主の HMAC、Cookie、`Authorization` の値は載せない
 - 応答をキャッシュへ保存できなかった場合の `errorOccurred`（`phase: cacheResponse`）も、`error` に例外の型名、`reason` に `storageFailure` だけを載せ、例外の文字列は載せない
@@ -3101,7 +3121,7 @@ Web ストレージのスナップショットの保存領域で発行する `er
 
 保存領域を使えないか、キューへの投入のロックを取得できず要求を保存しなかったときに発行する `errorOccurred` の `data` には、`phase`（`queueSave`）と `reason`（`storageUnavailable` か `lockTimeout`）が入ります。`ProxyEvent.url` は保存しなかった要求のパスです（既定ではクエリを除く）。要求のヘッダと本文は載せません（【10】の「保存できなかった場合」）。
 
-上流の Cookie を保存しなかったときに発行する `errorOccurred` の `data` には、`operation`（`cookieSave`）と `reason` が入ります。受け入れ規則に外れた場合は、`reason` に拒否理由（`domainMismatch`、`ipDomain`、`singleLabelDomain`、`mirroredOriginDomain`、`insecureSecure`、`hostPrefix`、`securePrefix`、`secureOverwrite`。【4】の「上流の Set-Cookie の受け入れ規則」）、`cookieName` に Cookie 名が入ります。それ以外の失敗では、`reason` に `invalidSetCookie` か `storageFailure`（保存領域を使えない場合を含む）、`error` に例外の型名が入ります。`Set-Cookie` の値と例外の文字列は含みません（【18】の「イベントの URL」）。
+上流の Cookie を保存しなかったときに発行する `errorOccurred` の `data` には、`operation`（`cookieSave`）と `reason` が入ります。受け入れ規則に外れた場合は、`reason` に拒否理由（`domainMismatch`、`ipDomain`、`singleLabelDomain`、`mirroredOriginDomain`、`insecureSecure`、`hostPrefix`、`securePrefix`、`secureOverwrite`。【4】の「上流の Set-Cookie の受け入れ規則」）、`cookieName` に Cookie 名が入ります。キューから送った要求の応答を保存しなかった場合は、`reason` に `cookieJarReset`、`signInInProgress`、`queueOwnerChanged` のどれか（【5】の「キューの応答の Set-Cookie」）、`cookieName` に Cookie 名が入ります。それ以外の失敗では、`reason` に `invalidSetCookie` か `storageFailure`（保存領域を使えない場合を含む）、`error` に例外の型名が入ります。`Set-Cookie` の値と例外の文字列は含みません（【18】の「イベントの URL」）。
 
 旧平文 Box の移行と保持上限の処理で発行する `errorOccurred` の `data` には、`operation`（移行は `legacyStorageDelete` か `legacyStorageMigration`、保持上限は `retentionLimit`）と `error` が入ります。`legacyStorageDelete` では、`box` に旧平文 Box の名前が入ります。
 

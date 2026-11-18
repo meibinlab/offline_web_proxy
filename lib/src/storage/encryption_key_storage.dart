@@ -108,6 +108,12 @@ class ProxyStorageTestHooks {
   /// 完了を遅らせると、送信の途中でログインが始まった状態を再現できます。
   final Future<void> Function()? beforeQueuedRequestSent;
 
+  /// キューから送った要求の応答を受け取り、応答の `Set-Cookie` を保存するか
+  /// 判定する直前に呼ぶ処理です。
+  ///
+  /// 完了を遅らせると、応答を待つ間にログインが始まった状態を再現できます。
+  final Future<void> Function()? beforeQueuedResponseCookiesStored;
+
   /// 要求をキューへ保存する直前に、キューの投入の排他を持ったまま呼ぶ処理です。
   ///
   /// 完了を遅らせると、排他を取得できずに保存しない状態を再現できます。
@@ -157,6 +163,8 @@ class ProxyStorageTestHooks {
   /// [beforeCacheOpened] は応答キャッシュを開き始める直前に呼ぶ処理です。
   /// [beforeQueuedRequestSent] はキューから送る要求の本文を送る直前に
   /// 呼ぶ処理です。
+  /// [beforeQueuedResponseCookiesStored] はキューから送った要求の応答の
+  /// `Set-Cookie` を保存するか判定する直前に呼ぶ処理です。
   /// [beforeQueueEntrySaved] は要求をキューへ保存する直前に呼ぶ処理です。
   /// [beforeQueueOwnerDecided] は持ち主を決める直前に呼ぶ処理です。
   /// [beforeCookieStoreChanged] は Cookie Jar を書き換える直前に呼ぶ処理です。
@@ -177,6 +185,7 @@ class ProxyStorageTestHooks {
     this.beforeCacheEntryMoved,
     this.beforeCacheOpened,
     this.beforeQueuedRequestSent,
+    this.beforeQueuedResponseCookiesStored,
     this.beforeQueueEntrySaved,
     this.beforeQueueOwnerDecided,
     this.beforeCookieStoreChanged,

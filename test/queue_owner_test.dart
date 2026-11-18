@@ -86,6 +86,10 @@ class _MockUpstream {
         }
         request.response.statusCode =
             isReplay ? replayStatusFor(body) : forwardStatusCode;
+        final replayCookie = isReplay ? replaySetCookieFor(body) : null;
+        if (replayCookie != null) {
+          request.response.headers.add('set-cookie', replayCookie);
+        }
         request.response.write('upstream');
         await request.response.close();
       } catch (_) {
@@ -104,6 +108,10 @@ class _MockUpstream {
 
   /// キューからの送信に返すステータスコードを、本文から決める。
   int Function(String body) replayStatusFor = (_) => HttpStatus.ok;
+
+  /// キューからの送信の応答に付ける `Set-Cookie` を、本文から決める。
+  /// `null` を返した場合は付けない。
+  String? Function(String body) replaySetCookieFor = (_) => null;
 
   /// ログインの応答本文の `ok` に入れる値。
   bool loginSucceeds = true;
@@ -1936,6 +1944,255 @@ void main() {
         );
         expect((await proxy.getStats()).queuePausedReason,
             equals(QueuePauseReason.ownerUnresolved));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+  });
+
+  group('キューの応答の Set-Cookie（doc/specs.ja.md 【5】キューの応答の Set-Cookie）', () {
+    /// 応答の `Set-Cookie` を保存しなかったことを知らせたイベントの、理由と
+    /// Cookie 名を発行順に返す。
+    List<(Object?, Object?)> skippedCookieSaves() => events
+        .where((event) =>
+            event.type == ProxyEventType.errorOccurred &&
+            event.data['operation'] == 'cookieSave')
+        .map((event) => (event.data['reason'], event.data['cookieName']))
+        .toList();
+
+    /// 再送の応答の `Set-Cookie` を判定する直前で止める proxy に差し替える。
+    ///
+    /// [reached] 止めたときに完了する。
+    /// [release] 完了すると判定を続ける。
+    Future<void> useProxyPausedBeforeCookieStore(
+      Completer<void> reached,
+      Completer<void> release,
+    ) async {
+      proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(
+          beforeQueuedResponseCookiesStored: () async {
+            if (!reached.isCompleted) {
+              reached.complete();
+              await release.future;
+            }
+          },
+        ),
+      ));
+      await subscription?.cancel();
+      subscription = proxy.events.listen(events.add);
+    }
+
+    /// 再送の応答で上流がセッションを作り直した場合は、Cookie Jar へ保存し、
+    /// 次の要求で新しい Cookie を送ること
+    for (final withResolver in [true, false]) {
+      test('stores Set-Cookie of a resend (resolver: $withResolver)', () async {
+        await withRealHttpClient(() async {
+          upstream.replaySetCookieFor =
+              (body) => body == 'photo' ? 'session=renewed; Path=/' : null;
+          final port = await startProxy(
+            resolver: withResolver ? _resolveAccount : null,
+          );
+          await signIn(port, 'alice');
+          await enqueue(port, ['photo', 'vehicle']);
+
+          await _waitUntil(
+              () async => (await proxy.getQueuedRequests()).isEmpty);
+          expect(upstream.replays.map((replay) => replay.body),
+              equals(['photo', 'vehicle']));
+          expect(upstream.replays.first.cookie, contains('session=alice'));
+          expect(upstream.replays.last.cookie, contains('session=renewed'));
+          expect(await proxy.getCookieHeaderForUrl('${upstream.origin}/'),
+              equals('session=renewed'));
+          expect(skippedCookieSaves(), isEmpty);
+        });
+      }, timeout: const Timeout(Duration(seconds: 120)));
+    }
+
+    /// 取り除く応答（4xx）と認証待ちの応答の `Set-Cookie` も保存すること
+    test('stores Set-Cookie of a rejected or unauthorized resend', () async {
+      await withRealHttpClient(() async {
+        upstream.replayStatusFor = (body) => body == 'photo'
+            ? HttpStatus.unprocessableEntity
+            : HttpStatus.unauthorized;
+        upstream.replaySetCookieFor = (body) => '$body=1; Path=/';
+        final port = await startProxy();
+        await signIn(port, 'alice');
+        await enqueue(port, ['photo', 'vehicle']);
+
+        await waitForPause();
+        expect(await proxy.getQuarantinedRequests(), hasLength(1));
+        final header = await proxy.getCookieHeaderForUrl('${upstream.origin}/');
+        expect(header, contains('photo=1'));
+        expect(header, contains('vehicle=1'));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 再送の応答も、通常の転送と同じ受け入れ規則で確かめること
+    test('applies the acceptance rules to a resend', () async {
+      await withRealHttpClient(() async {
+        // http の上流は Secure の Cookie を保存しない
+        upstream.replaySetCookieFor = (_) => 'renewed=1; Path=/; Secure';
+        final port = await startProxy();
+        await signIn(port, 'alice');
+        await enqueue(port, ['photo']);
+
+        await _waitUntil(() async => (await proxy.getQueuedRequests()).isEmpty);
+        await _waitUntil(() => skippedCookieSaves().isNotEmpty);
+        expect(skippedCookieSaves(), equals([('insecureSecure', 'renewed')]));
+        expect(await proxy.getCookieHeaderForUrl('${upstream.origin}/'),
+            equals('session=alice'));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 応答を待つ間にログインした場合は、前のセッションの Cookie で新しい
+    /// セッションを上書きしないこと
+    test('does not store Set-Cookie when a sign-in starts while waiting',
+        () async {
+      final reached = Completer<void>();
+      final release = Completer<void>();
+      await useProxyPausedBeforeCookieStore(reached, release);
+
+      await withRealHttpClient(() async {
+        upstream.replaySetCookieFor = (_) => 'session=stale; Path=/';
+        final port = await startProxy();
+        await signIn(port, 'alice');
+        await enqueue(port, ['photo']);
+        await reached.future;
+
+        await signIn(port, 'bob');
+        release.complete();
+
+        await _waitUntil(() => skippedCookieSaves().isNotEmpty);
+        expect(skippedCookieSaves(), equals([('signInInProgress', 'session')]));
+        expect(await proxy.getCookieHeaderForUrl('${upstream.origin}/'),
+            equals('session=bob'));
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// 応答を待つ間に Cookie Jar を作り直した場合は、前のセッションの Cookie
+    /// を書き戻さないこと（判定関数の有無を問わない）
+    for (final withResolver in [true, false]) {
+      for (final operation in ['clearCookies', 'restoreCookies']) {
+        test(
+            'does not store Set-Cookie after $operation '
+            '(resolver: $withResolver)', () async {
+          final reached = Completer<void>();
+          final release = Completer<void>();
+          await useProxyPausedBeforeCookieStore(reached, release);
+
+          await withRealHttpClient(() async {
+            upstream.replaySetCookieFor = (_) => 'session=stale; Path=/';
+            final port = await startProxy(
+              resolver: withResolver ? _resolveAccount : null,
+            );
+            await signIn(port, 'alice');
+            await enqueue(port, ['photo']);
+            await reached.future;
+
+            if (operation == 'clearCookies') {
+              await proxy.clearCookies();
+            } else {
+              await proxy.restoreCookies([
+                CookieRestoreEntry.fromSetCookieHeader(
+                  setCookieHeader: 'session=restored; Path=/',
+                  requestUrl: '${upstream.origin}/',
+                ),
+              ]);
+            }
+            release.complete();
+
+            await _waitUntil(() => skippedCookieSaves().isNotEmpty);
+            expect(
+                skippedCookieSaves(), equals([('cookieJarReset', 'session')]));
+            expect(
+                await proxy.getCookieHeaderForUrl('${upstream.origin}/'),
+                operation == 'clearCookies'
+                    ? isNull
+                    : equals('session=restored'));
+          });
+        }, timeout: const Timeout(Duration(seconds: 120)));
+      }
+    }
+
+    /// clearCookies() の実行中に送り始めた再送も、削除前の Cookie で送った
+    /// ため、応答の Cookie を書き戻さないこと
+    test('does not store Set-Cookie of a resend started during clearCookies',
+        () async {
+      final reachedClear = Completer<void>();
+      final releaseClear = Completer<void>();
+      final reachedStore = Completer<void>();
+      final releaseStore = Completer<void>();
+      var blockClear = false;
+      proxy = trackAccessToken(OfflineWebProxy.withStorageTestHooks(
+        ProxyStorageTestHooks(
+          beforeCookieStoreChanged: () async {
+            if (blockClear && !reachedClear.isCompleted) {
+              reachedClear.complete();
+              await releaseClear.future;
+            }
+          },
+          beforeQueuedResponseCookiesStored: () async {
+            if (!reachedStore.isCompleted) {
+              reachedStore.complete();
+              await releaseStore.future;
+            }
+          },
+        ),
+      ));
+      await subscription?.cancel();
+      subscription = proxy.events.listen(events.add);
+
+      await withRealHttpClient(() async {
+        upstream.replaySetCookieFor = (_) => 'session=stale; Path=/';
+        final port = await startProxy(resolver: null);
+        await signIn(port, 'alice');
+
+        // 削除を途中で止めてから、要求をキューへ入れて再送させる
+        blockClear = true;
+        final clearing = proxy.clearCookies();
+        await reachedClear.future;
+        await enqueue(port, ['photo']);
+        await reachedStore.future;
+        expect(upstream.replays.single.cookie, contains('session=alice'));
+
+        releaseClear.complete();
+        await clearing;
+        releaseStore.complete();
+
+        await _waitUntil(() => skippedCookieSaves().isNotEmpty);
+        expect(skippedCookieSaves(), equals([('cookieJarReset', 'session')]));
+        expect(
+            await proxy.getCookieHeaderForUrl('${upstream.origin}/'), isNull);
+      });
+    }, timeout: const Timeout(Duration(seconds: 120)));
+
+    /// Cookie の保存を待つ間に停止しても、上流へ届いた要求を次の起動で
+    /// 送り直さないこと
+    test('records the idempotency key before saving the cookies', () async {
+      final reachedStore = Completer<void>();
+      final releaseStore = Completer<void>();
+      await useProxyPausedBeforeCookieStore(reachedStore, releaseStore);
+
+      await withRealHttpClient(() async {
+        upstream.replaySetCookieFor = (_) => 'session=renewed; Path=/';
+        final port = await startProxy();
+        await signIn(port, 'alice');
+        await enqueue(port, ['photo']);
+        await reachedStore.future;
+
+        final stopping = proxy.stop();
+        // 停止が進んでから保存を続けさせる
+        await _waitUntil(() => !proxy.isRunning);
+        expect(proxy.isRunning, isFalse);
+        releaseStore.complete();
+        await stopping;
+
+        await startProxy();
+        await Future<void>.delayed(const Duration(seconds: 6));
+        expect(upstream.replays, hasLength(1));
+        expect(await proxy.getQueuedRequests(), isEmpty);
+        // 停止の後は保存しないため、前の Cookie が残ること（停止の経路を
+        // 通ったことの確認）
+        expect(await proxy.getCookieHeaderForUrl('${upstream.origin}/'),
+            equals('session=alice'));
       });
     }, timeout: const Timeout(Duration(seconds: 120)));
   });

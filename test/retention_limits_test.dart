@@ -1690,6 +1690,13 @@ void main() {
         // 止まらずにキューを消化し終える
         expect(drained, isTrue, reason: 'キューが時間内に空になりませんでした');
 
+        // 最後の 1 件の隔離による追い出しは、キューから消した後に記録・通知
+        // するため、届くまで待つ
+        await _waitUntil(() async =>
+            events.where((e) => e.data['dropReason'] == _limitReason).length >=
+            itemCount - 1);
+        await pumpEventQueue();
+
         final evicted =
             events.where((e) => e.data['dropReason'] == _limitReason).length;
         final history = await proxy.getDroppedRequests();
