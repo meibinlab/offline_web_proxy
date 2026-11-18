@@ -92,6 +92,7 @@
   &#47;&#47; 同時に呼ばれた stop() がすべて終わるまで下ろさない
   _pendingStopCount++;
   _isStopping = true;
+  _stopGeneration++;
 
   &#47;&#47; 復旧処理と同時に実行されないよう排他制御する
   try {
