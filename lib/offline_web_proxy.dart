@@ -889,6 +889,20 @@ class OfflineWebProxy {
   /// 持ち主を決めずに一時停止する。
   int _outOfLockCookieWriteGeneration = 0;
 
+  /// [clearCookies] と [restoreCookies] で Cookie Jar を作り直し始めた回数。
+  ///
+  /// キューから送った要求の応答の `Set-Cookie` を保存する前に、送信を
+  /// 始めたときの値と比べる。変わっていれば、作り直す前のセッションの
+  /// Cookie のため保存しない。
+  int _cookieJarResetGeneration = 0;
+
+  /// [stop] を呼んだ回数。
+  ///
+  /// キューから送った要求の応答の `Set-Cookie` を保存する前に、送信を
+  /// 始めたときの値と比べる。変わっていれば、停止の後に起動し直していても
+  /// 保存しない。閉じた保存領域を開き直して書かないため。
+  int _stopGeneration = 0;
+
   /// 段階 1 で読み込んだ持ち主の記録が信頼できなかったかどうか。
   ///
   /// タグが合わない場合などに `true` にし、[start] で
@@ -1529,6 +1543,7 @@ class OfflineWebProxy {
     // 同時に呼ばれた stop() がすべて終わるまで下ろさない
     _pendingStopCount++;
     _isStopping = true;
+    _stopGeneration++;
 
     // 復旧処理と同時に実行されないよう排他制御する
     try {
@@ -4028,6 +4043,10 @@ class OfflineWebProxy {
   /// 保存するだけで、[queueOwnerId] は使いません。持ち主を使う場合は、
   /// [start] の後に呼び出してください。
   ///
+  /// 呼び出す前にキューから送り始めた要求の応答の `Set-Cookie` は、判定
+  /// 関数の有無を問わず保存しません（doc/specs.ja.md【5】の「キューの応答の
+  /// Set-Cookie」）。
+  ///
   /// [entries] 復元対象の Cookie 一覧。
   /// [queueOwnerId] 復元するセッションの利用者の識別子。
   ///   [ProxyConfig.queueOwnerResolver] が返す値と同じ形にしてください。
@@ -4037,6 +4056,31 @@ class OfflineWebProxy {
   ///   * [CookieOperationException] Cookie の復元に失敗した場合。暗号化した
   ///     保存領域を使えない場合は、[StorageIntegrityException] を cause に持ちます。
   Future<void> restoreCookies(
+    Iterable<CookieRestoreEntry> entries, {
+    String? queueOwnerId,
+  }) async {
+    // 応答を待っているキューの再送が、前のセッションの Cookie を書き戻さない
+    // よう、書き換える前と後に知らせる。復元の途中で送り始めた再送も、
+    // 復元前の Cookie で送った可能性があるため
+    _cookieJarResetGeneration++;
+    try {
+      await _restoreCookieJar(entries, queueOwnerId: queueOwnerId);
+    } finally {
+      _cookieJarResetGeneration++;
+    }
+  }
+
+  /// [restoreCookies] の本体です。Cookie を Cookie Jar へ保存し、
+  /// [ProxyConfig.queueOwnerResolver] を指定している場合は持ち主を決めます。
+  ///
+  /// [entries] 復元対象の Cookie 一覧。
+  /// [queueOwnerId] 復元するセッションの利用者の識別子。
+  ///
+  /// Returns: 保存し終えると完了する Future。
+  ///
+  /// Throws:
+  ///   * [CookieOperationException] Cookie の復元に失敗した場合。
+  Future<void> _restoreCookieJar(
     Iterable<CookieRestoreEntry> entries, {
     String? queueOwnerId,
   }) async {
@@ -4204,18 +4248,27 @@ class OfflineWebProxy {
   /// 捨てません（doc/specs.ja.md【5】の「送信待ちの持ち主」）。削除に失敗
   /// した場合も、一部を削除した可能性があるため一時停止します。
   ///
+  /// 呼び出す前にキューから送り始めた要求の応答の `Set-Cookie` は、判定
+  /// 関数の有無を問わず保存しません（doc/specs.ja.md【5】の「キューの応答の
+  /// Set-Cookie」）。
+  ///
   /// [domain] 特定ドメインのCookieのみを削除したい場合に指定。省略時は全Cookieを削除。
   ///
   /// Throws:
   ///   * [CookieOperationException] Cookieの削除に失敗した場合。暗号化した
   ///     保存領域を使えない場合は、[StorageIntegrityException] を cause に持ちます。
   Future<void> clearCookies({String? domain}) async {
+    // 応答を待っているキューの再送が、削除した Cookie を書き戻さないよう、
+    // 削除する前に知らせる
+    _cookieJarResetGeneration++;
     // 設定済み origin のセッションが変わる場合は、送信待ちの持ち主が分からなくなる
     final changesOriginSession = _config?.queueOwnerResolver != null &&
         (domain == null || _isCookieDomainForConfiguredOrigin(domain));
     try {
       await _clearCookieRecords(domain);
     } finally {
+      // 削除の途中で送り始めた再送も、削除前の Cookie で送った可能性がある
+      _cookieJarResetGeneration++;
       if (changesOriginSession) {
         await _pauseQueueForUnresolvedOwner();
       }
@@ -10664,18 +10717,37 @@ window.__offline_web_proxy_web_storage_bridge = {
   /// [fromMirroredOrigin] 設定済み origin 以外（中継先）の応答の場合は `true`。
   ///   `true` の場合、設定済み origin のホストへ送られる範囲の Cookie を
   ///   保存しません。
+  /// [skipReason] 指定した場合、`Set-Cookie` を 1 件保存する前に呼び出し、
+  ///   `null` 以外を返したら保存せず、その値を `reason` に、Cookie 名を
+  ///   `cookieName` に載せて知らせます。保存してよいかを 1 件ごとに判定し
+  ///   直す場合に使います。
+  /// [abort] 指定した場合、`Set-Cookie` を 1 件保存する前に呼び出し、
+  ///   `true` を返したら残りを保存せず、知らせもせずに打ち切ります。
+  ///   停止が始まった後に、閉じた保存領域を開き直して書かないために使います。
   ///
-  /// Returns: すべての `Set-Cookie` を処理し終えると完了する Future。
+  /// Returns: すべての `Set-Cookie` を処理し終えるか、打ち切ると完了する
+  ///   Future。
   Future<void> _storeResponseCookies({
     required Uri requestUri,
     required List<String> setCookieHeaders,
     required bool fromMirroredOrigin,
+    String? Function()? skipReason,
+    bool Function()? abort,
   }) async {
     if (setCookieHeaders.isEmpty) {
       return;
     }
 
     final eventUrl = requestUri.toString();
+    if (abort?.call() ?? false) {
+      return;
+    }
+    final initialSkipReason = skipReason?.call();
+    if (initialSkipReason != null) {
+      // 保存しない場合は、保存領域を開かずに知らせる
+      _emitSkippedCookieSaves(eventUrl, setCookieHeaders, initialSkipReason);
+      return;
+    }
     try {
       await _ensureCookieStorageInitialized();
     } catch (e) {
@@ -10692,6 +10764,16 @@ window.__offline_web_proxy_web_storage_bridge = {
     final isInsecureResponse = requestUri.scheme.toLowerCase() != 'https';
     final configuredOriginHost = _configuredOriginUri?.host;
     for (final setCookieHeader in setCookieHeaders) {
+      if (abort?.call() ?? false) {
+        return;
+      }
+      // 前の Cookie を保存する間に Cookie Jar が作り直された場合は、残りを
+      // 保存しない
+      final reason = skipReason?.call();
+      if (reason != null) {
+        _emitSkippedCookieSaves(eventUrl, [setCookieHeader], reason);
+        continue;
+      }
       try {
         final cookieRecord = CookieRecord.fromSetCookieHeader(
           setCookieHeader: setCookieHeader,
@@ -10719,6 +10801,32 @@ window.__offline_web_proxy_web_storage_bridge = {
           'reason': cookieSaveFailureReason(e),
         });
       }
+    }
+  }
+
+  /// 保存しなかった `Set-Cookie` を、1 件ずつ `errorOccurred`
+  /// （`operation: cookieSave`）で知らせます。
+  ///
+  /// Cookie の値は載せず、名前だけを `cookieName` に載せます。
+  ///
+  /// [eventUrl] イベントに載せる要求先。
+  /// [setCookieHeaders] 保存しなかった `Set-Cookie` の値の一覧。
+  /// [reason] 保存しなかった理由の区分。
+  void _emitSkippedCookieSaves(
+    String eventUrl,
+    List<String> setCookieHeaders,
+    String reason,
+  ) {
+    for (final setCookieHeader in setCookieHeaders) {
+      // 値を解釈せずに、最初の `;` より前の `=` より前を名前とみなす
+      final nameValue = setCookieHeader.split(';').first;
+      final separator = nameValue.indexOf('=');
+      _emitEvent(ProxyEventType.errorOccurred, eventUrl, {
+        'operation': 'cookieSave',
+        'reason': reason,
+        'cookieName':
+            separator < 0 ? '' : nameValue.substring(0, separator).trim(),
+      });
     }
   }
 
@@ -13350,6 +13458,127 @@ window.__offline_web_proxy_web_storage_bridge = {
         itemOwner != currentOwner;
   }
 
+  /// [stopGeneration] の時点より後に [stop] を始めたか、停止しているか
+  /// どうかを返します。
+  ///
+  /// [stopGeneration] 判定の基準にする [_stopGeneration]。
+  ///
+  /// Returns: 停止の途中か停止している場合と、その後に起動し直した場合は
+  ///   `true`。
+  bool _isStoppedSince(int stopGeneration) =>
+      _isStopping ||
+      _isClosingStorage ||
+      !_isRunning ||
+      _stopGeneration != stopGeneration;
+
+  /// キューから送った要求の応答の `Set-Cookie` を Cookie Jar へ保存します。
+  ///
+  /// 受け入れ規則は通常の転送と同じです（[_storeResponseCookies]）。送信先は
+  /// 設定済み origin に限るため、中継先の応答としては扱いません。
+  ///
+  /// 次の場合は保存せず、`Set-Cookie` ごとに `errorOccurred`
+  /// （`operation: cookieSave`）で知らせます。送信を始めた時点のセッションの
+  /// Cookie で、その後の Cookie Jar を書き換えないためです。
+  ///
+  /// * 送信を始めた後に [clearCookies] か [restoreCookies] が呼ばれた場合
+  ///   （`reason: cookieJarReset`）。
+  /// * [ProxyConfig.queueOwnerResolver] を設定していて、送信を始めた後に
+  ///   ログインの転送が始まったか、まだ終わっていない場合
+  ///   （`reason: signInInProgress`）。ログインとの順番待ち
+  ///   （[_queueOwnerLock]）を上限時間内に取得できない場合も同じです。
+  /// * [ProxyConfig.queueOwnerResolver] を設定していて、要求の持ち主が
+  ///   現在の持ち主と違う場合（`reason: queueOwnerChanged`）。
+  ///
+  /// 送信を始めた後に [stop] を呼んだ場合は、起動し直した後も含めて保存せず、
+  /// 知らせもしません（[_stopGeneration] で判定します）。順番待ちを待つ前、
+  /// 取得した後、1 件ごとの保存の前に確かめます。閉じた保存領域を開き直して
+  /// 書かないためです。
+  ///
+  /// 保存しないと決まっている場合は、順番待ちを待たずに知らせます。
+  ///
+  /// 順番待ちを取得できない場合の扱いは、防御のためのものです。ログインと
+  /// [restoreCookies] は順番待ちを持つ間ずっと `signInInProgress` か
+  /// `cookieJarReset` に当たるため、通常は順番待ちを待つ前の判定で保存しない
+  /// と決まります。
+  ///
+  /// [data] 送った要求のキューデータ。
+  /// [requestUri] 送った要求の送信先。
+  /// [setCookieHeaders] 上流が返した `Set-Cookie` の値の一覧。
+  /// [queueOwnerGateGeneration] 送信を始めたときの
+  ///   [_queueOwnerGateGeneration]。
+  /// [cookieJarResetGeneration] 送信を始めたときの
+  ///   [_cookieJarResetGeneration]。
+  /// [stopGeneration] 送信を始めたときの [_stopGeneration]。
+  ///
+  /// Returns: すべての `Set-Cookie` を処理し終えると完了する Future。
+  Future<void> _storeQueuedResponseCookies(
+    Map data, {
+    required Uri requestUri,
+    required List<String> setCookieHeaders,
+    required int queueOwnerGateGeneration,
+    required int cookieJarResetGeneration,
+    required int stopGeneration,
+  }) async {
+    if (setCookieHeaders.isEmpty || _isStoppedSince(stopGeneration)) {
+      return;
+    }
+    await _storageTestHooks?.beforeQueuedResponseCookiesStored?.call();
+    if (_isStoppedSince(stopGeneration)) {
+      return;
+    }
+
+    final usesQueueOwner = _config?.queueOwnerResolver != null;
+
+    /// 保存しない理由を返す。保存する場合は `null`。
+    String? skipReason() {
+      if (_cookieJarResetGeneration != cookieJarResetGeneration) {
+        return cookieSaveReasonCookieJarReset;
+      }
+      if (usesQueueOwner &&
+          _isQueueOwnerGateRaisedSince(queueOwnerGateGeneration)) {
+        return cookieSaveReasonSignInInProgress;
+      }
+      if (_isQueueOwnerChanged(data)) {
+        return cookieSaveReasonQueueOwnerChanged;
+      }
+      return null;
+    }
+
+    Future<void> store(String? Function() reason) => _storeResponseCookies(
+          requestUri: requestUri,
+          setCookieHeaders: setCookieHeaders,
+          fromMirroredOrigin: false,
+          skipReason: reason,
+          // 保存の途中で停止が始まった場合は、残りを知らせずに打ち切る
+          abort: () => _isStoppedSince(stopGeneration),
+        );
+
+    // 保存しないと決まっている場合は、順番待ちを待たずに知らせる
+    if (!usesQueueOwner || skipReason() != null) {
+      await store(skipReason);
+      return;
+    }
+
+    // ログインの Cookie の保存と持ち主の決定の間に割り込まないよう、同じ
+    // 順番待ちの中で判定して保存する
+    try {
+      await _queueOwnerLock.synchronized(
+        () async {
+          // 待つ間に停止が始まった場合は、閉じる保存領域へ書かない
+          if (_isStoppedSince(stopGeneration)) {
+            return;
+          }
+          await store(skipReason);
+        },
+        timeout: _storageLockTimeout,
+      );
+    } on TimeoutException {
+      // 順番待ちを持つログインや復元が終わらないため、前のセッションの
+      // Cookie とみなして保存しない
+      await store(() => skipReason() ?? cookieSaveReasonSignInInProgress);
+    }
+  }
+
   /// キューされたリクエストを上流サーバに送信します。
   ///
   /// キューデータからHTTPリクエストを再構築し、
@@ -13432,6 +13661,11 @@ window.__offline_web_proxy_web_storage_bridge = {
     }
 
     final client = _getOrCreateHttpClient();
+
+    // 応答を待つ間に Cookie Jar が作り直されたかを、応答の Set-Cookie を
+    // 保存する前に判定するため控える
+    final cookieJarResetGeneration = _cookieJarResetGeneration;
+    final stopGeneration = _stopGeneration;
 
     // 転送と同じく、再送 1 回あたりの待ち時間を締め切りで抑える
     final deadline =
@@ -13537,13 +13771,30 @@ window.__offline_web_proxy_web_storage_bridge = {
       }
 
       // 2xx と 303 を成功とみなす（認証が必要として指定した状態コードを除く）
-      if ((statusCode >= 200 && statusCode < 300 ||
+      final succeeded = (statusCode >= 200 && statusCode < 300 ||
               statusCode == HttpStatus.seeOther) &&
-          !_isAuthRequiredStatusCode(statusCode)) {
-        if (idempotencyKey != null) {
-          await _recordIdempotencyKey(idempotencyKey);
-        }
+          !_isAuthRequiredStatusCode(statusCode);
 
+      // 上流へ届いたことは、Cookie の保存を待たずに記録する。保存の順番待ちの
+      // 間に停止しても、次の起動で送り直さないため
+      if (succeeded && idempotencyKey != null) {
+        await _recordIdempotencyKey(idempotencyKey);
+      }
+
+      // 通常の転送と同じく、応答の Set-Cookie を Cookie Jar へ保存する。
+      // 上流がセッションを作り直した場合に、次の要求で新しい Cookie を送る
+      await _storeQueuedResponseCookies(
+        data,
+        requestUri: uri,
+        setCookieHeaders: ResponseHeaderSnapshot.fromHttpHeaders(
+          response.headers,
+        ).setCookieHeaders,
+        queueOwnerGateGeneration: queueOwnerGateGeneration,
+        cookieJarResetGeneration: cookieJarResetGeneration,
+        stopGeneration: stopGeneration,
+      );
+
+      if (succeeded) {
         return (
           success: true,
           shouldDrop: false,

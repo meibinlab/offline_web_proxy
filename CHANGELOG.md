@@ -1,8 +1,13 @@
 ## Unreleased
 
+### 修正
+
+- **キューから送った要求の応答の `Set-Cookie` を、Cookie Jar へ保存するようにしました**（0.26.0 までは保存していませんでした）: 上流が再送の応答でセッションを作り直しても、後続の要求で新しい Cookie を送ります。受け入れ規則は通常の転送と同じです。送信を始めた時点のセッションの Cookie で、その後の Cookie Jar を書き換えないため、再送の応答を待つ間に `clearCookies()` か `restoreCookies()` を呼んだ場合（`reason: cookieJarReset`）と、`queueOwnerResolver` を設定していて、その間にログインの転送が始まった場合（`signInInProgress`）や持ち主が変わった場合（`queueOwnerChanged`）は保存せず、`errorOccurred`（`operation: cookieSave`）の `reason` と `cookieName` で知らせます（仕様書【5】の「キューの応答の Set-Cookie」）
+
 ### テスト
 
 - 隔離・ドロップ履歴やキューが空になることの一方だけを待ち、直後にキューが空であることや状態の照会・ドロップの通知などを確かめていたテストで、キューからの削除や隔離からの追い出しより先に判定して失敗することがあったため、両方の条件がそろうまで待つようにしました（`test/quarantine_response_preview_test.dart`、`test/request_status_test.dart`、`test/resource_limits_test.dart`、`test/retention_limits_test.dart`、`test/encrypted_storage_migration_test.dart`、`test/integration_test.dart`）
+- キュー消化中に acknowledge を繰り返すテスト（`test/retention_limits_test.dart` の `keeps acknowledgements while quarantining from the queue`）で、キューが空になった直後に件数上限による追い出しの通知を数え、最後の 1 件の通知より先に判定して失敗することがあったため、通知が届くまで待つようにしました
 
 ## 0.26.0
 

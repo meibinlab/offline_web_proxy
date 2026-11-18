@@ -581,7 +581,7 @@ Cookies are evaluated following RFC 6265.
 
 #### Acceptance Rules for Upstream Set-Cookie
 
-A `Set-Cookie` in an upstream response (the configured origin, a relayed origin of `mirroredOrigins`, or a warm-up) is checked against the following rules (RFC 6265 and RFC 6265bis) before it is saved to the Cookie Jar, and is not saved when it breaks one. The `Set-Cookie` in the response returned to the WebView is not affected by these rules.
+A `Set-Cookie` in an upstream response (the configured origin, a relayed origin of `mirroredOrigins`, a warm-up, or a request sent from the queue) is checked against the following rules (RFC 6265 and RFC 6265bis) before it is saved to the Cookie Jar, and is not saved when it breaks one. The `Set-Cookie` in the response returned to the WebView is not affected by these rules.
 
 | `reason` | Not saved when |
 | --- | --- |
@@ -598,6 +598,7 @@ A `Set-Cookie` in an upstream response (the configured origin, a relayed origin 
 - This is a simplified check that does not use the Public Suffix List. A cookie whose `Domain` is a multi-label public suffix such as `co.jp` is accepted when the request host domain-matches it
 - A cookie that is not saved is reported with `errorOccurred` (`operation: cookieSave`) carrying a value from the table in `reason` and the cookie name in `cookieName`. The cookie value is never included
 - A `Set-Cookie` that cannot be parsed (`reason: invalidSetCookie`) and a cookie that cannot be saved because the storage is unavailable (`reason: storageFailure`) are not saved either, and are reported with `errorOccurred` (`operation: cookieSave`) carrying the exception type in `error`. In every case the request continues and the upstream response is returned to the WebView
+- A response to a request sent from the queue is also not saved in some further cases, such as when the Cookie Jar was rebuilt while waiting ("Set-Cookie in Queue Responses" in [5])
 - Cookies passed to `restoreCookies()` are values from the app and are not subject to these rules. `CookieRestoreEntry.fromSetCookieHeader()` also takes the attributes as they are
 
 ### Management Methods
@@ -615,7 +616,7 @@ Provides methods for cookie management. See [20] API Reference for details.
 - **Stored Order**: Resend in ascending order of the stored timestamp to preserve request order
 - **Unique Keys**: Derive keys from a microsecond timestamp plus a per-microsecond sequence number so that requests stored at the same moment are never overwritten
 - **Persistence**: Save queue state in an encrypted Hive box (`proxy_queue_secure`). Continue resending after app restart (see "Encrypted Storage")
-- **Cookies in the Stored Headers**: Of the `Cookie` header the WebView sent, only the names in `ProxyConfig.forwardWebViewCookieNames` are stored. When none remain, the `Cookie` header is not stored at all. A resend filters with the same setting at the time it is sent, so even a request stored by 0.25.0 or earlier with every WebView cookie does not send an unlisted one. The Cookie Jar at the time of the resend takes precedence ("Cookie Header" in [14])
+- **Cookies in the Stored Headers**: Of the `Cookie` header the WebView sent, only the names in `ProxyConfig.forwardWebViewCookieNames` are stored. When none remain, the `Cookie` header is not stored at all. A resend filters with the same setting at the time it is sent, so even a request stored by 0.25.0 or earlier with every WebView cookie does not send an unlisted one. The Cookie Jar at the time of the resend takes precedence ("Cookie Header" in [14]). The `Set-Cookie` of a resend response is saved to the Cookie Jar ("Set-Cookie in Queue Responses")
 - **Backoff Handling**: Skip requests that are still waiting for their backoff window and send the following requests whose window has already passed, except while the queue is held after a 429 or paused for a sign-in ("Retry Strategy", "Pausing on an Authentication-Required Answer")
 - **Connection Release**: A resend always reads the upstream response body to completion and releases the connection before moving on, so a queue larger than the concurrent connection limit still drains to the end
 - **When Quarantine Fails**: If the request cannot be moved to the quarantine store, it stays in the queue and is retried with backoff applied (except a request that alone exceeds `quarantineMaxBytes`; see "Retention Limits")
@@ -690,7 +691,7 @@ A status code listed in `ProxyConfig.authRequiredStatusCodes` pauses sending fro
 - **State**: `ProxyStats.queuePausedReason` and `queuePausedReason` in the status endpoint become `authenticationRequired`. A status query by key keeps answering `queued`
 - **Resuming**:
   - When `resumeQueue()` is called
-  - When a request matching `ProxyConfig.authResumePaths` passes through the proxy and the upstream answers 2xx or 3xx, whatever the method. Paths relayed to `mirroredOrigins` are not matched. A 3xx counts because a sign-in form usually redirects after it succeeds. The queue resumes after the `Set-Cookie` of that response is stored in the cookie jar, so the queued requests are sent with the new session (a resend takes its cookies from the jar at the time it is sent). Patterns follow "Path Pattern Notation Used by Configuration" in [1]
+  - When a request matching `ProxyConfig.authResumePaths` passes through the proxy and the upstream answers 2xx or 3xx, whatever the method. Paths relayed to `mirroredOrigins` are not matched. A 3xx counts because a sign-in form usually redirects after it succeeds. The queue resumes after the `Set-Cookie` of that response is stored in the cookie jar, so the queued requests are sent with the new session (a resend takes its cookies from the jar at the time it is sent; for the `Set-Cookie` of a resend response, see "Set-Cookie in Queue Responses"). Patterns follow "Path Pattern Notation Used by Configuration" in [1]
   - Either way sending starts without waiting for the next periodic pass. While another operation is working on the queue, the next periodic pass (every 5 seconds) sends instead
 - **Pausing again**: If the same request is answered with a listed code again after resuming, the queue pauses again; it is not resent automatically. A failed sign-in answered with 2xx (an error in the body) also resumes the queue, which then pauses again for the same reason
 - **Sign-in during a send**: When a resume trigger happens after a request has started to be sent, its answer is treated as one for the old session and does not pause the queue even with a listed code. The request stays in the queue and is sent with the new session at the next periodic pass. The later requests of the same pass are sent before it, as with a request waiting for its backoff
@@ -768,6 +769,25 @@ When the function throws, or the owner cannot be determined or saved, and likewi
 - Requests queued with a session signed in before this setting was introduced have no owner, so they are protected only after the next sign-in
 - The check depends on the identifier the function returns from the sign-in request and response. Keep the upstream's own checks as well
 - The current owner and the hold during a sign-in belong to each `OfflineWebProxy` instance. Cookies are shared across instances, so with several instances running at once, the queue of another instance may send requests of the previous owner with the new session; they are not protected ("Instances and Isolates" in [17])
+
+### Set-Cookie in Queue Responses
+
+The `Set-Cookie` of a response to a request sent from the queue is saved to the Cookie Jar, as for a normal forward, so that later requests carry the new cookie when the upstream renews the session in its answer to a resend.
+
+- **Scope**: Any status code (2xx, 303, a 4xx that removes the request, a response that pauses the queue for authentication, and a response that is retried). The destination is always the configured origin (`origin_changed` in "Owner of Queued Requests"), so the acceptance rules are applied as for a response of the configured origin ("Acceptance Rules for Upstream Set-Cookie" in [4]). Nothing is returned to the WebView
+- **When it is not saved**: To keep a cookie of the session the resend started with from rewriting the Cookie Jar that came after it, the cookie is not saved in the following cases. Each `Set-Cookie` is reported with `errorOccurred` (`operation: cookieSave`) carrying a value from the table in `reason` and the cookie name in `cookieName`. The checks run from the top
+
+| `reason` | When the cookie is not saved |
+| --- | --- |
+| `cookieJarReset` | `clearCookies()` or `restoreCookies()` was called after the resend started, or the resend started while one of them was running, with or without `queueOwnerResolver` |
+| `signInInProgress` | With `queueOwnerResolver` set, a sign-in (`authResumePaths`) started forwarding after the resend started, or is still being forwarded. This includes failing to take the turn shared with saving the cookies of a sign-in and deciding the owner within the same time limit as the storage lock |
+| `queueOwnerChanged` | With `queueOwnerResolver` set, the owner of the request differs from the owner at the time the response arrived |
+
+- **Ordering**: With `queueOwnerResolver` set, the check and the save run in the same turn as saving the cookies of a sign-in response and deciding the owner ("Owner of Queued Requests"), so a cookie of the previous session never slips in between the cookies of a sign-in and its owner
+- **Sign-in without a resolver**: Without `queueOwnerResolver`, the cookie is saved even when a sign-in happened while waiting, as for the response to a normal forward. Set `queueOwnerResolver` to keep a cookie of the previous session from overwriting the new one
+- **Recording success**: When a request carrying an idempotency key is answered with 2xx or 303, the key is recorded before the cookies are saved, so stopping while the save waits does not make the next start send the request again. A request without a key (`enableIdempotencyKey: false`) may still be sent again on the next start, as before
+- **While stopping**: When `stop()` is called after the resend started, nothing is saved, even after the proxy has started again. When stopping begins in the middle of saving, the rest is not saved. Neither is reported. The request is handled as in "Queue Management"
+- Up to 0.26.0, the `Set-Cookie` of a queue response was not saved
 
 ### Update Requests That Are Never Queued (queueExcludePaths)
 
@@ -1845,7 +1865,7 @@ Using several `OfflineWebProxy` instances at the same time in one app is not sup
 - The `externalUrl` of `redirectHandled` is always the full URL, query included, whatever the setting. For an external launch (`redirectAction: launchExternal`) the proxy answers the WebView with `204` only, so this value is the only way for the app to learn what to launch (a map search term, the `?subject=` of `mailto:`, the `?q=` of `geo:` and so on). **`externalUrl` is meant to be executed by the app and contains the query, so do not write it to logs**
 - The quarantine list of the admin endpoints (`enableAdminApi`, disabled by default) returns full URLs so that requests can be told apart
 - Forwarding to the upstream, the `Location` returned to WebView and the Dart API `recentResendResults` are not affected. The `recentResendResults` of the status endpoint always drops the query ("Status Endpoint" in [5])
-- When a cookie is not saved, `errorOccurred` (`operation: cookieSave`) carries, for a cookie breaking the acceptance rules, the reason for the rejection in `reason` ("Acceptance Rules for Upstream Set-Cookie" in [4]) and the cookie name in `cookieName`; for any other failure, the type of the exception in `error` and `invalidSetCookie` (the `Set-Cookie` could not be parsed) or `storageFailure` (including an unavailable storage) in `reason`. The `Set-Cookie` value (a session identifier, for example) is never included
+- When a cookie is not saved, `errorOccurred` (`operation: cookieSave`) carries, for a cookie breaking the acceptance rules, the reason for the rejection in `reason` ("Acceptance Rules for Upstream Set-Cookie" in [4]) and the cookie name in `cookieName`; for a queue response that is not saved, `cookieJarReset`, `signInInProgress` or `queueOwnerChanged` in `reason` ("Set-Cookie in Queue Responses" in [5]) and `cookieName`; for any other failure, the type of the exception in `error` and `invalidSetCookie` (the `Set-Cookie` could not be parsed) or `storageFailure` (including an unavailable storage) in `reason`. The `Set-Cookie` value (a session identifier, for example) is never included
 - For `errorOccurred` raised when path validation refuses a request (`phase: requestPath`), `ProxyEvent.url` also drops the query and fragment under the rule above
 - `cacheSkipped` (`reason: userScoped`, `ownerChanged`) and `cacheMiss` (`reason: ownerMismatch`) for user-scoped responses carry only `reason` in `data`, never the owner's HMAC, cookies or the value of `Authorization`
 - When a response cannot be stored in the cache, `errorOccurred` (`phase: cacheResponse`) likewise carries only the type of the exception in `error` and `storageFailure` in `reason`, never the message of the exception
@@ -3101,7 +3121,7 @@ For `errorOccurred` raised when a start cannot trust the owner record and pauses
 
 For `errorOccurred` raised when a request is not stored because the storage is unusable or the lock for adding to the queue cannot be acquired, `data` carries `phase` (`queueSave`) and `reason` (`storageUnavailable` or `lockTimeout`). `ProxyEvent.url` is the path of the request (without the query by default). The headers and body of the request are not included ("When storing fails" in [10]).
 
-For `errorOccurred` raised when a cookie from the upstream is not saved, `data` carries `operation` (`cookieSave`) and `reason`. For a cookie breaking the acceptance rules, `reason` carries the reason for the rejection (`domainMismatch`, `ipDomain`, `singleLabelDomain`, `mirroredOriginDomain`, `insecureSecure`, `hostPrefix`, `securePrefix` or `secureOverwrite`; "Acceptance Rules for Upstream Set-Cookie" in [4]) and `cookieName` the cookie name. For any other failure, `reason` carries `invalidSetCookie` or `storageFailure` (including an unavailable storage) and `error` the type of the exception. Neither the `Set-Cookie` value nor the message of the exception is included ("URLs in Events" in [18]).
+For `errorOccurred` raised when a cookie from the upstream is not saved, `data` carries `operation` (`cookieSave`) and `reason`. For a cookie breaking the acceptance rules, `reason` carries the reason for the rejection (`domainMismatch`, `ipDomain`, `singleLabelDomain`, `mirroredOriginDomain`, `insecureSecure`, `hostPrefix`, `securePrefix` or `secureOverwrite`; "Acceptance Rules for Upstream Set-Cookie" in [4]) and `cookieName` the cookie name. For a queue response that is not saved, `reason` carries `cookieJarReset`, `signInInProgress` or `queueOwnerChanged` ("Set-Cookie in Queue Responses" in [5]) and `cookieName` the cookie name. For any other failure, `reason` carries `invalidSetCookie` or `storageFailure` (including an unavailable storage) and `error` the type of the exception. Neither the `Set-Cookie` value nor the message of the exception is included ("URLs in Events" in [18]).
 
 For `errorOccurred` raised by the legacy plain box migration and the retention limits, `data` carries `operation` (`legacyStorageDelete` or `legacyStorageMigration` for the migration, `retentionLimit` for the retention limits) and `error`. With `legacyStorageDelete`, `box` holds the name of the legacy plain box.
 

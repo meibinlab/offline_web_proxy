@@ -18,6 +18,23 @@ const String storageFailureEventReason = 'storageFailure';
 /// `Set-Cookie` を解釈できなかったことを表す区分です。
 const String cookieSaveReasonInvalidSetCookie = 'invalidSetCookie';
 
+/// キューから送った要求の応答を待つ間に、`clearCookies()` か
+/// `restoreCookies()` で Cookie Jar が作り直されたため保存しなかったことを
+/// 表す区分です。
+const String cookieSaveReasonCookieJarReset = 'cookieJarReset';
+
+/// キューから送った要求の応答を待つ間に、ログインの転送が始まったか
+/// 転送中のため、またはログインとの順番待ちを上限時間内に取得できなかった
+/// ため保存しなかったことを表す区分です。
+///
+/// 前のセッションの Cookie で、新しいセッションの Cookie を上書きしない
+/// ために保存しません。
+const String cookieSaveReasonSignInInProgress = 'signInInProgress';
+
+/// キューから送った要求の持ち主が、応答を受け取った時点の持ち主と違う
+/// ため保存しなかったことを表す区分です。
+const String cookieSaveReasonQueueOwnerChanged = 'queueOwnerChanged';
+
 /// 保存領域の失敗など、解釈以外で保存できなかったことを表す区分です。
 const String cookieSaveReasonStorageFailure = storageFailureEventReason;
 
